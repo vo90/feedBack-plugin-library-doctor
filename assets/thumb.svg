@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="Library Health">
+  <rect width="256" height="256" rx="44" fill="#111b2e"/>
+  <path d="M49 58h66c13 0 23 10 23 23v122c-7-8-17-12-29-12H49V58Z" fill="#1d4f8f" stroke="#69a9ff" stroke-width="8" stroke-linejoin="round"/>
+  <path d="M207 58h-66c-13 0-23 10-23 23v122c7-8 17-12 29-12h60V58Z" fill="#173a66" stroke="#69a9ff" stroke-width="8" stroke-linejoin="round"/>
+  <path d="m151 123 17 17 34-40" fill="none" stroke="#55d6a5" stroke-width="13" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

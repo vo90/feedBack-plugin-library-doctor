@@ -1,0 +1,3 @@
+# FeedBack already provides FastAPI and PyYAML. JSON Schema validation is the
+# only runtime dependency beyond the documented host environment.
+jsonschema>=4.18,<5

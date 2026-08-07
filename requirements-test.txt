@@ -1,0 +1,6 @@
+-r requirements.txt
+fastapi>=0.110
+httpx>=0.27,<0.29
+httpx2>=2.0
+pytest>=8
+PyYAML>=6,<7

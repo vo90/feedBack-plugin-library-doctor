@@ -1,0 +1,14 @@
+{
+  "id": "library_health",
+  "name": "Library Health",
+  "version": "0.4.0",
+  "private": false,
+  "description": "Scan the local song library for invalid or suspicious Feedpak files without changing them.",
+  "category": "tools",
+  "icon": "assets/thumb.svg",
+  "nav": { "label": "Library Health", "screen": "plugin-library_health" },
+  "screen": "screen.html",
+  "script": "screen.js",
+  "styles": "assets/library-health.css",
+  "routes": "routes.py"
+}

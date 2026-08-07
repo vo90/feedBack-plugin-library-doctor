@@ -1,0 +1,123 @@
+<main class="lh-shell" aria-labelledby="lh-title">
+  <header class="lh-header">
+    <div>
+      <p class="lh-eyebrow">Song library diagnostics</p>
+      <h2 id="lh-title">Library Health</h2>
+      <p class="lh-lead">
+        Check Feedpak and Sloppak packages for format errors and suspicious song data.
+        Scans are read-only; Library Health never changes your songs.
+      </p>
+    </div>
+  </header>
+
+  <section class="lh-target-panel" aria-labelledby="lh-target-title">
+    <div>
+      <h3 id="lh-target-title">Choose what to scan</h3>
+      <p class="lh-muted">Folder scans include every Feedpak and Sloppak in their subfolders.</p>
+    </div>
+    <fieldset id="lh-targets" class="lh-target-grid">
+      <legend class="lh-visually-hidden">Scan target</legend>
+      <label class="lh-target-option">
+        <input type="radio" name="lh-target" value="library" checked>
+        <span><strong>Whole library</strong><small>Check every song package in the configured library.</small></span>
+      </label>
+      <label class="lh-target-option">
+        <input type="radio" name="lh-target" value="folder">
+        <span><strong>Selected folder</strong><small>Check one folder and all of its subfolders.</small></span>
+      </label>
+      <label class="lh-target-option">
+        <input type="radio" name="lh-target" value="file">
+        <span><strong>Single Feedpak</strong><small>Check one .feedpak or legacy .sloppak file.</small></span>
+      </label>
+    </fieldset>
+    <div class="lh-target-footer">
+      <div class="lh-target-selection">
+        <span class="lh-muted">Selected target</span>
+        <strong id="lh-target-path">Configured song library</strong>
+        <span id="lh-picker-note" class="lh-muted" hidden></span>
+      </div>
+      <div class="lh-actions">
+        <button id="lh-choose-target" class="lh-button" type="button" hidden>Choose folder</button>
+        <button id="lh-scan" class="lh-button lh-button-primary" type="button"
+                title="Validate new and changed packages">Scan whole library</button>
+        <button id="lh-scan-all" class="lh-button" type="button" hidden
+                title="Ignore cached reports and validate the selected target again">Recheck without cache</button>
+        <button id="lh-cancel" class="lh-button lh-button-danger" type="button" hidden>Cancel scan</button>
+      </div>
+    </div>
+  </section>
+
+  <section class="lh-progress-panel" aria-live="polite" aria-atomic="true">
+    <div class="lh-progress-copy">
+      <span id="lh-status">Library Health has not scanned this library yet.</span>
+      <span id="lh-progress-count"></span>
+    </div>
+    <progress id="lh-progress" max="1" value="0" hidden></progress>
+    <p id="lh-error" class="lh-inline-error" role="alert" hidden></p>
+  </section>
+
+  <section class="lh-summary" aria-label="Library health summary">
+    <button class="lh-summary-card" type="button" data-filter="all">
+      <span class="lh-summary-value" data-summary="total">0</span>
+      <span class="lh-summary-label">Checked</span>
+    </button>
+    <button class="lh-summary-card lh-tone-error" type="button" data-filter="errors">
+      <span class="lh-summary-value" data-summary="errors">0</span>
+      <span class="lh-summary-label">With errors</span>
+    </button>
+    <button class="lh-summary-card lh-tone-warning" type="button" data-filter="warnings">
+      <span class="lh-summary-value" data-summary="warnings">0</span>
+      <span class="lh-summary-label">Warnings only</span>
+    </button>
+    <button class="lh-summary-card lh-tone-good" type="button" data-filter="healthy">
+      <span class="lh-summary-value" data-summary="healthy">0</span>
+      <span class="lh-summary-label">No problems found</span>
+    </button>
+    <button class="lh-summary-card lh-tone-info" type="button" data-filter="no_lyrics">
+      <span class="lh-summary-value" data-summary="no_lyrics">0</span>
+      <span class="lh-summary-label">Without lyrics</span>
+    </button>
+    <button class="lh-summary-card lh-tone-info" type="button" data-filter="no_preview">
+      <span class="lh-summary-value" data-summary="no_preview">0</span>
+      <span class="lh-summary-label">Without previews</span>
+    </button>
+  </section>
+
+  <p class="lh-coverage-note">
+    Lyrics and previews are optional Feedpak features. Missing coverage is listed for review,
+    but does not make a package unhealthy.
+  </p>
+
+  <section class="lh-results-section" aria-labelledby="lh-results-title">
+    <div class="lh-results-heading">
+      <div>
+        <h3 id="lh-results-title">Packages</h3>
+        <p id="lh-result-count" class="lh-muted">No cached results</p>
+      </div>
+      <label class="lh-search">
+        <span class="lh-visually-hidden">Search packages</span>
+        <input id="lh-search" type="search" placeholder="Search title, artist, or package…" autocomplete="off">
+      </label>
+    </div>
+
+    <div id="lh-filters" class="lh-filters" aria-label="Filter package results">
+      <button type="button" data-filter="problems" aria-pressed="true">Needs attention</button>
+      <button type="button" data-filter="errors" aria-pressed="false">Errors</button>
+      <button type="button" data-filter="warnings" aria-pressed="false">Warnings</button>
+      <button type="button" data-filter="healthy" aria-pressed="false">No problems</button>
+      <button type="button" data-filter="all" aria-pressed="false">All</button>
+      <button type="button" data-filter="no_lyrics" aria-pressed="false">No lyrics</button>
+      <button type="button" data-filter="no_preview" aria-pressed="false">No preview</button>
+    </div>
+
+    <div id="lh-results" class="lh-results" aria-live="polite"></div>
+    <p id="lh-empty" class="lh-empty" hidden></p>
+    <p id="lh-results-error" class="lh-inline-error" role="alert" hidden></p>
+
+    <nav id="lh-pagination" class="lh-pagination" aria-label="Package result pages" hidden>
+      <button id="lh-prev" class="lh-button" type="button">Previous</button>
+      <span id="lh-page-label" class="lh-muted"></span>
+      <button id="lh-next" class="lh-button" type="button">Next</button>
+    </nav>
+  </section>
+</main>
