@@ -132,12 +132,12 @@
       : !!status.playback_paused || status.stage === 'paused';
     notice.dataset.stage = paused ? 'paused' : 'pausing';
     notice.textContent = paused
-      ? 'Library Health scan paused · resumes when you exit'
-      : 'Library Health scan pausing to prioritize playback…';
+      ? 'Library Doctor scan paused · resumes when you exit'
+      : 'Library Doctor scan pausing to prioritize playback…';
     if (batchRunning) {
       notice.textContent = paused
-        ? 'Library Health batch paused - resumes when you exit'
-        : 'Library Health batch finishing the current Feedpak before pausing...';
+        ? 'Library Doctor batch paused - resumes when you exit'
+        : 'Library Doctor batch finishing the current Feedpak before pausing...';
     }
   }
 
@@ -159,7 +159,7 @@
         schedulePlaybackStatusPoll(250);
       }
     } catch (error) {
-      console.warn('[Library Health] Could not confirm paused scan status:', error);
+      console.warn('[Library Doctor] Could not confirm paused scan status:', error);
       schedulePlaybackStatusPoll(1000);
     }
   }
@@ -202,7 +202,7 @@
         }
       }
     } catch (error) {
-      console.warn('[Library Health] Could not update playback priority:', error);
+      console.warn('[Library Doctor] Could not update playback priority:', error);
     } finally {
       playbackSyncing = false;
       if (playbackApplied !== playbackDesired) schedulePlaybackSyncRetry();
@@ -350,7 +350,7 @@
     const targetLabel = status.target?.label || 'the selected target';
 
     if (batchRunning) {
-      text(el.status, batch.message || 'Library Health batch operation is running...');
+      text(el.status, batch.message || 'Library Doctor batch operation is running...');
       text(el.progressCount, 'Scanning is temporarily unavailable');
     } else if (repairing) {
       text(el.status, 'Applying and verifying a safe package repair...');
@@ -402,7 +402,7 @@
       text(el.status, `${number(summary.total)} cached package reports are available for ${targetLabel}.`);
       text(el.progressCount, '');
     } else {
-      text(el.status, 'Library Health has not scanned this library yet.');
+      text(el.status, 'Library Doctor has not scanned this library yet.');
       text(el.progressCount, '');
     }
 
@@ -1123,7 +1123,7 @@
   function appendFindingExplanation(item, problem, playerImpact, fixBenefit, guidance) {
     const explanation = make('div', 'lh-finding-explanation');
     [
-      ['What Library Health found', problem, 'problem'],
+      ['What Library Doctor found', problem, 'problem'],
       ['What you may notice in game', playerImpact, 'impact'],
       ['Why fixing it matters', fixBenefit, 'benefit'],
     ].forEach(([label, value, tone]) => {
@@ -1259,7 +1259,7 @@
       consumed.add(invisible);
       nodes.push(groupedFindingNode(
         'Muted events have no playable fret or visible chord shape',
-        'Two checks describe the same imported positions. FeedBack cannot place these events reliably on the highway, but Library Health cannot infer the intended fret or chord shape.',
+        'Two checks describe the same imported positions. FeedBack cannot place these events reliably on the highway, but Library Doctor cannot infer the intended fret or chord shape.',
         'The affected events may be absent from the highway or shown without a useful instruction for the player.',
         'Correct playable fret or chord data makes the intended events visible and usable during the song.',
         [negative, invisible],
@@ -1294,7 +1294,7 @@
     const positions = Number(receipt.musical_positions || 0);
     const itemName = receipt.item_name || 'item';
     if (receipt.legacy_receipt) {
-      return 'The package still matches an earlier successful Library Health repair. That older version did not store the exact item count in its result receipt.';
+      return 'The package still matches an earlier successful Library Doctor repair. That older version did not store the exact item count in its result receipt.';
     }
     if (!count) return 'The saved original chart data was restored.';
     const summaries = Array.isArray(receipt.repair_summaries)
@@ -1326,7 +1326,7 @@
     const stateCopy = error.fileState === 'recovery_required'
       ? 'Automatic rollback could not be confirmed. Do not play or repair this package again until its recovery backup has been restored.'
       : error.fileState === 'verify_required'
-        ? 'Library Health could not confirm the final file state. Scan this package again before trying another repair.'
+        ? 'Library Doctor could not confirm the final file state. Scan this package again before trying another repair.'
         : 'The existing Feedpak was left unchanged. No repaired copy was added to the library.';
     renderRepairResult({
       id: `failure-${Date.now()}`,
@@ -1479,7 +1479,7 @@
       const latest = Array.isArray(payload?.items) ? payload.items[0] : null;
       if (latest) renderRepairResult(latest);
     } catch (error) {
-      console.warn('[Library Health] Could not load repair history:', error);
+      console.warn('[Library Doctor] Could not load repair history:', error);
     }
   }
 
@@ -1610,7 +1610,7 @@
           'p',
           '',
           blockers.length
-            ? 'Library Health cannot safely apply the combined repair because at least one referenced chart file could not be prepared. Nothing will be changed.'
+            ? 'Library Doctor cannot safely apply the combined repair because at least one referenced chart file could not be prepared. Nothing will be changed.'
             : 'No supported safe repairs are currently available in this package.',
         ));
         blockers.forEach((blocker) => {
@@ -1952,7 +1952,7 @@
       if (!state.active) return;
       state.repairRules = {};
       state.allSafeRepair = null;
-      console.warn('[Library Health] Could not load safe repair catalog:', error);
+      console.warn('[Library Doctor] Could not load safe repair catalog:', error);
     }
   }
 
@@ -1980,7 +1980,7 @@
     });
     const link = document.createElement('a');
     link.href = `${API}/export?${params}`;
-    link.download = `library-health-report.${format}`;
+    link.download = `library-doctor-report.${format}`;
     link.hidden = true;
     document.body.appendChild(link);
     link.click();
@@ -2072,8 +2072,8 @@
   }
 
   function bind() {
-    if (el.root.dataset.libraryHealthBound === '1') return;
-    el.root.dataset.libraryHealthBound = '1';
+    if (el.root.dataset.libraryDoctorBound === '1') return;
+    el.root.dataset.libraryDoctorBound = '1';
     el.targets.addEventListener('change', (event) => {
       const option = event.target.closest('input[name="lh-target"]');
       if (!option || !['library', 'folder', 'file'].includes(option.value)) return;

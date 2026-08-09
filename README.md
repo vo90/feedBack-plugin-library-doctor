@@ -1,6 +1,6 @@
-# Library Health
+# Library Doctor
 
-Library Health is FeedBack's Feedpak library validator and conservative repair
+Library Doctor is FeedBack's Feedpak library validator and conservative repair
 assistant. Scans are always read-only. The plugin reports problems in `.feedpak`
 and legacy `.sloppak` packages and offers an explicit preview only for repairs
 that can be performed without choosing between different musical data.
@@ -14,10 +14,10 @@ always has priority.
 
 ## Install
 
-Library Health is designed to remain an optional plugin. Once this repository
+Library Doctor is designed to remain an optional plugin. Once this repository
 is published at an HTTPS Git URL, desktop users can paste that URL into
 **Plugins → Plugin Manager → Install Plugin**, restart FeedBack, and enable the
-Library Health pedal if necessary. FeedBack installs the small Python runtime
+Library Doctor pedal if necessary. FeedBack installs the small Python runtime
 dependency from `requirements.txt` during plugin startup.
 
 For local development, put this repository directly under FeedBack Desktop's
@@ -26,7 +26,7 @@ directory), then restart FeedBack. Do not copy its files into FeedBack core.
 
 ## Use
 
-1. Open **Library Health** from FeedBack's plugin navigation.
+1. Open **Library Doctor** from FeedBack's plugin navigation.
 2. Choose **Whole library**, **Selected folder**, or **Single Feedpak**. Folder
    scans include all Feedpaks and Sloppaks in their subfolders. Selected paths
    must be inside FeedBack's configured song library.
@@ -45,7 +45,7 @@ directory), then restart FeedBack. Do not copy its files into FeedBack core.
    JSON and CSV exports use the current package, search, and rule filters.
 5. When **Review safe fix** appears beside a finding, open the preview to see
    exactly how many stored copies and musical positions are affected. Applying
-   the repair requires a separate confirmation. Library Health creates a
+   the repair requires a separate confirmation. Library Doctor creates a
    recovery backup, validates a repaired candidate, and saves it only if it
    introduces no new finding. A persistent result card confirms success or
    failure, states exactly what changed and what to expect in game, and offers
@@ -104,7 +104,7 @@ list remain separate. Events with different sustain, fret, velocity, technique,
 time span, or other data are never selected automatically.
 
 A preview is bound to the exact current source bytes and validator version. If
-the package changes before confirmation, Library Health refuses the stale plan.
+the package changes before confirmation, Library Doctor refuses the stale plan.
 JSONC arrangement files are left unchanged until a comment-preserving writer is
 available. Repairs cannot run during a library scan or while the song player
 has priority.
@@ -126,7 +126,7 @@ package rows expose their own reviewed Undo action. The same result also offers
 a controlled Undo-all workflow with preview, confirmation, gameplay pausing,
 safe stopping, per-package outcomes, and current-state totals.
 
-Library Health does not add a second playable Feedpak to the song library. It
+Library Doctor does not add a second playable Feedpak to the song library. It
 builds a complete candidate beside the package, verifies every archive member,
 runs the current package validation, and creates a private recovery backup
 before replacing the archive at the same path (or atomically writing each changed
@@ -240,7 +240,7 @@ Missing lyrics and missing previews are coverage information, not faults:
 both are optional in the Feedpak specification and may be intentional.
 
 Playability thresholds are deliberately conservative and produce review
-suggestions, not errors or warnings. Library Health does not attempt to judge
+suggestions, not errors or warnings. Library Doctor does not attempt to judge
 hand size, playing style, alternate tunings, musical correctness, or audio/tab
 sync.
 
@@ -253,7 +253,7 @@ or judge whether the tab is synchronized to what is being played.
 The report cache is local to FeedBack's config directory at
 `library_health/library_health.db`. It stores package-relative paths and scan
 results. A targeted scan changes the visible dashboard scope without discarding
-cached reports for the rest of the library. Library Health does not contribute
+cached reports for the rest of the library. Library Doctor does not contribute
 the database or song identities to FeedBack support bundles.
 
 Each scan also records its target, profile, expected and completed package
@@ -274,7 +274,7 @@ confirmed safe-repair workflow.
   bounded repair receipts, undo, and transactional package writes.
 - `routes.py` exposes the scanner through plugin-scoped FastAPI routes and uses
   `context["load_sibling"]` for backend modules.
-- `screen.html`, `screen.js`, and `assets/library-health.css` provide the
+- `screen.html`, `screen.js`, and `assets/library-doctor.css` provide the
   in-game interface.
 
 The vendored schemas in `schemas/` come from the authoritative
@@ -289,12 +289,12 @@ the test dependencies and run:
 
 ```bash
 python -m pip install -r requirements-test.txt
-python -m ruff check validator.py scanner.py repair.py routes.py tests
+python -m ruff check validator.py scanner.py repair.py batch_repair.py routes.py tests
 python -m pytest --cov --cov-report=term
-python -m py_compile validator.py scanner.py repair.py routes.py
+python -m py_compile validator.py scanner.py repair.py batch_repair.py routes.py
 node --check screen.js
 ```
 
 `library_health` is the stable plugin ID and API namespace. The user-facing
-name “Library Health” can change later without changing that identifier or the
+name “Library Doctor” can change later without changing that identifier or the
 cache location.

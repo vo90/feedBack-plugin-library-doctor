@@ -780,7 +780,7 @@ class RepairService:
             if current_hash != entry["repaired_sha256"]:
                 raise RepairPlanningError(
                     "package_changed",
-                    "This song changed after the repair, so Library Health will not overwrite it. Scan it again and review it manually.",
+                    "This song changed after the repair, so Library Doctor will not overwrite it. Scan it again and review it manually.",
                 )
             current[member_path] = raw
             source_members.append({
@@ -1194,7 +1194,7 @@ class RepairService:
             "backup_id": backup_id,
             "backup_contents": "original_changed_chart_files",
             "summary": (
-                "Library Health builds and validates a complete candidate first. Only then does it replace "
+                "Library Doctor builds and validates a complete candidate first. Only then does it replace "
                 "the existing Feedpak at the same path. It does not add a second playable song to the library. "
                 "The original changed chart files are kept in private recovery storage."
             ),
@@ -1258,7 +1258,7 @@ class RepairService:
     def _candidate(self, package_path: Path, replacements: dict[str, bytes]):
         try:
             temporary_root = Path(tempfile.mkdtemp(
-                prefix=".library-health-repair-", dir=package_path.parent
+                prefix=".library-doctor-repair-", dir=package_path.parent
             ))
         except OSError as exc:
             raise RepairPlanningError(
@@ -1566,7 +1566,7 @@ class RepairService:
             # The Feedpak repair has already succeeded. A missing UI receipt
             # must never turn a successful package commit into a reported
             # failure or trigger a second repair attempt.
-            self._log.warning("Library Health could not save repair history: %s", exc)
+            self._log.warning("Library Doctor could not save repair history: %s", exc)
             return False
 
     def _commit(
@@ -1602,7 +1602,7 @@ class RepairService:
                 except Exception:
                     rollback_failed = True
                     self._log.error(
-                        "Library Health could not roll back %s in %s",
+                        "Library Doctor could not roll back %s in %s",
                         member_path,
                         package_path.name,
                     )

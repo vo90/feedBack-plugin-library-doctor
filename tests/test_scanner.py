@@ -70,7 +70,7 @@ def _make_scanner(scanner_module, tmp_path, validator):
         get_dlc_dir=lambda: library,
         validate_feedpak=validator,
         validator_version="test-v1",
-        log=logging.getLogger("library-health-tests"),
+        log=logging.getLogger("library-doctor-tests"),
     )
     return instance, library
 
@@ -500,7 +500,7 @@ def test_missing_library_is_a_user_facing_scan_error(scanner_module, tmp_path):
         get_dlc_dir=lambda: None,
         validate_feedpak=lambda *_args: None,
         validator_version="test-v1",
-        log=logging.getLogger("library-health-tests"),
+        log=logging.getLogger("library-doctor-tests"),
     )
 
     with pytest.raises(ValueError, match="configured"):
@@ -585,7 +585,7 @@ def test_rule_catalog_enriches_cached_results_and_rule_summary(scanner_module, t
         get_dlc_dir=lambda: library,
         validate_feedpak=lambda _path, package: _report(package, status="warning"),
         validator_version="test-v1",
-        log=logging.getLogger("library-health-tests"),
+        log=logging.getLogger("library-doctor-tests"),
         rule_metadata=metadata,
     )
     (library / "one.feedpak").write_bytes(b"one")
@@ -666,7 +666,7 @@ def test_cache_signature_is_scoped_to_the_configured_library(
         get_dlc_dir=lambda: first_library,
         validate_feedpak=validate,
         validator_version="test-v1",
-        log=logging.getLogger("library-health-tests"),
+        log=logging.getLogger("library-doctor-tests"),
     )
     _run(first)
     second = scanner_module.LibraryScanner(
@@ -674,7 +674,7 @@ def test_cache_signature_is_scoped_to_the_configured_library(
         get_dlc_dir=lambda: second_library,
         validate_feedpak=validate,
         validator_version="test-v1",
-        log=logging.getLogger("library-health-tests"),
+        log=logging.getLogger("library-doctor-tests"),
     )
     status = _run(second)
 

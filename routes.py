@@ -1,4 +1,4 @@
-"""FeedBack plugin routes for Library Health."""
+"""FeedBack plugin routes for Library Doctor."""
 
 from pathlib import Path
 
@@ -11,11 +11,11 @@ def setup(app, context):
     get_dlc_dir = context.get("get_dlc_dir")
     log = context.get("log")
     if not callable(load_sibling):
-        raise RuntimeError("Library Health requires FeedBack's load_sibling plugin API.")
+        raise RuntimeError("Library Doctor requires FeedBack's load_sibling plugin API.")
     if not callable(get_dlc_dir):
-        raise RuntimeError("Library Health requires FeedBack's song-library plugin API.")
+        raise RuntimeError("Library Doctor requires FeedBack's song-library plugin API.")
     if log is None:
-        raise RuntimeError("Library Health requires FeedBack's plugin logger.")
+        raise RuntimeError("Library Doctor requires FeedBack's plugin logger.")
 
     validator = load_sibling("validator")
     scanner_module = load_sibling("scanner")
@@ -244,7 +244,7 @@ def setup(app, context):
                 result["cache_updated"] = True
             except Exception as exc:  # The package repair itself already succeeded.
                 log.warning(
-                    "Library Health repaired a package but could not refresh its report: %s",
+                    "Library Doctor repaired a package but could not refresh its report: %s",
                     exc,
                 )
                 result["cache_updated"] = False
@@ -255,7 +255,7 @@ def setup(app, context):
         except repair_module.RepairPlanningError as exc:
             raise HTTPException(status_code=409, detail=repair_error(exc)) from exc
         except Exception as exc:
-            log.exception("Library Health repair failed safely: %s", exc)
+            log.exception("Library Doctor repair failed safely: %s", exc)
             raise HTTPException(
                 status_code=500,
                 detail={
@@ -313,7 +313,7 @@ def setup(app, context):
                 result["cache_updated"] = True
             except Exception as exc:
                 log.warning(
-                    "Library Health restored a package but could not refresh its report: %s",
+                    "Library Doctor restored a package but could not refresh its report: %s",
                     exc,
                 )
                 result["cache_updated"] = False
@@ -325,7 +325,7 @@ def setup(app, context):
         except repair_module.RepairPlanningError as exc:
             raise HTTPException(status_code=409, detail=repair_error(exc)) from exc
         except Exception as exc:
-            log.exception("Library Health recovery failed: %s", exc)
+            log.exception("Library Doctor recovery failed: %s", exc)
             raise HTTPException(
                 status_code=500,
                 detail={

@@ -1,14 +1,14 @@
 {
   "id": "library_health",
-  "name": "Library Health",
-  "version": "0.13.0",
+  "name": "Library Doctor",
+  "version": "0.14.0",
   "private": false,
-  "description": "Scan the local song library, understand Feedpak problems, and apply recoverable safe repairs.",
+  "description": "Scan, diagnose, and safely repair the local FeedBack song library.",
   "category": "tools",
   "icon": "assets/thumb.svg",
-  "nav": { "label": "Library Health", "screen": "plugin-library_health" },
+  "nav": { "label": "Library Doctor", "screen": "plugin-library_health" },
   "screen": "screen.html",
   "script": "screen.js",
-  "styles": "assets/library-health.css",
+  "styles": "assets/library-doctor.css",
   "routes": "routes.py"
 }

@@ -34,11 +34,11 @@ def test_manifest_uses_stable_plugin_namespace_and_existing_files():
 
     assert manifest["id"] == "library_health"
     assert re.fullmatch(r"[a-z][a-z0-9_]*", manifest["id"])
-    assert manifest["name"] == "Library Health"
-    assert manifest["version"] == "0.13.0"
+    assert manifest["name"] == "Library Doctor"
+    assert manifest["version"] == "0.14.0"
     assert manifest["private"] is False
     assert manifest["nav"] == {
-        "label": "Library Health",
+        "label": "Library Doctor",
         "screen": "plugin-library_health",
     }
     for key in ("screen", "script", "styles", "routes", "icon"):
@@ -79,7 +79,7 @@ def test_screen_uses_desktop_pickers_and_sends_scan_target_in_json_body():
 def test_screen_prioritizes_active_song_sessions_over_scanning():
     script = (ROOT / "screen.js").read_text(encoding="utf-8")
     screen = (ROOT / "screen.html").read_text(encoding="utf-8")
-    styles = (ROOT / "assets" / "library-health.css").read_text(encoding="utf-8")
+    styles = (ROOT / "assets" / "library-doctor.css").read_text(encoding="utf-8")
 
     assert "window.feedBack.on('song:loading'" in script
     assert "window.feedBack.on('song:stop'" in script
@@ -88,7 +88,7 @@ def test_screen_prioritizes_active_song_sessions_over_scanning():
     assert "schedulePlaybackSyncRetry" in script
     assert "playbackSyncRetryDelay = Math.min(5000" in script
     assert "Paused while a song is open" in script
-    assert "Library Health scan paused · resumes when you exit" in script
+    assert "Library Doctor scan paused · resumes when you exit" in script
     assert "You can keep playing while a scan is running" in screen
     assert ".lh-playback-notice" in styles
 
@@ -114,7 +114,7 @@ def test_screen_requires_a_preview_before_applying_supported_repairs():
     assert script.index("request('/repair/preview'") < script.index("request('/repair/apply'")
     assert "Apply safe repair" in script
     assert re.search(r"recovery\s+backup", screen, re.IGNORECASE)
-    assert "What Library Health found" in script
+    assert "What Library Doctor found" in script
     assert "What you may notice in game" in script
     assert "Why fixing it matters" in script
     assert "What happens to the Feedpak" in script
@@ -157,7 +157,7 @@ def test_screen_offers_one_combined_transaction_for_multiple_safe_repair_types()
 def test_screen_requires_batch_preview_and_confirmation_with_progress_and_recovery():
     script = (ROOT / "screen.js").read_text(encoding="utf-8")
     screen = (ROOT / "screen.html").read_text(encoding="utf-8")
-    styles = (ROOT / "assets" / "library-health.css").read_text(encoding="utf-8")
+    styles = (ROOT / "assets" / "library-doctor.css").read_text(encoding="utf-8")
 
     assert "request('/repair/batch/preview'" in script
     assert "request('/repair/batch/apply'" in script
@@ -167,7 +167,7 @@ def test_screen_requires_batch_preview_and_confirmation_with_progress_and_recove
     assert "Continue to confirmation" in script
     assert "Apply batch repair" in script
     assert "Stop after current Feedpak" in script
-    assert "Library Health batch paused - resumes when you exit" in script
+    assert "Library Doctor batch paused - resumes when you exit" in script
     assert "Review Undo" in script
     assert "request('/repair/batch/undo/preview'" in script
     assert "request('/repair/batch/undo/apply'" in script

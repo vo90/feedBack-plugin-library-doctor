@@ -1,4 +1,4 @@
-"""Read-only Feedpak validation used by the Library Health plugin.
+"""Read-only Feedpak validation used by the Library Doctor plugin.
 
 The official schemas establish format conformance.  The named semantic rules
 below are deliberately separate: they identify chart/media mistakes that are
@@ -339,7 +339,7 @@ def _rule_experience(
         )
     if area == "Scan":
         return (
-            "Library Health could not fully inspect this package, so additional problems may remain unreported.",
+            "Library Doctor could not fully inspect this package, so additional problems may remain unreported.",
             "Completing the scan gives you a trustworthy health result before deciding whether the song needs repair.",
         )
     if severity == "error":

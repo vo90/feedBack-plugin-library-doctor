@@ -681,7 +681,7 @@ class LibraryScanner:
                     "deep_audio": bool(deep_audio),
                     "started_at": started_at,
                 },
-                name="library-health-scan",
+                name="library-doctor-scan",
                 daemon=True,
             )
             self._thread.start()
@@ -693,7 +693,7 @@ class LibraryScanner:
             if self._status["running"]:
                 return False, "Wait for the library scan to finish before repairing a package."
             if self._status.get("repairing"):
-                return False, "Another Library Health repair is already in progress."
+                return False, "Another Library Doctor repair is already in progress."
             with self._playback_condition:
                 if self._playback_active:
                     return False, "Exit the song player before repairing a package."
@@ -701,7 +701,7 @@ class LibraryScanner:
         return True, ""
 
     def begin_batch_operation(self) -> tuple[bool, str]:
-        """Reserve Library Health for a background batch preview or repair.
+        """Reserve Library Doctor for a background batch preview or repair.
 
         Unlike a single repair, a batch may start while playback is active.
         Its worker cooperatively waits before touching each package.
@@ -710,7 +710,7 @@ class LibraryScanner:
             if self._status["running"]:
                 return False, "Wait for the library scan to finish before starting batch repair."
             if self._status.get("repairing"):
-                return False, "Another Library Health repair is already in progress."
+                return False, "Another Library Doctor repair is already in progress."
             self._status["repairing"] = True
         return True, ""
 
@@ -867,7 +867,7 @@ class LibraryScanner:
             )
         if last_scan.get("validator_version") != self._validator_version:
             raise ValueError(
-                "Run the current Library Health scan before reviewing a batch repair."
+                "Run the current Library Doctor scan before reviewing a batch repair."
             )
         reports = self._cache.matching_reports(
             result_filter="all",
@@ -992,7 +992,7 @@ class LibraryScanner:
                 "packages": reports,
             }
             return (
-                "library-health-report.json",
+                "library-doctor-report.json",
                 "application/json; charset=utf-8",
                 json.dumps(payload, ensure_ascii=False, allow_nan=False, indent=2),
             )
@@ -1039,7 +1039,7 @@ class LibraryScanner:
                     features.get("deep_audio_unsupported"),
                 )))
         return (
-            "library-health-report.csv",
+            "library-doctor-report.csv",
             "text/csv; charset=utf-8",
             "\ufeff" + output.getvalue(),
         )
@@ -1110,7 +1110,7 @@ class LibraryScanner:
                 yield "]}"
 
             return (
-                "library-health-report.json",
+                "library-doctor-report.json",
                 "application/json; charset=utf-8",
                 json_chunks(),
             )
@@ -1165,7 +1165,7 @@ class LibraryScanner:
                     ))
 
         return (
-            "library-health-report.csv",
+            "library-doctor-report.csv",
             "text/csv; charset=utf-8",
             csv_chunks(),
         )
@@ -1581,7 +1581,7 @@ class LibraryScanner:
                             )
                         except Exception as exc:  # One third-party rule must not abort the batch.
                             self._log.warning(
-                                "Library Health validation failed for %s: %s",
+                                "Library Doctor validation failed for %s: %s",
                                 package_name,
                                 exc,
                             )
@@ -1676,7 +1676,7 @@ class LibraryScanner:
                 discovery_errors=discovery_errors,
             )
         except Exception as exc:
-            self._log.warning("Library Health scan failed: %s", exc)
+            self._log.warning("Library Doctor scan failed: %s", exc)
             completed_at = time.time()
             self._set_status(
                 running=False,

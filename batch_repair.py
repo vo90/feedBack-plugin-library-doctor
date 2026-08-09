@@ -163,7 +163,7 @@ class BatchRepairManager:
         with self._lock:
             if self._state["running"]:
                 raise BatchRepairError(
-                    "batch_busy", "A Library Health batch operation is already running."
+                    "batch_busy", "A Library Doctor batch operation is already running."
                 )
             reserved, reason = self._scanner.begin_batch_operation()
             if not reserved:
@@ -187,7 +187,7 @@ class BatchRepairManager:
             self._thread = threading.Thread(
                 target=self._run_preview,
                 args=(copy.deepcopy(snapshot),),
-                name="library-health-batch-preview",
+                name="library-doctor-batch-preview",
                 daemon=True,
             )
             try:
@@ -208,7 +208,7 @@ class BatchRepairManager:
             preview = self._state.get("preview")
             if self._state["running"]:
                 raise BatchRepairError(
-                    "batch_busy", "A Library Health batch operation is already running."
+                    "batch_busy", "A Library Doctor batch operation is already running."
                 )
             if (
                 self._state["phase"] != "ready"
@@ -243,7 +243,7 @@ class BatchRepairManager:
             self._thread = threading.Thread(
                 target=self._run_apply,
                 args=(batch_plan_id, plans, snapshot),
-                name="library-health-batch-apply",
+                name="library-doctor-batch-apply",
                 daemon=True,
             )
             try:
@@ -260,7 +260,7 @@ class BatchRepairManager:
         with self._lock:
             if self._state["running"]:
                 raise BatchRepairError(
-                    "batch_busy", "A Library Health batch operation is already running."
+                    "batch_busy", "A Library Doctor batch operation is already running."
                 )
             source = self._state.get("result") or self._state.get("last_result")
             if not isinstance(source, dict):
@@ -320,7 +320,7 @@ class BatchRepairManager:
             self._thread = threading.Thread(
                 target=self._run_undo_preview,
                 args=(copy.deepcopy(source), candidates),
-                name="library-health-batch-undo-preview",
+                name="library-doctor-batch-undo-preview",
                 daemon=True,
             )
             try:
@@ -341,7 +341,7 @@ class BatchRepairManager:
             preview = self._state.get("undo_preview")
             if self._state["running"]:
                 raise BatchRepairError(
-                    "batch_busy", "A Library Health batch operation is already running."
+                    "batch_busy", "A Library Doctor batch operation is already running."
                 )
             if (
                 self._state["phase"] != "undo_ready"
@@ -376,7 +376,7 @@ class BatchRepairManager:
             self._thread = threading.Thread(
                 target=self._run_undo_apply,
                 args=(undo_plan_id, plans),
-                name="library-health-batch-undo-apply",
+                name="library-doctor-batch-undo-apply",
                 daemon=True,
             )
             try:
@@ -521,7 +521,7 @@ class BatchRepairManager:
                     })
                 except Exception as exc:
                     self._log.exception(
-                        "Library Health batch preview failed safely for %s: %s",
+                        "Library Doctor batch preview failed safely for %s: %s",
                         package,
                         exc,
                     )
@@ -652,7 +652,7 @@ class BatchRepairManager:
                     "preview": preview,
                 })
         except Exception as exc:
-            self._log.exception("Library Health batch preview failed: %s", exc)
+            self._log.exception("Library Doctor batch preview failed: %s", exc)
             with self._lock:
                 self._plans = []
                 self._snapshot = None
@@ -701,7 +701,7 @@ class BatchRepairManager:
                         cache_updated = False
                         cache_refresh_failed += 1
                         self._log.warning(
-                            "Library Health batch repaired %s but could not refresh its report: %s",
+                            "Library Doctor batch repaired %s but could not refresh its report: %s",
                             package,
                             exc,
                         )
@@ -744,7 +744,7 @@ class BatchRepairManager:
                 except Exception as exc:
                     failed += 1
                     self._log.exception(
-                        "Library Health batch repair failed safely for %s: %s",
+                        "Library Doctor batch repair failed safely for %s: %s",
                         package,
                         exc,
                     )
@@ -808,7 +808,7 @@ class BatchRepairManager:
                     "last_result": result,
                 })
         except Exception as exc:
-            self._log.exception("Library Health batch execution failed: %s", exc)
+            self._log.exception("Library Doctor batch execution failed: %s", exc)
             with self._lock:
                 self._state.update({
                     "phase": "error",
@@ -856,7 +856,7 @@ class BatchRepairManager:
                     })
                 except Exception as exc:
                     self._log.exception(
-                        "Library Health batch Undo preview failed safely for %s: %s",
+                        "Library Doctor batch Undo preview failed safely for %s: %s",
                         package,
                         exc,
                     )
@@ -962,7 +962,7 @@ class BatchRepairManager:
                     "undo_preview": preview,
                 })
         except Exception as exc:
-            self._log.exception("Library Health batch Undo preview failed: %s", exc)
+            self._log.exception("Library Doctor batch Undo preview failed: %s", exc)
             with self._lock:
                 self._undo_plans = []
                 self._state.update({
@@ -1011,7 +1011,7 @@ class BatchRepairManager:
                         cache_updated = False
                         cache_refresh_failed += 1
                         self._log.warning(
-                            "Library Health restored %s but could not refresh its report: %s",
+                            "Library Doctor restored %s but could not refresh its report: %s",
                             package,
                             exc,
                         )
@@ -1052,7 +1052,7 @@ class BatchRepairManager:
                 except Exception as exc:
                     failed += 1
                     self._log.exception(
-                        "Library Health batch Undo failed safely for %s: %s",
+                        "Library Doctor batch Undo failed safely for %s: %s",
                         package,
                         exc,
                     )
@@ -1114,7 +1114,7 @@ class BatchRepairManager:
             if latest is not None:
                 self._write_last_result(latest)
         except Exception as exc:
-            self._log.exception("Library Health batch Undo execution failed: %s", exc)
+            self._log.exception("Library Doctor batch Undo execution failed: %s", exc)
             with self._lock:
                 self._state.update({
                     "phase": "error",
@@ -1164,4 +1164,4 @@ class BatchRepairManager:
         except OSError as exc:
             if temporary is not None:
                 temporary.unlink(missing_ok=True)
-            self._log.warning("Library Health could not save the batch result: %s", exc)
+            self._log.warning("Library Doctor could not save the batch result: %s", exc)

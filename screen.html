@@ -1,11 +1,11 @@
 <main class="lh-shell" aria-labelledby="lh-title">
   <header class="lh-header">
     <div>
-      <p class="lh-eyebrow">Song library diagnostics</p>
-      <h2 id="lh-title">Library Health</h2>
+      <p class="lh-eyebrow">Song library diagnosis and repair</p>
+      <h2 id="lh-title">Library Doctor</h2>
       <p class="lh-lead">
-        Check Feedpak and Sloppak packages for format errors and suspicious song data.
-        Scans are read-only. Safe repairs are separate and always require confirmation.
+        Scan Feedpak and Sloppak packages, understand what problems mean in game, and safely
+        repair deterministic issues. Scans are read-only; repairs always require confirmation.
       </p>
     </div>
   </header>
@@ -15,7 +15,7 @@
       <h3 id="lh-target-title">Choose what to scan</h3>
       <p class="lh-muted">Folder scans include every Feedpak and Sloppak in their subfolders.</p>
       <p class="lh-muted lh-playback-help">
-        You can keep playing while a scan is running. Library Health pauses automatically
+        You can keep playing while a scan is running. Library Doctor pauses automatically
         while a song is open and resumes when you exit the player.
       </p>
     </div>
@@ -57,7 +57,7 @@
 
   <section class="lh-progress-panel">
     <div class="lh-progress-copy">
-      <span id="lh-status" role="status" aria-live="polite">Library Health has not scanned this library yet.</span>
+      <span id="lh-status" role="status" aria-live="polite">Library Doctor has not scanned this library yet.</span>
       <span id="lh-progress-count"></span>
     </div>
     <progress id="lh-progress" max="1" value="0" aria-label="Library scan progress" hidden></progress>
@@ -93,7 +93,7 @@
     <div id="lh-batch-result" class="lh-batch-content" aria-live="polite"></div>
   </section>
 
-  <section class="lh-summary" aria-label="Library health summary">
+  <section class="lh-summary" aria-label="Library Doctor summary">
     <button class="lh-summary-card" type="button" data-filter="all">
       <span class="lh-summary-value" data-summary="total">0</span>
       <span class="lh-summary-label">Checked</span>
@@ -134,7 +134,7 @@
     or play as intended. Authoring review highlights unusual but potentially intentional tab data. Lyrics and
     previews are optional. Partial deep audio means one or more files use a format this
     validator cannot inspect deeply or exceeded its safety limit. Coverage does not make
-    a package unhealthy. When a deterministic safe repair is available, Library Health
+    a package unhealthy. When a deterministic safe repair is available, Library Doctor
     shows a preview and requires confirmation before changing the package. If a Feedpak
     has multiple safe repair types, they can also be reviewed and applied together in one
     transaction. A recovery

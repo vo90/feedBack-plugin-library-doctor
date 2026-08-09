@@ -65,7 +65,7 @@ def _client(tmp_path, *, with_library=True, validator_hook=None):
         "config_dir": tmp_path / "config",
         "get_dlc_dir": lambda: library if with_library else None,
         "load_sibling": load_sibling,
-        "log": logging.getLogger("library-health-routes-tests"),
+        "log": logging.getLogger("library-doctor-routes-tests"),
     })
     return TestClient(app), library
 
@@ -77,7 +77,7 @@ def _wait_for_scan(client, timeout=5):
         if not status["running"]:
             return status
         time.sleep(0.01)
-    raise AssertionError("Library Health scan did not finish")
+    raise AssertionError("Library Doctor scan did not finish")
 
 
 def _wait_for_batch(client, phases, timeout=10):
@@ -92,7 +92,7 @@ def _wait_for_batch(client, phases, timeout=10):
             return status
         time.sleep(0.01)
     raise AssertionError(
-        f"Library Health batch did not reach {sorted(expected)}; last status: {status}"
+        f"Library Doctor batch did not reach {sorted(expected)}; last status: {status}"
     )
 
 
@@ -114,7 +114,7 @@ def test_scan_and_results_are_available_through_plugin_routes(tmp_path):
     assert results["items"][0]["package"] == "Artist/Song.feedpak"
     assert rules == {"schema": "library_health.rules.v1", "items": []}
     assert exported.status_code == 200
-    assert exported.headers["content-disposition"].endswith('"library-health-report.json"')
+    assert exported.headers["content-disposition"].endswith('"library-doctor-report.json"')
     assert exported.json()["packages"][0]["package"] == "Artist/Song.feedpak"
     assert str(library) not in response.text
     assert str(library) not in json.dumps(results)
@@ -1223,7 +1223,7 @@ def test_failed_candidate_validation_keeps_the_original_and_creates_no_backup(tm
 
         def reject_candidate(path, *args, **kwargs):
             report = original(path, *args, **kwargs)
-            if ".library-health-repair-" in str(path):
+            if ".library-doctor-repair-" in str(path):
                 report["findings"].append({
                     "severity": "error",
                     "code": "test.candidate-regression",

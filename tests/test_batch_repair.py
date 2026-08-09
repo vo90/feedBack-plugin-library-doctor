@@ -129,7 +129,7 @@ def test_batch_cancellation_finishes_current_feedpak_and_keeps_its_receipt(tmp_p
             scanner=scanner,
             repair_service=repairs,
             repair_error_type=_RepairError,
-            log=logging.getLogger("library-health-batch-tests"),
+            log=logging.getLogger("library-doctor-batch-tests"),
         )
         snapshot = {
             "schema": "library_health.repair_scope.v1",
@@ -187,7 +187,7 @@ def test_batch_undo_cancellation_finishes_current_restore_and_keeps_later_packag
             scanner=scanner,
             repair_service=repairs,
             repair_error_type=_RepairError,
-            log=logging.getLogger("library-health-batch-undo-tests"),
+            log=logging.getLogger("library-doctor-batch-undo-tests"),
         )
         snapshot = {
             "schema": "library_health.repair_scope.v1",
@@ -240,7 +240,7 @@ def test_batch_undo_cancellation_finishes_current_restore_and_keeps_later_packag
             scanner=_Scanner(),
             repair_service=repairs,
             repair_error_type=_RepairError,
-            log=logging.getLogger("library-health-batch-undo-reload-tests"),
+            log=logging.getLogger("library-doctor-batch-undo-reload-tests"),
         )
         persisted = reloaded.status()["last_result"]
         assert persisted["currently_repaired_count"] == 1

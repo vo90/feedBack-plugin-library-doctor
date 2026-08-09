@@ -1,6 +1,6 @@
-# Library Health development guide
+# Library Doctor development guide
 
-Library Health is an optional FeedBack plugin. It must remain installable as a
+Library Doctor is an optional FeedBack plugin. It must remain installable as a
 standalone plugin even if it is later bundled with FeedBack.
 
 ## Non-negotiable rules
