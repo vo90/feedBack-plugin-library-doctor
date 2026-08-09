@@ -139,7 +139,7 @@ before replacing the archive at the same path (or atomically writing each change
 file in an unpacked directory package). The backup
 contains the original bytes of only the chart files changed by the repair, not
 another full copy of large audio and artwork assets. It is stored under
-`library_health/repair_backups` in FeedBack's config directory and is retained
+`library_doctor/repair_backups` in FeedBack's config directory and is retained
 after repair. **Undo this repair** restores those exact original chart bytes only
 when the repaired files have not subsequently changed; unrelated current package
 members are preserved. Recovery is validated before it is saved, and the backup
@@ -257,7 +257,7 @@ Deep audio mode reads declared Ogg containers but still does not decode samples
 or judge whether the tab is synchronized to what is being played.
 
 The report cache is local to FeedBack's config directory at
-`library_health/library_health.db`. It stores package-relative paths and scan
+`library_doctor/library_doctor.db`. It stores package-relative paths and scan
 results. A targeted scan changes the visible dashboard scope without discarding
 cached reports for the rest of the library. Library Doctor does not contribute
 the database or song identities to FeedBack support bundles.
@@ -278,6 +278,8 @@ confirmed safe-repair workflow.
 - `repair.py` owns the small repair allowlist, source-bound previews, candidate
   construction, full archive-integrity and validation gates, recovery backups,
   bounded repair receipts, undo, and transactional package writes.
+- `migration.py` performs the one-time, fail-closed move from the retired
+  pre-0.15 identity while preserving scan history and recovery artifacts.
 - `routes.py` exposes the scanner through plugin-scoped FastAPI routes and uses
   `context["load_sibling"]` for backend modules.
 - `screen.html`, `screen.js`, and `assets/library-doctor.css` provide the
@@ -295,12 +297,13 @@ the test dependencies and run:
 
 ```bash
 python -m pip install -r requirements-test.txt
-python -m ruff check validator.py scanner.py repair.py batch_repair.py routes.py tests
+python -m ruff check validator.py scanner.py repair.py batch_repair.py migration.py routes.py tests
 python -m pytest --cov --cov-report=term
-python -m py_compile validator.py scanner.py repair.py batch_repair.py routes.py
+python -m py_compile validator.py scanner.py repair.py batch_repair.py migration.py routes.py
 node --check screen.js
 ```
 
-`library_health` is the stable plugin ID and API namespace. The user-facing
-name “Library Doctor” can change later without changing that identifier or the
-cache location.
+`library_doctor` is the plugin ID and API namespace from version 0.15 onward.
+Upgrading from an earlier release moves the previous local cache and recovery
+data automatically before Library Doctor opens it. If both old and new data
+folders exist, startup stops safely so neither copy is overwritten.

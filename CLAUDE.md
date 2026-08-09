@@ -11,7 +11,7 @@ standalone plugin even if it is later bundled with FeedBack.
 - Library scans run in the background and support cancellation.
 - Use `context["load_sibling"]` for sibling Python modules and
   `context["log"]` for backend logging.
-- Register routes only under `/api/plugins/library_health/`.
+- Register routes only under `/api/plugins/library_doctor/`.
 - Do not import FeedBack's private Python modules. Use documented plugin
   context functions instead.
 - Keep validation rules named, deterministic, bounded, and directly tested.
@@ -26,7 +26,7 @@ standalone plugin even if it is later bundled with FeedBack.
 
 ```bash
 python -m pytest
-python -m py_compile validator.py scanner.py routes.py
+python -m py_compile validator.py scanner.py repair.py batch_repair.py migration.py routes.py
 node --check screen.js
 ```
 

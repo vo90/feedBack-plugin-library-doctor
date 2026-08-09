@@ -14,7 +14,7 @@ import pytest
 @pytest.fixture(scope="module")
 def scanner_module():
     path = Path(__file__).parents[1] / "scanner.py"
-    name = "library_health_scanner_tests"
+    name = "library_doctor_scanner_tests"
     spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
     sys.modules[name] = module
@@ -41,7 +41,7 @@ def _report(package, *, status="healthy", lyrics=False, preview=False):
             "string": None,
         })
     return {
-        "schema": "library_health.package.v1",
+        "schema": "library_doctor.package.v1",
         "validator_version": "test-v1",
         "package": package,
         "title": Path(package).stem,
@@ -282,7 +282,7 @@ def test_selecting_library_root_as_a_folder_uses_library_scope(scanner_module, t
 
 
 def test_existing_report_cache_is_migrated_into_visible_scope(scanner_module, tmp_path):
-    database = tmp_path / "config" / "library_health" / "library_health.db"
+    database = tmp_path / "config" / "library_doctor" / "library_doctor.db"
     cache = scanner_module._ReportCache(database)
     legacy_report = _report("legacy.feedpak")
     legacy_report["features"]["deep_audio_checked"] = True

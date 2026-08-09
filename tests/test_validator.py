@@ -14,7 +14,7 @@ def validator():
         Path(__file__).parents[1]
         / "validator.py"
     )
-    name = "library_health_validator_tests"
+    name = "library_doctor_validator_tests"
     spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
     sys.modules[name] = module

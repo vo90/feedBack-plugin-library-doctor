@@ -32,14 +32,14 @@ def _safe_plugin_file(value: str) -> Path:
 def test_manifest_uses_stable_plugin_namespace_and_existing_files():
     manifest = json.loads((ROOT / "plugin.json").read_text(encoding="utf-8"))
 
-    assert manifest["id"] == "library_health"
+    assert manifest["id"] == "library_doctor"
     assert re.fullmatch(r"[a-z][a-z0-9_]*", manifest["id"])
     assert manifest["name"] == "Library Doctor"
-    assert manifest["version"] == "0.14.0"
+    assert manifest["version"] == "0.15.0"
     assert manifest["private"] is False
     assert manifest["nav"] == {
         "label": "Library Doctor",
-        "screen": "plugin-library_health",
+        "screen": "plugin-library_doctor",
     }
     for key in ("screen", "script", "styles", "routes", "icon"):
         _safe_plugin_file(manifest[key])

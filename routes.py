@@ -17,6 +17,8 @@ def setup(app, context):
     if log is None:
         raise RuntimeError("Library Doctor requires FeedBack's plugin logger.")
 
+    migration = load_sibling("migration")
+    migration.migrate_legacy_state(Path(context["config_dir"]), log)
     validator = load_sibling("validator")
     scanner_module = load_sibling("scanner")
     repair_module = load_sibling("repair")
@@ -35,6 +37,7 @@ def setup(app, context):
         validate_feedpak=validator.validate_feedpak,
         validator_version=validator.VALIDATOR_VERSION,
         log=log,
+        legacy_schemas=migration.LEGACY_SCHEMAS,
     )
     batch_manager = batch_module.BatchRepairManager(
         config_dir=Path(context["config_dir"]),
@@ -42,9 +45,10 @@ def setup(app, context):
         repair_service=repair_service,
         repair_error_type=repair_module.RepairPlanningError,
         log=log,
+        legacy_schemas=migration.LEGACY_SCHEMAS,
     )
 
-    router = APIRouter(prefix="/api/plugins/library_health", tags=["library_health"])
+    router = APIRouter(prefix="/api/plugins/library_doctor", tags=["library_doctor"])
 
     @router.get("/status")
     def get_status():
@@ -112,7 +116,7 @@ def setup(app, context):
     @router.get("/repairs")
     def get_repairs():
         return {
-            "schema": "library_health.repair_catalog.v1",
+            "schema": "library_doctor.repair_catalog.v1",
             "items": repair_module.repair_catalog(),
             "combined": repair_module.all_safe_repair_definition(),
         }

@@ -7,7 +7,7 @@ from pathlib import Path
 
 def _load_batch_module():
     path = Path(__file__).parents[1] / "batch_repair.py"
-    name = "library_health_batch_repair_tests"
+    name = "library_doctor_batch_repair_tests"
     spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
     sys.modules[name] = module
@@ -48,6 +48,33 @@ class _Scanner:
 
     def record_repair_result(self, package, report, *, deep_audio=False):
         self.cached.append((package, report, deep_audio))
+
+
+def test_last_batch_reader_preserves_pre_rename_receipt(tmp_path):
+    name, module = _load_batch_module()
+    try:
+        result_path = (
+            tmp_path / "config" / "library_doctor" / "batch_result.json"
+        )
+        result_path.parent.mkdir(parents=True)
+        result_path.write_text(
+            '{"schema":"library_health.batch_result.v1","outcomes":[]}',
+            encoding="utf-8",
+        )
+        manager = module.BatchRepairManager(
+            config_dir=tmp_path / "config",
+            scanner=_Scanner(),
+            repair_service=object(),
+            repair_error_type=_RepairError,
+            log=logging.getLogger("library-doctor-legacy-batch-tests"),
+            legacy_schemas={
+                "batch_result": {"library_health.batch_result.v1"}
+            },
+        )
+
+        assert manager.status()["last_result"]["schema"] == module.BATCH_RESULT_SCHEMA
+    finally:
+        sys.modules.pop(name, None)
 
 
 class _BlockingRepairService:
@@ -132,7 +159,7 @@ def test_batch_cancellation_finishes_current_feedpak_and_keeps_its_receipt(tmp_p
             log=logging.getLogger("library-doctor-batch-tests"),
         )
         snapshot = {
-            "schema": "library_health.repair_scope.v1",
+            "schema": "library_doctor.repair_scope.v1",
             "target": {"kind": "folder", "label": "Test folder"},
             "deep_audio": False,
             "validator_version": "rules-test",
@@ -172,7 +199,7 @@ def test_batch_cancellation_finishes_current_feedpak_and_keeps_its_receipt(tmp_p
         assert [call[0] for call in repairs.apply_calls] == ["one.feedpak"]
         assert scanner.cached[0][0] == "one.feedpak"
         assert scanner.finish_count == 2
-        assert (tmp_path / "config" / "library_health" / "batch_result.json").is_file()
+        assert (tmp_path / "config" / "library_doctor" / "batch_result.json").is_file()
     finally:
         sys.modules.pop(name, None)
 
@@ -190,7 +217,7 @@ def test_batch_undo_cancellation_finishes_current_restore_and_keeps_later_packag
             log=logging.getLogger("library-doctor-batch-undo-tests"),
         )
         snapshot = {
-            "schema": "library_health.repair_scope.v1",
+            "schema": "library_doctor.repair_scope.v1",
             "target": {"kind": "folder", "label": "Test folder"},
             "deep_audio": False,
             "validator_version": "rules-test",

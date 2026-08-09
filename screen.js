@@ -1,7 +1,7 @@
 (function () {
   'use strict';
 
-  const API = '/api/plugins/library_health';
+  const API = '/api/plugins/library_doctor';
   const PAGE_SIZE = 50;
   const state = {
     active: false,
@@ -36,7 +36,7 @@
 
   function elements() {
     if (el && el.root && el.root.isConnected) return el;
-    const root = document.getElementById('plugin-library_health');
+    const root = document.getElementById('plugin-library_doctor');
     if (!root) return null;
     el = {
       root,
@@ -2149,7 +2149,7 @@
       schedulePlaybackStatusPoll(0);
     }
     else if (from === 'player') setPlaybackPriority(false);
-    if (id === 'plugin-library_health') enter();
+    if (id === 'plugin-library_doctor') enter();
     else if (state.active) leave();
   }
 
@@ -2163,7 +2163,7 @@
     }
     playerScreenActive = document.querySelector('.screen.active')?.id === 'player';
     setPlaybackPriority(playerScreenActive);
-    const root = document.getElementById('plugin-library_health');
+    const root = document.getElementById('plugin-library_doctor');
     if (root && root.classList.contains('active')) enter();
   }
 

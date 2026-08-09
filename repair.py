@@ -27,16 +27,16 @@ import yaml
 
 
 REPAIR_CATALOG_VERSION = "repairs-4"
-REPAIR_PLAN_SCHEMA = "library_health.repair_plan.v1"
+REPAIR_PLAN_SCHEMA = "library_doctor.repair_plan.v1"
 MAX_REPAIR_TEXT_BYTES = 64 * 1024 * 1024
 MAX_REPAIR_STRUCTURE_ITEMS = 2_000_000
 MAX_REPAIR_MANIFEST_BYTES = 4 * 1024 * 1024
 MAX_DECLARED_REPAIR_MEMBERS = 1_000
 MAX_RECOVERY_BACKUP_BYTES = 512 * 1024 * 1024
 PACKAGE_SUFFIXES = (".feedpak", ".sloppak")
-PACKAGE_REPAIR_SCHEMA = "library_health.package_repair.v1"
-BACKUP_SCHEMA = "library_health.repair_backup.v2"
-HISTORY_SCHEMA = "library_health.repair_history.v1"
+PACKAGE_REPAIR_SCHEMA = "library_doctor.package_repair.v1"
+BACKUP_SCHEMA = "library_doctor.repair_backup.v2"
+HISTORY_SCHEMA = "library_doctor.repair_history.v1"
 MAX_REPAIR_HISTORY = 50
 _BACKUP_ID_RE = re.compile(r"^[0-9]{8}-[0-9]{6}-[0-9a-f]{12}$")
 ALL_SAFE_RULE_CODE = "package.all-safe"
@@ -437,12 +437,24 @@ class RepairService:
         validate_feedpak,
         validator_version: str,
         log,
+        legacy_schemas: dict | None = None,
     ) -> None:
         self._config_dir = Path(config_dir)
         self._get_dlc_dir = get_dlc_dir
         self._validate_feedpak = validate_feedpak
         self._validator_version = validator_version
         self._log = log
+        compatibility = legacy_schemas if isinstance(legacy_schemas, dict) else {}
+        self._legacy_backup_schemas = frozenset(
+            item
+            for item in compatibility.get("repair_backup", ())
+            if isinstance(item, str)
+        )
+        self._legacy_history_schemas = frozenset(
+            item
+            for item in compatibility.get("repair_history", ())
+            if isinstance(item, str)
+        )
         self._lock = threading.Lock()
 
     def preview(self, package: str, rule_code: str) -> dict:
@@ -613,7 +625,7 @@ class RepairService:
 
     def _recover_legacy_receipts(self) -> list[dict]:
         """Surface verified backups created before persistent receipts existed."""
-        backup_dir = self._config_dir / "library_health" / "repair_backups"
+        backup_dir = self._config_dir / "library_doctor" / "repair_backups"
         try:
             candidates = sorted(backup_dir.glob("*.zip"))[-20:]
         except OSError:
@@ -821,7 +833,7 @@ class RepairService:
                 backup_summary = {}
             combined_repair = rule_code == ALL_SAFE_RULE_CODE
             unsigned = {
-                "schema": "library_health.restore_plan.v1",
+                "schema": "library_doctor.restore_plan.v1",
                 "package": package_name,
                 "backup_id": backup_id,
                 "validator_version": self._validator_version,
@@ -1402,7 +1414,7 @@ class RepairService:
         rule_code: str,
         plan: dict,
     ) -> str:
-        backup_dir = self._config_dir / "library_health" / "repair_backups"
+        backup_dir = self._config_dir / "library_doctor" / "repair_backups"
         backup_id = f"{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:12]}"
         try:
             backup_dir.mkdir(parents=True, exist_ok=True)
@@ -1461,7 +1473,7 @@ class RepairService:
         return backup_id
 
     def _read_backup(self, backup_id: str, package_name: str) -> tuple[dict, dict[str, bytes]]:
-        backup_dir = self._config_dir / "library_health" / "repair_backups"
+        backup_dir = self._config_dir / "library_doctor" / "repair_backups"
         destination = backup_dir / f"{backup_id}.zip"
         try:
             destination.resolve(strict=True).relative_to(backup_dir.resolve(strict=True))
@@ -1483,7 +1495,9 @@ class RepairService:
                     raise RepairPlanningError("backup_unreadable", "The recovery backup is invalid.")
                 metadata = json.loads(archive.read(info).decode("utf-8"))
                 if not isinstance(metadata, dict) or metadata.get("schema") not in {
-                    "library_health.repair_backup.v1", BACKUP_SCHEMA,
+                    "library_doctor.repair_backup.v1",
+                    BACKUP_SCHEMA,
+                    *self._legacy_backup_schemas,
                 }:
                     raise RepairPlanningError("backup_unreadable", "The recovery backup is invalid.")
                 if metadata.get("backup_id") != backup_id or metadata.get("package") != package_name:
@@ -1530,7 +1544,7 @@ class RepairService:
 
     @property
     def _history_path(self) -> Path:
-        return self._config_dir / "library_health" / "repair_history.json"
+        return self._config_dir / "library_doctor" / "repair_history.json"
 
     def _read_history(self) -> list[dict]:
         try:
@@ -1538,7 +1552,10 @@ class RepairService:
             if len(raw) > MAX_REPAIR_MANIFEST_BYTES:
                 return []
             payload = json.loads(raw.decode("utf-8"))
-            if payload.get("schema") != HISTORY_SCHEMA or not isinstance(payload.get("items"), list):
+            if payload.get("schema") not in {
+                HISTORY_SCHEMA,
+                *self._legacy_history_schemas,
+            } or not isinstance(payload.get("items"), list):
                 return []
             return [item for item in payload["items"] if isinstance(item, dict)][-MAX_REPAIR_HISTORY:]
         except (OSError, AttributeError, UnicodeDecodeError, json.JSONDecodeError):

@@ -3942,7 +3942,7 @@ def _result(
         else "healthy"
     )
     return {
-        "schema": "library_health.package.v1",
+        "schema": "library_doctor.package.v1",
         "validator_version": VALIDATOR_VERSION,
         "spec_revision": SPEC_REVISION,
         "package": package_name,

@@ -50,7 +50,7 @@ def _client(tmp_path, *, with_library=True, validator_hook=None):
     def load_sibling(name):
         if name not in loaded:
             loaded[name] = _load(
-                root / f"{name}.py", f"library_health_routes_test_{name}_{id(loaded)}"
+                root / f"{name}.py", f"library_doctor_routes_test_{name}_{id(loaded)}"
             )
             if name == "validator" and validator_hook is not None:
                 validator_hook(loaded[name])
@@ -59,7 +59,7 @@ def _client(tmp_path, *, with_library=True, validator_hook=None):
     library = tmp_path / "library"
     if with_library:
         library.mkdir()
-    routes = _load(root / "routes.py", f"library_health_routes_test_{id(tmp_path)}")
+    routes = _load(root / "routes.py", f"library_doctor_routes_test_{id(tmp_path)}")
     app = FastAPI()
     routes.setup(app, {
         "config_dir": tmp_path / "config",
@@ -73,7 +73,7 @@ def _client(tmp_path, *, with_library=True, validator_hook=None):
 def _wait_for_scan(client, timeout=5):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        status = client.get("/api/plugins/library_health/status").json()
+        status = client.get("/api/plugins/library_doctor/status").json()
         if not status["running"]:
             return status
         time.sleep(0.01)
@@ -86,7 +86,7 @@ def _wait_for_batch(client, phases, timeout=10):
     status = None
     while time.monotonic() < deadline:
         status = client.get(
-            "/api/plugins/library_health/repair/batch/status"
+            "/api/plugins/library_doctor/repair/batch/status"
         ).json()
         if status["phase"] in expected:
             return status
@@ -100,19 +100,19 @@ def test_scan_and_results_are_available_through_plugin_routes(tmp_path):
     client, library = _client(tmp_path)
     _valid_package(library)
 
-    response = client.post("/api/plugins/library_health/scan")
+    response = client.post("/api/plugins/library_doctor/scan")
     assert response.status_code == 202
     assert response.json()["started"] is True
     status = _wait_for_scan(client)
-    results = client.get("/api/plugins/library_health/results").json()
-    rules = client.get("/api/plugins/library_health/rules").json()
-    exported = client.get("/api/plugins/library_health/export?format=json")
+    results = client.get("/api/plugins/library_doctor/results").json()
+    rules = client.get("/api/plugins/library_doctor/rules").json()
+    exported = client.get("/api/plugins/library_doctor/export?format=json")
 
     assert status["stage"] == "complete"
     assert status["summary"]["total"] == 1
     assert results["total"] == 1
     assert results["items"][0]["package"] == "Artist/Song.feedpak"
-    assert rules == {"schema": "library_health.rules.v1", "items": []}
+    assert rules == {"schema": "library_doctor.rules.v1", "items": []}
     assert exported.status_code == 200
     assert exported.headers["content-disposition"].endswith('"library-doctor-report.json"')
     assert exported.json()["packages"][0]["package"] == "Artist/Song.feedpak"
@@ -137,7 +137,7 @@ def test_deep_audio_option_is_forwarded_and_reported(tmp_path):
     _valid_package(library)
 
     response = client.post(
-        "/api/plugins/library_health/scan",
+        "/api/plugins/library_doctor/scan",
         json={"scope": "library", "deep_audio": True},
     )
     status = _wait_for_scan(client)
@@ -153,18 +153,18 @@ def test_playback_state_pauses_and_resumes_scan(tmp_path):
     _valid_package(library)
 
     invalid = client.put(
-        "/api/plugins/library_health/playback",
+        "/api/plugins/library_doctor/playback",
         json={"active": "yes"},
     )
     held = client.put(
-        "/api/plugins/library_health/playback",
+        "/api/plugins/library_doctor/playback",
         json={"active": True},
     )
-    started = client.post("/api/plugins/library_health/scan")
+    started = client.post("/api/plugins/library_doctor/scan")
     deadline = time.monotonic() + 2
     status = started.json()["status"]
     while status["stage"] != "paused" and time.monotonic() < deadline:
-        status = client.get("/api/plugins/library_health/status").json()
+        status = client.get("/api/plugins/library_doctor/status").json()
         time.sleep(0.01)
 
     assert invalid.status_code == 400
@@ -174,7 +174,7 @@ def test_playback_state_pauses_and_resumes_scan(tmp_path):
     assert status["playback_paused"] is True
 
     released = client.put(
-        "/api/plugins/library_health/playback",
+        "/api/plugins/library_doctor/playback",
         json={"active": False},
     )
     complete = _wait_for_scan(client)
@@ -202,9 +202,9 @@ def test_start_is_idempotent_while_scan_is_running(tmp_path):
     client, library = _client(tmp_path, validator_hook=hook)
     _valid_package(library)
 
-    first = client.post("/api/plugins/library_health/scan").json()
+    first = client.post("/api/plugins/library_doctor/scan").json()
     assert entered.wait(2)
-    second = client.post("/api/plugins/library_health/scan").json()
+    second = client.post("/api/plugins/library_doctor/scan").json()
 
     assert first["started"] is True
     assert second["started"] is False
@@ -219,12 +219,12 @@ def test_folder_scan_is_recursive_and_results_are_scoped(tmp_path):
     _valid_package(library, "Elsewhere/Two.feedpak")
 
     response = client.post(
-        "/api/plugins/library_health/scan",
+        "/api/plugins/library_doctor/scan",
         json={"scope": "folder", "path": str(library / "ACDC")},
     )
     assert response.status_code == 202
     status = _wait_for_scan(client)
-    results = client.get("/api/plugins/library_health/results").json()
+    results = client.get("/api/plugins/library_doctor/results").json()
 
     assert status["target"] == {"kind": "folder", "label": "ACDC"}
     assert status["summary"]["total"] == 1
@@ -245,12 +245,12 @@ def test_single_file_scan_accepts_one_feedpak(tmp_path):
     _valid_package(library, "Other.feedpak")
 
     response = client.post(
-        "/api/plugins/library_health/scan",
+        "/api/plugins/library_doctor/scan",
         json={"scope": "file", "path": str(chosen)},
     )
     assert response.status_code == 202
     status = _wait_for_scan(client)
-    results = client.get("/api/plugins/library_health/results").json()
+    results = client.get("/api/plugins/library_doctor/results").json()
 
     assert status["target"] == {"kind": "file", "label": "Chosen.feedpak"}
     assert results["total"] == 1
@@ -264,7 +264,7 @@ def test_scan_rejects_targets_outside_the_configured_library(tmp_path):
     outside.mkdir()
 
     response = client.post(
-        "/api/plugins/library_health/scan",
+        "/api/plugins/library_doctor/scan",
         json={"scope": "folder", "path": str(outside)},
     )
 
@@ -277,7 +277,7 @@ def test_scan_rejects_targets_outside_the_configured_library(tmp_path):
 def test_unknown_result_filter_is_rejected(tmp_path):
     client, _library = _client(tmp_path)
 
-    response = client.get("/api/plugins/library_health/results?filter=unknown")
+    response = client.get("/api/plugins/library_doctor/results?filter=unknown")
 
     assert response.status_code == 400
     assert "Unknown result filter" in response.json()["detail"]
@@ -293,12 +293,12 @@ def test_exact_duplicate_repair_requires_preview_backs_up_and_refreshes_report(t
         json.dumps({"notes": [note, dict(note)], "chords": []}),
         encoding="utf-8",
     )
-    client.post("/api/plugins/library_health/scan")
+    client.post("/api/plugins/library_doctor/scan")
     _wait_for_scan(client)
 
-    catalog = client.get("/api/plugins/library_health/repairs").json()
+    catalog = client.get("/api/plugins/library_doctor/repairs").json()
     preview = client.post(
-        "/api/plugins/library_health/repair/preview",
+        "/api/plugins/library_doctor/repair/preview",
         json={"package": "Artist/Song.feedpak", "rule_code": "chart.duplicate-note"},
     )
 
@@ -310,7 +310,7 @@ def test_exact_duplicate_repair_requires_preview_backs_up_and_refreshes_report(t
     assert plan["musical_positions"] == 1
 
     applied = client.post(
-        "/api/plugins/library_health/repair/apply",
+        "/api/plugins/library_doctor/repair/apply",
         json={
             "package": "Artist/Song.feedpak",
             "rule_code": "chart.duplicate-note",
@@ -327,26 +327,26 @@ def test_exact_duplicate_repair_requires_preview_backs_up_and_refreshes_report(t
     assert applied.json()["user_value"]
     assert applied.json()["file_handling"]["duplicate_library_package_created"] is False
     assert len(json.loads(arrangement.read_text(encoding="utf-8"))["notes"]) == 1
-    backups = list((tmp_path / "config" / "library_health" / "repair_backups").glob("*.zip"))
+    backups = list((tmp_path / "config" / "library_doctor" / "repair_backups").glob("*.zip"))
     assert len(backups) == 1
     with zipfile.ZipFile(backups[0], "r") as backup:
         metadata = json.loads(backup.read("repair.json"))
-        assert metadata["schema"] == "library_health.repair_backup.v2"
+        assert metadata["schema"] == "library_doctor.repair_backup.v2"
         assert metadata["rule_code"] == "chart.duplicate-note"
         assert metadata["summary"]["removed_count"] == 1
-    results = client.get("/api/plugins/library_health/results").json()
+    results = client.get("/api/plugins/library_doctor/results").json()
     assert results["items"][0]["status"] == "healthy"
     assert not any(
         finding["code"] == "chart.duplicate-note"
         for finding in results["items"][0]["findings"]
     )
 
-    history = client.get("/api/plugins/library_health/repair/history?limit=1").json()
+    history = client.get("/api/plugins/library_doctor/repair/history?limit=1").json()
     assert history["items"][0]["outcome"] == "success"
     assert history["items"][0]["backup_id"] == applied.json()["backup_id"]
 
     restored = client.post(
-        "/api/plugins/library_health/repair/restore",
+        "/api/plugins/library_doctor/repair/restore",
         json={
             "package": "Artist/Song.feedpak",
             "backup_id": applied.json()["backup_id"],
@@ -358,7 +358,7 @@ def test_exact_duplicate_repair_requires_preview_backs_up_and_refreshes_report(t
     assert restored.json()["receipt_saved"] is True
     assert len(json.loads(arrangement.read_text(encoding="utf-8"))["notes"]) == 2
     assert backups[0].exists()
-    restored_results = client.get("/api/plugins/library_health/results").json()
+    restored_results = client.get("/api/plugins/library_doctor/results").json()
     assert any(
         finding["code"] == "chart.duplicate-note"
         for finding in restored_results["items"][0]["findings"]
@@ -405,11 +405,11 @@ def test_fix_all_safe_issues_is_one_validated_reversible_package_transaction(tmp
     drums_path = package / "drums.json"
     drums_path.write_bytes(original_drums)
 
-    client.post("/api/plugins/library_health/scan")
+    client.post("/api/plugins/library_doctor/scan")
     _wait_for_scan(client)
-    catalog = client.get("/api/plugins/library_health/repairs").json()
+    catalog = client.get("/api/plugins/library_doctor/repairs").json()
     preview = client.post(
-        "/api/plugins/library_health/repair/all/preview",
+        "/api/plugins/library_doctor/repair/all/preview",
         json={"package": "Artist/Song.feedpak"},
     )
 
@@ -431,7 +431,7 @@ def test_fix_all_safe_issues_is_one_validated_reversible_package_transaction(tmp
     assert plan["member_count"] == 2
 
     applied = client.post(
-        "/api/plugins/library_health/repair/all/apply",
+        "/api/plugins/library_doctor/repair/all/apply",
         json={
             "package": "Artist/Song.feedpak",
             "plan_id": plan["plan_id"],
@@ -454,7 +454,7 @@ def test_fix_all_safe_issues_is_one_validated_reversible_package_transaction(tmp
     assert len(repaired["handshapes"]) == 1
     assert len(json.loads(drums_path.read_text(encoding="utf-8"))["hits"]) == 1
     backups = list(
-        (tmp_path / "config" / "library_health" / "repair_backups").glob("*.zip")
+        (tmp_path / "config" / "library_doctor" / "repair_backups").glob("*.zip")
     )
     assert len(backups) == 1
     with zipfile.ZipFile(backups[0], "r") as backup:
@@ -464,14 +464,14 @@ def test_fix_all_safe_issues_is_one_validated_reversible_package_transaction(tmp
         assert len(metadata["members"]) == 2
         assert len(metadata["summary"]["repair_summaries"]) == 7
 
-    refreshed = client.get("/api/plugins/library_health/results").json()
+    refreshed = client.get("/api/plugins/library_doctor/results").json()
     refreshed_codes = {
         finding["code"] for finding in refreshed["items"][0]["findings"]
     }
     assert not (set(plan["rule_codes"]) & refreshed_codes)
 
     restored = client.post(
-        "/api/plugins/library_health/repair/restore",
+        "/api/plugins/library_doctor/repair/restore",
         json={
             "package": "Artist/Song.feedpak",
             "backup_id": result["backup_id"],
@@ -498,14 +498,14 @@ def test_fix_all_safe_issues_refuses_a_stale_preview_without_changing_files(tmp_
     }
     arrangement_path.write_text(json.dumps(document), encoding="utf-8")
     preview = client.post(
-        "/api/plugins/library_health/repair/all/preview",
+        "/api/plugins/library_doctor/repair/all/preview",
         json={"package": "Artist/Song.feedpak"},
     ).json()
     changed = {**document, "author_edit": True}
     arrangement_path.write_text(json.dumps(changed), encoding="utf-8")
 
     response = client.post(
-        "/api/plugins/library_health/repair/all/apply",
+        "/api/plugins/library_doctor/repair/all/apply",
         json={
             "package": "Artist/Song.feedpak",
             "plan_id": preview["plan_id"],
@@ -516,7 +516,7 @@ def test_fix_all_safe_issues_refuses_a_stale_preview_without_changing_files(tmp_
     assert response.status_code == 409
     assert response.json()["detail"]["code"] == "source_changed"
     assert json.loads(arrangement_path.read_text(encoding="utf-8")) == changed
-    assert not (tmp_path / "config" / "library_health" / "repair_backups").exists()
+    assert not (tmp_path / "config" / "library_doctor" / "repair_backups").exists()
     client.close()
 
 
@@ -543,12 +543,12 @@ def test_fix_all_safe_issues_does_not_partially_apply_when_a_chart_is_blocked(tm
     arrangement_path.write_bytes(original)
 
     preview = client.post(
-        "/api/plugins/library_health/repair/all/preview",
+        "/api/plugins/library_doctor/repair/all/preview",
         json={"package": "Artist/Song.feedpak"},
     )
     plan = preview.json()
     response = client.post(
-        "/api/plugins/library_health/repair/all/apply",
+        "/api/plugins/library_doctor/repair/all/apply",
         json={
             "package": "Artist/Song.feedpak",
             "plan_id": plan["plan_id"],
@@ -562,7 +562,7 @@ def test_fix_all_safe_issues_does_not_partially_apply_when_a_chart_is_blocked(tm
     assert response.status_code == 409
     assert response.json()["detail"]["code"] == "nothing_to_repair"
     assert arrangement_path.read_bytes() == original
-    assert not (tmp_path / "config" / "library_health" / "repair_backups").exists()
+    assert not (tmp_path / "config" / "library_doctor" / "repair_backups").exists()
     client.close()
 
 
@@ -605,10 +605,10 @@ def test_batch_preview_and_apply_repair_each_eligible_feedpak_separately(tmp_pat
     )
 
     _valid_package(library, "Healthy.feedpak")
-    client.post("/api/plugins/library_health/scan")
+    client.post("/api/plugins/library_doctor/scan")
     _wait_for_scan(client)
 
-    started = client.post("/api/plugins/library_health/repair/batch/preview")
+    started = client.post("/api/plugins/library_doctor/repair/batch/preview")
     preview_status = _wait_for_batch(client, "ready")
     preview = preview_status["preview"]
 
@@ -626,7 +626,7 @@ def test_batch_preview_and_apply_repair_each_eligible_feedpak_separately(tmp_pat
     assert len(preview["batch_plan_id"]) == 64
 
     applied = client.post(
-        "/api/plugins/library_health/repair/batch/apply",
+        "/api/plugins/library_doctor/repair/batch/apply",
         json={"batch_plan_id": preview["batch_plan_id"]},
     )
     completed = _wait_for_batch(client, "completed")
@@ -644,11 +644,11 @@ def test_batch_preview_and_apply_repair_each_eligible_feedpak_separately(tmp_pat
     assert len(json.loads(second_path.read_text(encoding="utf-8"))["notes"]) == 1
     assert len(json.loads(blocked_path.read_text(encoding="utf-8"))["notes"]) == 2
     backups = list(
-        (tmp_path / "config" / "library_health" / "repair_backups").glob("*.zip")
+        (tmp_path / "config" / "library_doctor" / "repair_backups").glob("*.zip")
     )
     assert len(backups) == 2
-    assert (tmp_path / "config" / "library_health" / "batch_result.json").is_file()
-    refreshed = client.get("/api/plugins/library_health/results?filter=all").json()
+    assert (tmp_path / "config" / "library_doctor" / "batch_result.json").is_file()
+    refreshed = client.get("/api/plugins/library_doctor/results?filter=all").json()
     by_package = {item["package"]: item for item in refreshed["items"]}
     assert not any(
         finding["code"].startswith("chart.duplicate")
@@ -667,14 +667,14 @@ def test_batch_preview_and_apply_repair_each_eligible_feedpak_separately(tmp_pat
         item for item in result["outcomes"] if item["package"] == "First.feedpak"
     )
     restored = client.post(
-        "/api/plugins/library_health/repair/restore",
+        "/api/plugins/library_doctor/repair/restore",
         json={
             "package": first_outcome["package"],
             "backup_id": first_outcome["backup_id"],
         },
     )
     batch_after_restore = client.get(
-        "/api/plugins/library_health/repair/batch/status"
+        "/api/plugins/library_doctor/repair/batch/status"
     ).json()
 
     assert restored.status_code == 200
@@ -691,7 +691,7 @@ def test_batch_preview_and_apply_repair_each_eligible_feedpak_separately(tmp_pat
     assert len(restored_first["anchors"]) == 2
 
     undo_started = client.post(
-        "/api/plugins/library_health/repair/batch/undo/preview"
+        "/api/plugins/library_doctor/repair/batch/undo/preview"
     )
     undo_ready = _wait_for_batch(client, "undo_ready")
     undo_preview = undo_ready["undo_preview"]
@@ -705,7 +705,7 @@ def test_batch_preview_and_apply_repair_each_eligible_feedpak_separately(tmp_pat
     assert undo_preview["packages"][0]["package"] == "Second.feedpak"
 
     undo_applied = client.post(
-        "/api/plugins/library_health/repair/batch/undo/apply",
+        "/api/plugins/library_doctor/repair/batch/undo/apply",
         json={"undo_plan_id": undo_preview["undo_plan_id"]},
     )
     undo_completed = _wait_for_batch(client, "undo_completed")
@@ -722,7 +722,7 @@ def test_batch_preview_and_apply_repair_each_eligible_feedpak_separately(tmp_pat
     assert current_batch["current_removed_count"] == 0
     assert len(json.loads(second_path.read_text(encoding="utf-8"))["notes"]) == 2
     after_undo_results = client.get(
-        "/api/plugins/library_health/results?filter=all"
+        "/api/plugins/library_doctor/results?filter=all"
     ).json()
     after_undo_by_package = {
         item["package"]: item for item in after_undo_results["items"]
@@ -732,7 +732,7 @@ def test_batch_preview_and_apply_repair_each_eligible_feedpak_separately(tmp_pat
         for finding in after_undo_by_package["Second.feedpak"]["findings"]
     )
     nothing_left = client.post(
-        "/api/plugins/library_health/repair/batch/undo/preview"
+        "/api/plugins/library_doctor/repair/batch/undo/preview"
     )
     assert nothing_left.status_code == 409
     assert nothing_left.json()["detail"]["code"] == "nothing_to_restore"
@@ -749,12 +749,12 @@ def test_batch_undo_excludes_a_package_changed_after_repair_and_continues(tmp_pa
     original = {"notes": [note, dict(note)], "chords": []}
     first_path.write_text(json.dumps(original), encoding="utf-8")
     second_path.write_text(json.dumps(original), encoding="utf-8")
-    client.post("/api/plugins/library_health/scan")
+    client.post("/api/plugins/library_doctor/scan")
     _wait_for_scan(client)
-    client.post("/api/plugins/library_health/repair/batch/preview")
+    client.post("/api/plugins/library_doctor/repair/batch/preview")
     preview = _wait_for_batch(client, "ready")["preview"]
     client.post(
-        "/api/plugins/library_health/repair/batch/apply",
+        "/api/plugins/library_doctor/repair/batch/apply",
         json={"batch_plan_id": preview["batch_plan_id"]},
     )
     _wait_for_batch(client, "completed")
@@ -762,7 +762,7 @@ def test_batch_undo_excludes_a_package_changed_after_repair_and_continues(tmp_pa
     changed["author_edit"] = True
     first_path.write_text(json.dumps(changed), encoding="utf-8")
 
-    client.post("/api/plugins/library_health/repair/batch/undo/preview")
+    client.post("/api/plugins/library_doctor/repair/batch/undo/preview")
     undo_preview = _wait_for_batch(client, "undo_ready")["undo_preview"]
 
     assert undo_preview["eligible_count"] == 1
@@ -772,7 +772,7 @@ def test_batch_undo_excludes_a_package_changed_after_repair_and_continues(tmp_pa
     assert undo_preview["blocked"][0]["code"] == "package_changed"
 
     client.post(
-        "/api/plugins/library_health/repair/batch/undo/apply",
+        "/api/plugins/library_doctor/repair/batch/undo/apply",
         json={"undo_plan_id": undo_preview["undo_plan_id"]},
     )
     completed = _wait_for_batch(client, "undo_completed")
@@ -789,14 +789,14 @@ def test_batch_undo_requires_a_result_and_a_reviewed_plan(tmp_path):
     client, _library = _client(tmp_path)
 
     no_result = client.post(
-        "/api/plugins/library_health/repair/batch/undo/preview"
+        "/api/plugins/library_doctor/repair/batch/undo/preview"
     )
     missing_plan = client.post(
-        "/api/plugins/library_health/repair/batch/undo/apply",
+        "/api/plugins/library_doctor/repair/batch/undo/apply",
         json={},
     )
     invalid_plan = client.post(
-        "/api/plugins/library_health/repair/batch/undo/apply",
+        "/api/plugins/library_doctor/repair/batch/undo/apply",
         json={"undo_plan_id": "not-a-reviewed-plan"},
     )
 
@@ -819,15 +819,15 @@ def test_batch_repair_skips_a_stale_package_and_continues_with_the_next(tmp_path
     original = {"notes": [note, dict(note)], "chords": []}
     first_path.write_text(json.dumps(original), encoding="utf-8")
     second_path.write_text(json.dumps(original), encoding="utf-8")
-    client.post("/api/plugins/library_health/scan")
+    client.post("/api/plugins/library_doctor/scan")
     _wait_for_scan(client)
-    client.post("/api/plugins/library_health/repair/batch/preview")
+    client.post("/api/plugins/library_doctor/repair/batch/preview")
     preview = _wait_for_batch(client, "ready")["preview"]
     changed = {**original, "author_edit": True}
     first_path.write_text(json.dumps(changed), encoding="utf-8")
 
     client.post(
-        "/api/plugins/library_health/repair/batch/apply",
+        "/api/plugins/library_doctor/repair/batch/apply",
         json={"batch_plan_id": preview["batch_plan_id"]},
     )
     result = _wait_for_batch(client, "completed")["result"]
@@ -845,7 +845,7 @@ def test_batch_repair_skips_a_stale_package_and_continues_with_the_next(tmp_path
     assert json.loads(first_path.read_text(encoding="utf-8")) == changed
     assert len(json.loads(second_path.read_text(encoding="utf-8"))["notes"]) == 1
     assert len(list(
-        (tmp_path / "config" / "library_health" / "repair_backups").glob("*.zip")
+        (tmp_path / "config" / "library_doctor" / "repair_backups").glob("*.zip")
     )) == 1
     client.close()
 
@@ -859,13 +859,13 @@ def test_batch_preview_pauses_for_gameplay_and_resumes(tmp_path):
         json.dumps({"notes": [note, dict(note)], "chords": []}),
         encoding="utf-8",
     )
-    client.post("/api/plugins/library_health/scan")
+    client.post("/api/plugins/library_doctor/scan")
     _wait_for_scan(client)
-    client.put("/api/plugins/library_health/playback", json={"active": True})
+    client.put("/api/plugins/library_doctor/playback", json={"active": True})
 
-    started = client.post("/api/plugins/library_health/repair/batch/preview")
+    started = client.post("/api/plugins/library_doctor/repair/batch/preview")
     paused = _wait_for_batch(client, "paused")
-    client.put("/api/plugins/library_health/playback", json={"active": False})
+    client.put("/api/plugins/library_doctor/playback", json={"active": False})
     ready = _wait_for_batch(client, "ready")
 
     assert started.status_code == 202
@@ -879,7 +879,7 @@ def test_batch_preview_requires_a_complete_current_scan(tmp_path):
     client, library = _client(tmp_path)
     _valid_package(library)
 
-    response = client.post("/api/plugins/library_health/repair/batch/preview")
+    response = client.post("/api/plugins/library_doctor/repair/batch/preview")
 
     assert response.status_code == 409
     assert "Complete the current scan scope" in response.json()["detail"]
@@ -906,16 +906,16 @@ def test_note_that_duplicates_a_chord_uses_a_distinct_safe_repair(tmp_path):
         }],
     }
     arrangement_path.write_text(json.dumps(arrangement), encoding="utf-8")
-    client.post("/api/plugins/library_health/scan")
+    client.post("/api/plugins/library_doctor/scan")
     _wait_for_scan(client)
 
-    results = client.get("/api/plugins/library_health/results").json()
+    results = client.get("/api/plugins/library_doctor/results").json()
     assert any(
         finding["code"] == "chart.note-duplicates-chord"
         for finding in results["items"][0]["findings"]
     )
     preview = client.post(
-        "/api/plugins/library_health/repair/preview",
+        "/api/plugins/library_doctor/repair/preview",
         json={
             "package": "Artist/Song.feedpak",
             "rule_code": "chart.note-duplicates-chord",
@@ -930,7 +930,7 @@ def test_note_that_duplicates_a_chord_uses_a_distinct_safe_repair(tmp_path):
     assert plan["musical_positions"] == 1
 
     response = client.post(
-        "/api/plugins/library_health/repair/apply",
+        "/api/plugins/library_doctor/repair/apply",
         json={
             "package": "Artist/Song.feedpak",
             "rule_code": "chart.note-duplicates-chord",
@@ -942,7 +942,7 @@ def test_note_that_duplicates_a_chord_uses_a_distinct_safe_repair(tmp_path):
     repaired = json.loads(arrangement_path.read_text(encoding="utf-8"))
     assert repaired["notes"] == []
     assert repaired["chords"] == arrangement["chords"]
-    refreshed = client.get("/api/plugins/library_health/results").json()
+    refreshed = client.get("/api/plugins/library_doctor/results").json()
     assert not any(
         finding["code"] == "chart.note-duplicates-chord"
         for finding in refreshed["items"][0]["findings"]
@@ -968,17 +968,17 @@ def test_exact_duplicate_chord_member_repair_refreshes_the_package_report(tmp_pa
         }],
     }
     arrangement_path.write_text(json.dumps(arrangement), encoding="utf-8")
-    client.post("/api/plugins/library_health/scan")
+    client.post("/api/plugins/library_doctor/scan")
     _wait_for_scan(client)
 
-    before = client.get("/api/plugins/library_health/results").json()
+    before = client.get("/api/plugins/library_doctor/results").json()
     assert any(
         finding["code"] == "chart.duplicate-chord-note"
         for finding in before["items"][0]["findings"]
     )
 
     preview = client.post(
-        "/api/plugins/library_health/repair/preview",
+        "/api/plugins/library_doctor/repair/preview",
         json={
             "package": "Artist/Song.feedpak",
             "rule_code": "chart.duplicate-chord-note",
@@ -989,7 +989,7 @@ def test_exact_duplicate_chord_member_repair_refreshes_the_package_report(tmp_pa
     assert preview["item_name"] == "chord note"
 
     response = client.post(
-        "/api/plugins/library_health/repair/apply",
+        "/api/plugins/library_doctor/repair/apply",
         json={
             "package": "Artist/Song.feedpak",
             "rule_code": "chart.duplicate-chord-note",
@@ -1003,7 +1003,7 @@ def test_exact_duplicate_chord_member_repair_refreshes_the_package_report(tmp_pa
         chord_member,
         {"s": 2, "f": 7},
     ]
-    refreshed = client.get("/api/plugins/library_health/results").json()
+    refreshed = client.get("/api/plugins/library_doctor/results").json()
     assert not any(
         finding["code"] == "chart.duplicate-chord-note"
         for finding in refreshed["items"][0]["findings"]
@@ -1020,11 +1020,11 @@ def test_restore_refuses_to_overwrite_chart_changes_made_after_repair(tmp_path):
         json.dumps({"notes": [note, dict(note)], "chords": []}), encoding="utf-8"
     )
     plan = client.post(
-        "/api/plugins/library_health/repair/preview",
+        "/api/plugins/library_doctor/repair/preview",
         json={"package": "Artist/Song.feedpak", "rule_code": "chart.duplicate-note"},
     ).json()
     applied = client.post(
-        "/api/plugins/library_health/repair/apply",
+        "/api/plugins/library_doctor/repair/apply",
         json={
             "package": "Artist/Song.feedpak",
             "rule_code": "chart.duplicate-note",
@@ -1035,7 +1035,7 @@ def test_restore_refuses_to_overwrite_chart_changes_made_after_repair(tmp_path):
     arrangement.write_text(json.dumps(author_edit), encoding="utf-8")
 
     restored = client.post(
-        "/api/plugins/library_health/repair/restore",
+        "/api/plugins/library_doctor/repair/restore",
         json={
             "package": "Artist/Song.feedpak",
             "backup_id": applied["backup_id"],
@@ -1058,14 +1058,14 @@ def test_repair_refuses_a_stale_preview_without_changing_the_package(tmp_path):
         encoding="utf-8",
     )
     preview = client.post(
-        "/api/plugins/library_health/repair/preview",
+        "/api/plugins/library_doctor/repair/preview",
         json={"package": "Artist/Song.feedpak", "rule_code": "chart.duplicate-note"},
     ).json()
     changed = {"notes": [note, dict(note)], "chords": [], "author_edit": True}
     arrangement.write_text(json.dumps(changed), encoding="utf-8")
 
     response = client.post(
-        "/api/plugins/library_health/repair/apply",
+        "/api/plugins/library_doctor/repair/apply",
         json={
             "package": "Artist/Song.feedpak",
             "rule_code": "chart.duplicate-note",
@@ -1077,7 +1077,7 @@ def test_repair_refuses_a_stale_preview_without_changing_the_package(tmp_path):
     assert "changed after this preview" in response.json()["detail"]["message"]
     assert response.json()["detail"]["file_state"] == "unchanged"
     assert json.loads(arrangement.read_text(encoding="utf-8")) == changed
-    assert not (tmp_path / "config" / "library_health" / "repair_backups").exists()
+    assert not (tmp_path / "config" / "library_doctor" / "repair_backups").exists()
     client.close()
 
 
@@ -1097,17 +1097,17 @@ def test_archive_repair_preserves_other_members_and_archive_comment(tmp_path):
                 archive.write(member, member.relative_to(staging).as_posix())
     original_audio = (staging / "stems" / "full.ogg").read_bytes()
     client.post(
-        "/api/plugins/library_health/scan",
+        "/api/plugins/library_doctor/scan",
         json={"scope": "file", "path": str(chosen)},
     )
     _wait_for_scan(client)
     plan = client.post(
-        "/api/plugins/library_health/repair/preview",
+        "/api/plugins/library_doctor/repair/preview",
         json={"package": "Chosen.feedpak", "rule_code": "chart.duplicate-note"},
     ).json()
 
     applied = client.post(
-        "/api/plugins/library_health/repair/apply",
+        "/api/plugins/library_doctor/repair/apply",
         json={
             "package": "Chosen.feedpak",
             "rule_code": "chart.duplicate-note",
@@ -1135,13 +1135,13 @@ def test_repair_is_blocked_while_playback_has_priority(tmp_path):
         encoding="utf-8",
     )
     plan = client.post(
-        "/api/plugins/library_health/repair/preview",
+        "/api/plugins/library_doctor/repair/preview",
         json={"package": "Artist/Song.feedpak", "rule_code": "chart.duplicate-note"},
     ).json()
-    client.put("/api/plugins/library_health/playback", json={"active": True})
+    client.put("/api/plugins/library_doctor/playback", json={"active": True})
 
     response = client.post(
-        "/api/plugins/library_health/repair/apply",
+        "/api/plugins/library_doctor/repair/apply",
         json={
             "package": "Artist/Song.feedpak",
             "rule_code": "chart.duplicate-note",
@@ -1169,15 +1169,15 @@ def test_exact_duplicate_drum_hits_use_the_same_safe_repair_workflow(tmp_path):
     drums_path.write_text(
         json.dumps({"version": 1, "hits": [hit, dict(hit)]}), encoding="utf-8"
     )
-    client.post("/api/plugins/library_health/scan")
+    client.post("/api/plugins/library_doctor/scan")
     _wait_for_scan(client)
     plan = client.post(
-        "/api/plugins/library_health/repair/preview",
+        "/api/plugins/library_doctor/repair/preview",
         json={"package": "Artist/Song.feedpak", "rule_code": "drums.duplicate-hit"},
     ).json()
 
     response = client.post(
-        "/api/plugins/library_health/repair/apply",
+        "/api/plugins/library_doctor/repair/apply",
         json={
             "package": "Artist/Song.feedpak",
             "rule_code": "drums.duplicate-hit",
@@ -1202,11 +1202,11 @@ def test_repair_preview_rejects_ambiguous_manifest_and_package_traversal(tmp_pat
     )
 
     ambiguous = client.post(
-        "/api/plugins/library_health/repair/preview",
+        "/api/plugins/library_doctor/repair/preview",
         json={"package": "Artist/Song.feedpak", "rule_code": "chart.duplicate-note"},
     )
     traversal = client.post(
-        "/api/plugins/library_health/repair/preview",
+        "/api/plugins/library_doctor/repair/preview",
         json={"package": "../Outside.feedpak", "rule_code": "chart.duplicate-note"},
     )
 
@@ -1242,12 +1242,12 @@ def test_failed_candidate_validation_keeps_the_original_and_creates_no_backup(tm
     original_document = {"notes": [note, dict(note)], "chords": []}
     arrangement.write_text(json.dumps(original_document), encoding="utf-8")
     plan = client.post(
-        "/api/plugins/library_health/repair/preview",
+        "/api/plugins/library_doctor/repair/preview",
         json={"package": "Artist/Song.feedpak", "rule_code": "chart.duplicate-note"},
     ).json()
 
     response = client.post(
-        "/api/plugins/library_health/repair/apply",
+        "/api/plugins/library_doctor/repair/apply",
         json={
             "package": "Artist/Song.feedpak",
             "rule_code": "chart.duplicate-note",
@@ -1258,14 +1258,14 @@ def test_failed_candidate_validation_keeps_the_original_and_creates_no_backup(tm
     assert response.status_code == 409
     assert "introduced a new validation finding" in response.json()["detail"]["message"]
     assert json.loads(arrangement.read_text(encoding="utf-8")) == original_document
-    assert not (tmp_path / "config" / "library_health" / "repair_backups").exists()
+    assert not (tmp_path / "config" / "library_doctor" / "repair_backups").exists()
     client.close()
 
 
 def test_missing_library_is_reported_in_status(tmp_path):
     client, _library = _client(tmp_path, with_library=False)
 
-    response = client.post("/api/plugins/library_health/scan")
+    response = client.post("/api/plugins/library_doctor/scan")
 
     assert response.status_code == 400
     assert "configured" in response.json()["detail"].lower()

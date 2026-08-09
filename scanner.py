@@ -583,7 +583,7 @@ class LibraryScanner:
         self._validator_version = validator_version
         self._rule_metadata = rule_metadata if callable(rule_metadata) else None
         self._log = log
-        self._cache = _ReportCache(Path(config_dir) / "library_health" / "library_health.db")
+        self._cache = _ReportCache(Path(config_dir) / "library_doctor" / "library_doctor.db")
         self._lock = threading.Lock()
         self._cancel = threading.Event()
         self._playback_condition = threading.Condition()
@@ -597,7 +597,7 @@ class LibraryScanner:
     @staticmethod
     def _initial_status(target: dict | None = None) -> dict:
         return {
-            "schema": "library_health.scan.v1",
+            "schema": "library_doctor.scan.v1",
             "running": False,
             "stage": "idle",
             "total": 0,
@@ -899,7 +899,7 @@ class LibraryScanner:
             })
         target = self._cache.current_target()
         return {
-            "schema": "library_health.repair_scope.v1",
+            "schema": "library_doctor.repair_scope.v1",
             "target": target,
             "deep_audio": bool(last_scan.get("deep_audio")),
             "validator_version": self._validator_version,
@@ -940,7 +940,7 @@ class LibraryScanner:
                     item["code"], item["severity"], item["category"]
                 )
         return {
-            "schema": "library_health.rules.v1",
+            "schema": "library_doctor.rules.v1",
             "items": items,
         }
 
@@ -980,7 +980,7 @@ class LibraryScanner:
                             if isinstance(finding, dict) and finding.get("code") == rule_code
                         ]
             payload = {
-                "schema": "library_health.export.v1",
+                "schema": "library_doctor.export.v1",
                 "generated_at": time.time(),
                 "target": self._cache.current_target(),
                 "summary": self._cache.summary(),
@@ -1080,7 +1080,7 @@ class LibraryScanner:
 
         if export_format == "json":
             metadata = {
-                "schema": "library_health.export.v1",
+                "schema": "library_doctor.export.v1",
                 "generated_at": time.time(),
                 "target": self._cache.current_target(),
                 "summary": self._cache.summary(),
@@ -1459,7 +1459,7 @@ class LibraryScanner:
                 finding["code"], finding["severity"], finding["category"]
             )
         return {
-            "schema": "library_health.package.v1",
+            "schema": "library_doctor.package.v1",
             "validator_version": self._validator_version,
             "package": package,
             "title": "",

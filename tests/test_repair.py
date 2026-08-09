@@ -1,7 +1,10 @@
 import copy
+import hashlib
 import importlib.util
 import json
+import logging
 import sys
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -10,7 +13,7 @@ import pytest
 @pytest.fixture(scope="module")
 def repair():
     path = Path(__file__).parents[1] / "repair.py"
-    name = "library_health_repair_tests"
+    name = "library_doctor_repair_tests"
     spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
     sys.modules[name] = module
@@ -555,6 +558,83 @@ def test_unknown_source_kind_and_wrong_extension_are_refused(repair):
             validator_version="rules-test",
         )
     assert extension.value.code == "unsupported_text_format"
+
+
+def test_history_reader_preserves_pre_rename_receipts(repair, tmp_path):
+    history_path = (
+        tmp_path / "config" / "library_doctor" / "repair_history.json"
+    )
+    history_path.parent.mkdir(parents=True)
+    history_path.write_text(
+        json.dumps({
+            "schema": "library_health.repair_history.v1",
+            "items": [{"id": "preserved", "outcome": "success"}],
+        }),
+        encoding="utf-8",
+    )
+    service = repair.RepairService(
+        config_dir=tmp_path / "config",
+        get_dlc_dir=lambda: tmp_path / "library",
+        validate_feedpak=lambda *_args, **_kwargs: {},
+        validator_version="rules-test",
+        log=logging.getLogger("library-doctor-legacy-history-tests"),
+        legacy_schemas={
+            "repair_history": {"library_health.repair_history.v1"}
+        },
+    )
+
+    result = service.history()
+
+    assert result["schema"] == repair.HISTORY_SCHEMA
+    assert result["items"] == [{"id": "preserved", "outcome": "success"}]
+
+
+@pytest.mark.parametrize(
+    "legacy_schema",
+    ["library_health.repair_backup.v1", "library_health.repair_backup.v2"],
+)
+def test_backup_reader_preserves_pre_rename_recovery_files(
+    repair, tmp_path, legacy_schema
+):
+    backup_id = "20260809-120000-abcdef123456"
+    package = "Artist/Song.feedpak"
+    member = "arrangements/lead.json"
+    original = b'{"notes":[]}'
+    backup_path = (
+        tmp_path
+        / "config"
+        / "library_doctor"
+        / "repair_backups"
+        / f"{backup_id}.zip"
+    )
+    backup_path.parent.mkdir(parents=True)
+    metadata = {
+        "schema": legacy_schema,
+        "backup_id": backup_id,
+        "package": package,
+        "members": [{
+            "member_path": member,
+            "backup_entry": f"original/{member}",
+            "original_sha256": hashlib.sha256(original).hexdigest(),
+            "repaired_sha256": "0" * 64,
+        }],
+    }
+    with zipfile.ZipFile(backup_path, "w") as archive:
+        archive.writestr("repair.json", json.dumps(metadata))
+        archive.writestr(f"original/{member}", original)
+    service = repair.RepairService(
+        config_dir=tmp_path / "config",
+        get_dlc_dir=lambda: tmp_path / "library",
+        validate_feedpak=lambda *_args, **_kwargs: {},
+        validator_version="rules-test",
+        log=logging.getLogger("library-doctor-legacy-backup-tests"),
+        legacy_schemas={"repair_backup": {legacy_schema}},
+    )
+
+    restored_metadata, originals = service._read_backup(backup_id, package)
+
+    assert restored_metadata["schema"] == legacy_schema
+    assert originals == {member: original}
 
 
 def test_apply_json_member_removes_only_planned_copies_and_preserves_newline_style(repair):

@@ -22,7 +22,7 @@ jobs:
           cache: pip
       - run: python -m pip install --upgrade pip
       - run: python -m pip install -r requirements-test.txt
-      - run: python -m ruff check validator.py scanner.py repair.py batch_repair.py routes.py tests
+      - run: python -m ruff check validator.py scanner.py repair.py batch_repair.py migration.py routes.py tests
       - run: python -m pytest --cov --cov-report=term
-      - run: python -m py_compile validator.py scanner.py repair.py batch_repair.py routes.py
+      - run: python -m py_compile validator.py scanner.py repair.py batch_repair.py migration.py routes.py
       - run: node --check screen.js

@@ -19,11 +19,11 @@ import uuid
 from pathlib import Path
 
 
-BATCH_SCHEMA = "library_health.batch_repair.v1"
-BATCH_PREVIEW_SCHEMA = "library_health.batch_preview.v1"
-BATCH_RESULT_SCHEMA = "library_health.batch_result.v1"
-BATCH_UNDO_PREVIEW_SCHEMA = "library_health.batch_undo_preview.v1"
-BATCH_UNDO_RESULT_SCHEMA = "library_health.batch_undo_result.v1"
+BATCH_SCHEMA = "library_doctor.batch_repair.v1"
+BATCH_PREVIEW_SCHEMA = "library_doctor.batch_preview.v1"
+BATCH_RESULT_SCHEMA = "library_doctor.batch_result.v1"
+BATCH_UNDO_PREVIEW_SCHEMA = "library_doctor.batch_undo_preview.v1"
+BATCH_UNDO_RESULT_SCHEMA = "library_doctor.batch_undo_result.v1"
 MAX_BATCH_PACKAGES = 10_000
 _SKIPPED_REPAIR_CODES = {
     "source_changed",
@@ -72,12 +72,19 @@ class BatchRepairManager:
         repair_service,
         repair_error_type,
         log,
+        legacy_schemas: dict | None = None,
     ) -> None:
         self._config_dir = Path(config_dir)
         self._scanner = scanner
         self._repair_service = repair_service
         self._repair_error_type = repair_error_type
         self._log = log
+        compatibility = legacy_schemas if isinstance(legacy_schemas, dict) else {}
+        self._legacy_batch_result_schemas = frozenset(
+            item
+            for item in compatibility.get("batch_result", ())
+            if isinstance(item, str)
+        )
         self._lock = threading.RLock()
         self._cancel = threading.Event()
         self._thread: threading.Thread | None = None
@@ -1130,7 +1137,7 @@ class BatchRepairManager:
 
     @property
     def _last_result_path(self) -> Path:
-        return self._config_dir / "library_health" / "batch_result.json"
+        return self._config_dir / "library_doctor" / "batch_result.json"
 
     def _read_last_result(self) -> dict | None:
         try:
@@ -1138,7 +1145,15 @@ class BatchRepairManager:
             if len(raw) > 16 * 1024 * 1024:
                 return None
             result = json.loads(raw.decode("utf-8"))
-            return result if result.get("schema") == BATCH_RESULT_SCHEMA else None
+            if not isinstance(result, dict) or result.get("schema") not in {
+                BATCH_RESULT_SCHEMA,
+                *self._legacy_batch_result_schemas,
+            }:
+                return None
+            # Keep the migrated receipt usable in memory. The next batch write
+            # persists it with the current schema.
+            result["schema"] = BATCH_RESULT_SCHEMA
+            return result
         except (OSError, AttributeError, UnicodeDecodeError, json.JSONDecodeError):
             return None
 
