@@ -259,6 +259,12 @@ def test_batch_undo_cancellation_finishes_current_restore_and_keeps_later_packag
         assert status["undo_result"]["remaining_count"] == 1
         assert status["result"]["currently_repaired_count"] == 1
         assert status["result"]["restored_count"] == 1
+        restored_outcome = next(
+            item for item in status["result"]["outcomes"]
+            if item["outcome"] == "restored"
+        )
+        assert restored_outcome["file_state"] == "restored"
+        assert restored_outcome["cache_updated"] is True
         assert [call[0] for call in repairs.restore_calls] == ["one.feedpak"]
         assert scanner.finish_count == 4
 
@@ -272,6 +278,12 @@ def test_batch_undo_cancellation_finishes_current_restore_and_keeps_later_packag
         persisted = reloaded.status()["last_result"]
         assert persisted["currently_repaired_count"] == 1
         assert persisted["restored_count"] == 1
+        persisted_restored = next(
+            item for item in persisted["outcomes"]
+            if item["outcome"] == "restored"
+        )
+        assert persisted_restored["file_state"] == "restored"
+        assert persisted_restored["cache_updated"] is True
         assert persisted["latest_undo_result"]["outcome"] == "cancelled"
     finally:
         sys.modules.pop(name, None)

@@ -435,8 +435,14 @@ class BatchRepairManager:
             })
             return True
 
-    def mark_restored(self, package: str, backup_id: str) -> bool:
-        """Keep the latest batch outcome accurate after an individual Undo."""
+    def mark_restored(
+        self,
+        package: str,
+        backup_id: str,
+        *,
+        cache_updated: bool | None = None,
+    ) -> bool:
+        """Keep the latest batch outcome accurate after any successful Undo."""
         updated = False
         latest = None
         with self._lock:
@@ -445,6 +451,7 @@ class BatchRepairManager:
                 outcomes = payload.get("outcomes") if isinstance(payload, dict) else None
                 if not isinstance(outcomes, list):
                     continue
+                payload_updated = False
                 for outcome in outcomes:
                     if (
                         isinstance(outcome, dict)
@@ -456,9 +463,13 @@ class BatchRepairManager:
                         outcome["message"] = (
                             "The original chart data saved before this batch repair was restored."
                         )
+                        outcome["file_state"] = "restored"
+                        if cache_updated is not None:
+                            outcome["cache_updated"] = bool(cache_updated)
                         outcome["restored_at"] = time.time()
+                        payload_updated = True
                         updated = True
-                if updated:
+                if payload_updated:
                     self._refresh_result_counts(payload)
             if updated and isinstance(self._state.get("last_result"), dict):
                 latest = copy.deepcopy(self._state["last_result"])
@@ -1063,7 +1074,11 @@ class BatchRepairManager:
                             package,
                             exc,
                         )
-                    self.mark_restored(package, item["backup_id"])
+                    self.mark_restored(
+                        package,
+                        item["backup_id"],
+                        cache_updated=cache_updated,
+                    )
                     restored += 1
                     restored_change_count = int(
                         result.get("change_count", item.get("change_count")) or 0

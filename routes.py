@@ -324,7 +324,11 @@ def setup(app, context):
             batch_manager.invalidate_ready(
                 "A Feedpak changed after the batch preview. Review the batch again."
             )
-            batch_manager.mark_restored(package, backup_id)
+            batch_manager.mark_restored(
+                package,
+                backup_id,
+                cache_updated=result["cache_updated"],
+            )
             return result
         except repair_module.RepairPlanningError as exc:
             raise HTTPException(status_code=409, detail=repair_error(exc)) from exc

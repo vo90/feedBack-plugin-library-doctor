@@ -770,6 +770,8 @@ def test_batch_preview_and_apply_repair_each_eligible_feedpak_separately(tmp_pat
         if item["package"] == "First.feedpak"
     )
     assert restored_outcome["outcome"] == "restored"
+    assert restored_outcome["file_state"] == "restored"
+    assert restored_outcome["cache_updated"] is True
     assert batch_after_restore["result"]["restored_count"] == 1
     assert batch_after_restore["result"]["currently_repaired_count"] == 1
     assert batch_after_restore["result"]["current_removed_count"] == 1
@@ -807,6 +809,10 @@ def test_batch_preview_and_apply_repair_each_eligible_feedpak_separately(tmp_pat
     assert current_batch["currently_repaired_count"] == 0
     assert current_batch["restored_count"] == 2
     assert current_batch["current_removed_count"] == 0
+    assert all(
+        item["file_state"] == "restored"
+        for item in current_batch["outcomes"]
+    )
     assert len(json.loads(second_path.read_text(encoding="utf-8"))["notes"]) == 2
     after_undo_results = client.get(
         "/api/plugins/library_doctor/results?filter=all"
