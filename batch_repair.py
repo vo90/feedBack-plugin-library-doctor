@@ -94,7 +94,9 @@ class BatchRepairManager:
         self._state = self._initial_state()
         latest = self._read_last_result()
         if latest is not None:
-            self._refresh_result_counts(latest)
+            normalized = self._refresh_result_counts(latest)
+            if normalized:
+                self._write_last_result(latest)
         self._state["last_result"] = latest
 
     @staticmethod
@@ -140,10 +142,21 @@ class BatchRepairManager:
         return status
 
     @staticmethod
-    def _refresh_result_counts(result: dict) -> None:
+    def _refresh_result_counts(result: dict) -> bool:
         outcomes = result.get("outcomes")
         if not isinstance(outcomes, list):
-            return
+            return False
+        normalized = False
+        for item in outcomes:
+            if (
+                isinstance(item, dict)
+                and item.get("outcome") == "restored"
+                and item.get("file_state") != "restored"
+            ):
+                # Older receipts changed the outcome after Undo but retained
+                # the pre-Undo file state. The restored outcome is authoritative.
+                item["file_state"] = "restored"
+                normalized = True
         currently_repaired = [
             item for item in outcomes
             if isinstance(item, dict) and item.get("outcome") == "success"
@@ -161,6 +174,7 @@ class BatchRepairManager:
             int(item.get("change_count", item.get("removed_count")) or 0)
             for item in currently_repaired
         )
+        return normalized
 
     def start_preview(self, snapshot: dict) -> dict:
         candidates = snapshot.get("candidates") if isinstance(snapshot, dict) else None

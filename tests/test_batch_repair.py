@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import logging
 import sys
 import threading
@@ -73,6 +74,44 @@ def test_last_batch_reader_preserves_pre_rename_receipt(tmp_path):
         )
 
         assert manager.status()["last_result"]["schema"] == module.BATCH_RESULT_SCHEMA
+    finally:
+        sys.modules.pop(name, None)
+
+
+def test_last_batch_reader_normalizes_stale_restored_file_state(tmp_path):
+    name, module = _load_batch_module()
+    try:
+        result_path = (
+            tmp_path / "config" / "library_doctor" / "batch_result.json"
+        )
+        result_path.parent.mkdir(parents=True)
+        result_path.write_text(
+            json.dumps({
+                "schema": module.BATCH_RESULT_SCHEMA,
+                "outcomes": [{
+                    "package": "song.feedpak",
+                    "outcome": "restored",
+                    "file_state": "repaired",
+                    "change_count": 8,
+                }],
+            }),
+            encoding="utf-8",
+        )
+
+        manager = module.BatchRepairManager(
+            config_dir=tmp_path / "config",
+            scanner=_Scanner(),
+            repair_service=object(),
+            repair_error_type=_RepairError,
+            log=logging.getLogger("library-doctor-stale-restored-state-tests"),
+        )
+
+        latest = manager.status()["last_result"]
+        persisted = json.loads(result_path.read_text(encoding="utf-8"))
+        assert latest["outcomes"][0]["file_state"] == "restored"
+        assert latest["restored_count"] == 1
+        assert latest["current_change_count"] == 0
+        assert persisted["outcomes"][0]["file_state"] == "restored"
     finally:
         sys.modules.pop(name, None)
 
