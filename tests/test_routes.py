@@ -366,6 +366,93 @@ def test_exact_duplicate_repair_requires_preview_backs_up_and_refreshes_report(t
     client.close()
 
 
+def test_bend_point_order_repair_is_lossless_validated_and_reversible(tmp_path):
+    client, library = _client(tmp_path)
+    package = _valid_package(library)
+    arrangement_path = package / "arrangements" / "lead.json"
+    original_points = [
+        {"t": 0.5, "v": 1.0, "future": {"marker": "last"}},
+        {"t": 0.0, "v": 0.0, "future": {"marker": "first"}},
+        {"t": 0.25, "v": 0.5, "future": {"marker": "middle"}},
+    ]
+    original = json.dumps({
+        "notes": [{
+            "t": 2.0,
+            "s": 1,
+            "f": 5,
+            "sus": 1.0,
+            "bn": 1.0,
+            "bnv": original_points,
+        }],
+        "chords": [],
+    }).encode("utf-8")
+    arrangement_path.write_bytes(original)
+    client.post("/api/plugins/library_doctor/scan")
+    _wait_for_scan(client)
+
+    before = client.get("/api/plugins/library_doctor/results").json()
+    assert any(
+        finding["code"] == "chart.bend-points-out-of-order"
+        for finding in before["items"][0]["findings"]
+    )
+    preview = client.post(
+        "/api/plugins/library_doctor/repair/preview",
+        json={
+            "package": "Artist/Song.feedpak",
+            "rule_code": "chart.bend-points-out-of-order",
+        },
+    )
+    assert preview.status_code == 200
+    plan = preview.json()
+    assert plan["available"] is True
+    assert plan["change_kind"] == "reorder"
+    assert plan["change_count"] == 1
+    assert plan["removed_count"] == 0
+
+    applied = client.post(
+        "/api/plugins/library_doctor/repair/apply",
+        json={
+            "package": "Artist/Song.feedpak",
+            "rule_code": "chart.bend-points-out-of-order",
+            "plan_id": plan["plan_id"],
+        },
+    )
+    assert applied.status_code == 200
+    result = applied.json()
+    assert result["change_kind"] == "reorder"
+    assert result["change_count"] == 1
+    assert result["removed_count"] == 0
+    repaired_points = json.loads(
+        arrangement_path.read_text(encoding="utf-8")
+    )["notes"][0]["bnv"]
+    assert repaired_points == [original_points[1], original_points[2], original_points[0]]
+    assert sorted(repaired_points, key=lambda point: point["future"]["marker"]) == sorted(
+        original_points, key=lambda point: point["future"]["marker"]
+    )
+    refreshed = client.get("/api/plugins/library_doctor/results").json()
+    assert not any(
+        finding["code"] == "chart.bend-points-out-of-order"
+        for finding in refreshed["items"][0]["findings"]
+    )
+
+    restored = client.post(
+        "/api/plugins/library_doctor/repair/restore",
+        json={
+            "package": "Artist/Song.feedpak",
+            "backup_id": result["backup_id"],
+        },
+    )
+    assert restored.status_code == 200
+    assert restored.json()["change_count"] == 1
+    assert arrangement_path.read_bytes() == original
+    restored_results = client.get("/api/plugins/library_doctor/results").json()
+    assert any(
+        finding["code"] == "chart.bend-points-out-of-order"
+        for finding in restored_results["items"][0]["findings"]
+    )
+    client.close()
+
+
 def test_fix_all_safe_issues_is_one_validated_reversible_package_transaction(tmp_path):
     client, library = _client(tmp_path)
     package = _valid_package(library)
@@ -736,6 +823,77 @@ def test_batch_preview_and_apply_repair_each_eligible_feedpak_separately(tmp_pat
     )
     assert nothing_left.status_code == 409
     assert nothing_left.json()["detail"]["code"] == "nothing_to_restore"
+    client.close()
+
+
+def test_batch_repair_counts_and_undo_include_lossless_reordering(tmp_path):
+    client, library = _client(tmp_path)
+    package = _valid_package(library, "Bends.feedpak")
+    arrangement_path = package / "arrangements" / "lead.json"
+    original_points = [{"t": 0.5, "v": 1.0}, {"t": 0.0, "v": 0.0}]
+    original = json.dumps({
+        "notes": [{
+            "t": 2.0,
+            "s": 1,
+            "f": 5,
+            "sus": 1.0,
+            "bn": 1.0,
+            "bnv": original_points,
+        }],
+        "chords": [],
+    }).encode("utf-8")
+    arrangement_path.write_bytes(original)
+    client.post("/api/plugins/library_doctor/scan")
+    _wait_for_scan(client)
+
+    client.post("/api/plugins/library_doctor/repair/batch/preview")
+    preview = _wait_for_batch(client, "ready")["preview"]
+
+    assert preview["eligible_count"] == 1
+    assert preview["change_count"] == 1
+    assert preview["removed_count"] == 0
+    assert preview["packages"][0]["change_count"] == 1
+    assert preview["rule_summaries"] == [{
+        "rule_code": "chart.bend-points-out-of-order",
+        "title": "Put bend points in chronological order",
+        "item_name": "bend curve",
+        "change_kind": "reorder",
+        "package_count": 1,
+        "change_count": 1,
+        "removed_count": 0,
+    }]
+
+    client.post(
+        "/api/plugins/library_doctor/repair/batch/apply",
+        json={"batch_plan_id": preview["batch_plan_id"]},
+    )
+    completed = _wait_for_batch(client, "completed")
+    result = completed["result"]
+    assert result["change_count"] == 1
+    assert result["removed_count"] == 0
+    assert result["current_change_count"] == 1
+    assert result["current_removed_count"] == 0
+    assert result["outcomes"][0]["change_count"] == 1
+    assert json.loads(
+        arrangement_path.read_text(encoding="utf-8")
+    )["notes"][0]["bnv"] == [original_points[1], original_points[0]]
+
+    client.post("/api/plugins/library_doctor/repair/batch/undo/preview")
+    undo_preview = _wait_for_batch(client, "undo_ready")["undo_preview"]
+    assert undo_preview["changes_to_restore"] == 1
+    assert undo_preview["entries_to_restore"] == 0
+    assert undo_preview["packages"][0]["change_kind"] == "combined"
+    assert undo_preview["packages"][0]["change_count"] == 1
+
+    client.post(
+        "/api/plugins/library_doctor/repair/batch/undo/apply",
+        json={"undo_plan_id": undo_preview["undo_plan_id"]},
+    )
+    undone = _wait_for_batch(client, "undo_completed")
+    assert undone["undo_result"]["restored_change_count"] == 1
+    assert undone["undo_result"]["restored_entry_count"] == 0
+    assert undone["result"]["current_change_count"] == 0
+    assert arrangement_path.read_bytes() == original
     client.close()
 
 

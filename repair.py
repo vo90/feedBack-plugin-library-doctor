@@ -26,7 +26,7 @@ from typing import Iterator
 import yaml
 
 
-REPAIR_CATALOG_VERSION = "repairs-4"
+REPAIR_CATALOG_VERSION = "repairs-5"
 REPAIR_PLAN_SCHEMA = "library_doctor.repair_plan.v1"
 MAX_REPAIR_TEXT_BYTES = 64 * 1024 * 1024
 MAX_REPAIR_STRUCTURE_ITEMS = 2_000_000
@@ -97,6 +97,7 @@ class RepairDefinition:
     description: str
     player_result: str
     user_value: str
+    change_kind: str = "remove_duplicates"
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -191,6 +192,35 @@ class DeleteNotesMatchingChords:
             "expected_chord_length": self.expected_chord_length,
             "remove_indices": list(self.remove_indices),
             "match_groups": [group.to_dict() for group in self.match_groups],
+        }
+
+
+@dataclass(frozen=True)
+class StableSortBendPoints:
+    array_path: tuple[str | int, ...]
+    expected_length: int
+    original_sha256: str
+    sorted_sha256: str
+    sorted_indices: tuple[int, ...]
+    moved_count: int
+    note_time: float | None
+    string: int | None
+
+    @property
+    def remove_indices(self) -> tuple[int, ...]:
+        return ()
+
+    def to_dict(self) -> dict:
+        return {
+            "operation": "stable_sort_bend_points",
+            "array_path": list(self.array_path),
+            "expected_length": self.expected_length,
+            "original_sha256": self.original_sha256,
+            "sorted_sha256": self.sorted_sha256,
+            "sorted_indices": list(self.sorted_indices),
+            "moved_count": self.moved_count,
+            "note_time": self.note_time,
+            "string": self.string,
         }
 
 
@@ -315,6 +345,28 @@ _REPAIR_DEFINITIONS = (
         ),
     ),
     RepairDefinition(
+        rule_code="chart.bend-points-out-of-order",
+        action_kind="reorder_bend_points",
+        source_kind="arrangement",
+        item_name="bend curve",
+        safety="safe_automatic",
+        title="Put bend points in chronological order",
+        description=(
+            "Stable-sort each affected bend curve by its existing relative "
+            "timestamps. Every bend point and stored property is preserved, "
+            "and points with equal timestamps keep their authored order."
+        ),
+        player_result=(
+            "FeedBack receives each bend curve in playback order directly from "
+            "the Feedpak instead of repairing its order temporarily while loading."
+        ),
+        user_value=(
+            "Bend animation becomes portable and predictable in FeedBack, the "
+            "editor, and other Feedpak tools without changing the authored curve."
+        ),
+        change_kind="reorder",
+    ),
+    RepairDefinition(
         rule_code="drums.duplicate-hit",
         action_kind="remove_exact_duplicate_drum_hits",
         source_kind="drum_tab",
@@ -349,6 +401,7 @@ _DEFAULT_REPAIR_BY_SOURCE = {
 # important for relationships that become unambiguous only after exact chord
 # redundancies have been removed.
 _ALL_SAFE_RULE_ORDER = (
+    "chart.bend-points-out-of-order",
     "chart.duplicate-chord-note",
     "chart.duplicate-chord",
     "chart.duplicate-note",
@@ -363,12 +416,12 @@ _ALL_SAFE_DEFINITION = {
     "safety": "safe_automatic",
     "title": "Fix all safe issues",
     "description": (
-        "Apply every deterministic exact-copy repair currently available in "
+        "Apply every deterministic safe chart repair currently available in "
         "this Feedpak as one validated transaction."
     ),
     "player_result": (
-        "All eligible redundant chart instructions are removed while the first "
-        "identical authored copy and its musical data remain unchanged."
+        "Eligible redundant instructions are removed and supported ordering "
+        "problems are normalized without changing the intended musical data."
     ),
     "user_value": (
         "The song is cleaned in one step without requiring a separate confirmation "
@@ -418,11 +471,12 @@ def apply_json_member(raw: bytes, plan: dict) -> bytes:
         )
 
     removed: set[tuple[tuple[str | int, ...], int]] = set()
+    reordered: set[tuple[str | int, ...]] = set()
     for action in plan.get("actions", []):
         if not isinstance(action, dict) or action.get("safety") != "safe_automatic":
             raise RepairPlanningError("invalid_plan", "The repair preview is invalid.")
         for operation in action.get("operations", []):
-            _apply_delete_operation(document, operation, removed)
+            _apply_operation(document, operation, removed, reordered)
     return _render_json(document, raw)
 
 
@@ -493,7 +547,7 @@ class RepairService:
             if not internal["available"]:
                 raise RepairPlanningError(
                     "nothing_to_repair",
-                    "The selected exact redundancy is no longer present in this package.",
+                    "The selected safe issue is no longer present in this package.",
                 )
             return self._apply_internal(
                 package_path,
@@ -600,6 +654,8 @@ class RepairService:
             "rule_codes": internal.get("rule_codes", [internal["rule_code"]]),
             "repair_summaries": internal.get("repair_summaries", []),
             "backup_id": backup_id,
+            "change_kind": internal.get("change_kind", "remove_duplicates"),
+            "change_count": internal.get("change_count", internal["removed_count"]),
             "removed_count": internal["removed_count"],
             "musical_positions": internal["musical_positions"],
             "item_name": internal["item_name"],
@@ -669,6 +725,8 @@ class RepairService:
                     "artist": "",
                     "rule_code": metadata.get("rule_code"),
                     "backup_id": backup_id,
+                    "change_kind": "legacy",
+                    "change_count": 0,
                     "removed_count": 0,
                     "musical_positions": 0,
                     "item_name": "item",
@@ -720,6 +778,8 @@ class RepairService:
                 **self._public_restore_plan(prepared),
                 "outcome": "restored",
                 "restored": True,
+                "change_kind": prepared["change_kind"],
+                "change_count": prepared["change_count"],
                 "restored_count": prepared["removed_count"],
                 "report": prepared["_after"],
                 "file_handling": {
@@ -744,6 +804,8 @@ class RepairService:
                 "rule_codes": prepared["rule_codes"],
                 "repair_summaries": prepared["repair_summaries"],
                 "backup_id": backup_id,
+                "change_kind": prepared["change_kind"],
+                "change_count": prepared["change_count"],
                 "restored_count": prepared["removed_count"],
                 "item_name": prepared["item_name"],
                 "player_result": prepared["player_result"],
@@ -849,13 +911,21 @@ class RepairService:
                 "rule_code": rule_code,
                 "rule_codes": rule_codes,
                 "repair_summaries": backup_summary.get("repair_summaries", []),
+                "change_kind": backup_summary.get(
+                    "change_kind", "remove_duplicates"
+                ),
+                "change_count": int(
+                    backup_summary.get(
+                        "change_count", backup_summary.get("removed_count", 0)
+                    ) or 0
+                ),
                 "removed_count": int(backup_summary.get("removed_count", 0) or 0),
                 "member_count": len(source_members),
                 "item_name": backup_summary.get("item_name", "item"),
                 "player_result": (
-                    "After Undo, the package contains all original chart entries again; the safe findings repaired together may return."
+                    "After Undo, the package contains all original chart data again; the safe findings repaired together may return."
                     if combined_repair else
-                    "After Undo, the package contains the original chart entries again; the finding that was repaired may return."
+                    "After Undo, the package contains the original chart data again; the finding that was repaired may return."
                 ),
                 "user_value": (
                     "This returns the entire combined repair to its exact saved starting point if the song did not behave as expected."
@@ -1017,6 +1087,11 @@ class RepairService:
             for item in planned
             for action in item["plan"]["actions"]
         )
+        change_count = sum(
+            action.get("change_count", action["removed_count"])
+            for item in planned
+            for action in item["plan"]["actions"]
+        )
         arrays_affected = sum(
             action["arrays_affected"]
             for item in planned
@@ -1050,6 +1125,8 @@ class RepairService:
             "user_value": definition["user_value"],
             "file_handling": self._file_handling(None),
             "item_name": definition["item_name"],
+            "change_kind": definition.get("change_kind", "remove_duplicates"),
+            "change_count": change_count,
             "member_count": len(planned),
             "arrays_affected": arrays_affected,
             "musical_positions": musical_positions,
@@ -1069,6 +1146,7 @@ class RepairService:
         blockers = []
         totals = {
             rule_code: {
+                "change_count": 0,
                 "removed_count": 0,
                 "arrays_affected": 0,
                 "musical_positions": 0,
@@ -1112,6 +1190,9 @@ class RepairService:
                     rule_total = totals[rule_code]
                     rule_total["members"].add(member_path)
                     for action in plan["actions"]:
+                        rule_total["change_count"] += action.get(
+                            "change_count", action["removed_count"]
+                        )
                         rule_total["removed_count"] += action["removed_count"]
                         rule_total["arrays_affected"] += action["arrays_affected"]
                         rule_total["musical_positions"] += action["musical_positions"]
@@ -1134,13 +1215,15 @@ class RepairService:
         repair_summaries = []
         for rule_code in _ALL_SAFE_RULE_ORDER:
             rule_total = totals[rule_code]
-            if not rule_total["removed_count"]:
+            if not rule_total["change_count"]:
                 continue
             definition = _REPAIR_BY_RULE[rule_code]
             repair_summaries.append({
                 "rule_code": rule_code,
                 "title": definition.title,
                 "item_name": definition.item_name,
+                "change_kind": definition.change_kind,
+                "change_count": rule_total["change_count"],
                 "removed_count": rule_total["removed_count"],
                 "arrays_affected": rule_total["arrays_affected"],
                 "musical_positions": rule_total["musical_positions"],
@@ -1177,6 +1260,10 @@ class RepairService:
             "available": bool(planned) and not blockers,
             **_ALL_SAFE_DEFINITION,
             "item_name": "chart item",
+            "change_kind": "combined",
+            "change_count": sum(
+                summary["change_count"] for summary in repair_summaries
+            ),
             "rule_count": len(rule_codes),
             "repair_summaries": repair_summaries,
             "member_count": len(planned),
@@ -1390,12 +1477,12 @@ class RepairService:
         if not requested or not (requested & before_codes):
             raise RepairPlanningError(
                 "nothing_to_repair",
-                "The selected exact redundancies are no longer present in this package.",
+                "The selected safe issues are no longer present in this package.",
             )
         if requested & after_codes:
             raise RepairPlanningError(
                 "verification_failed",
-                "The repaired candidate still contains a selected exact redundancy.",
+                "The repaired candidate still contains a selected safe issue.",
             )
         introduced = sorted(after_codes - before_codes)
         if introduced:
@@ -1440,7 +1527,8 @@ class RepairService:
             "summary": {
                 key: plan.get(key)
                 for key in (
-                    "title", "item_name", "removed_count", "musical_positions",
+                    "title", "item_name", "change_kind", "change_count",
+                    "removed_count", "musical_positions",
                     "arrays_affected", "member_count", "rule_count",
                     "repair_summaries", "player_result", "user_value",
                 )
@@ -1730,6 +1818,8 @@ def plan_json_member(
         )
     elif definition.rule_code == "chart.note-duplicates-chord":
         operations = _plan_exact_note_chord_duplicates(document)
+    elif definition.rule_code == "chart.bend-points-out-of-order":
+        operations = _plan_bend_point_order(document)
     elif definition.rule_code == "drums.duplicate-hit":
         operations = _plan_exact_drum_duplicates(document)
     else:  # The explicit catalog dispatch above should make this unreachable.
@@ -1742,6 +1832,11 @@ def plan_json_member(
     actions = []
     if operations:
         removed_count = sum(len(operation.remove_indices) for operation in operations)
+        change_count = (
+            len(operations)
+            if definition.change_kind == "reorder"
+            else removed_count
+        )
         arrays_affected = len(operations)
         musical_positions = _musical_position_count(
             document, operations, definition.rule_code
@@ -1749,11 +1844,16 @@ def plan_json_member(
         action_payload = {
             "rule_code": definition.rule_code,
             "action_kind": definition.action_kind,
+            "change_kind": definition.change_kind,
             "safety": definition.safety,
             "title": definition.title,
             "summary": _summary(
-                removed_count, arrays_affected, definition.item_name
+                change_count,
+                arrays_affected,
+                definition.item_name,
+                definition.change_kind,
             ),
+            "change_count": change_count,
             "removed_count": removed_count,
             "arrays_affected": arrays_affected,
             "musical_positions": musical_positions,
@@ -1949,8 +2049,93 @@ def _plan_exact_note_chord_duplicates(
     return operations
 
 
+def _plan_bend_point_order(document: dict) -> list[StableSortBendPoints]:
+    operations = []
+    for path, bend_points, note_time, string in _bend_point_arrays(document):
+        parsed = []
+        all_points_valid = True
+        for point in bend_points:
+            valid = (
+                isinstance(point, dict)
+                and _finite_number(point.get("t"))
+                and _finite_number(point.get("v"))
+            )
+            if not valid:
+                all_points_valid = False
+                continue
+            parsed.append((point["t"], point["v"]))
+        out_of_order = any(
+            current[0] < previous[0]
+            for previous, current in zip(parsed, parsed[1:])
+        )
+        if not out_of_order:
+            continue
+        if not all_points_valid:
+            raise RepairPlanningError(
+                "invalid_bend_curve",
+                "An out-of-order bend curve also contains an invalid point, so "
+                "Library Doctor will not guess how to reorder it.",
+            )
+        sorted_indices = tuple(sorted(
+            range(len(bend_points)), key=lambda index: bend_points[index]["t"]
+        ))
+        moved_count = sum(
+            index != original_index
+            for index, original_index in enumerate(sorted_indices)
+        )
+        if not moved_count:
+            continue
+        sorted_points = [bend_points[index] for index in sorted_indices]
+        operations.append(StableSortBendPoints(
+            array_path=path,
+            expected_length=len(bend_points),
+            original_sha256=hashlib.sha256(
+                _canonical_json(bend_points)
+            ).hexdigest(),
+            sorted_sha256=hashlib.sha256(
+                _canonical_json(sorted_points)
+            ).hexdigest(),
+            sorted_indices=sorted_indices,
+            moved_count=moved_count,
+            note_time=note_time,
+            string=string,
+        ))
+    return operations
+
+
 def _note_arrays(document: dict) -> Iterator[tuple[tuple[str | int, ...], list]]:
     yield from _arrangement_arrays(document, "notes")
+
+
+def _bend_point_arrays(
+    document: dict,
+) -> Iterator[tuple[tuple[str | int, ...], list, float | None, int | None]]:
+    for note_path, notes in _arrangement_arrays(document, "notes"):
+        for note_index, note in enumerate(notes):
+            if not isinstance(note, dict) or not isinstance(note.get("bnv"), list):
+                continue
+            note_time = note.get("t") if _finite_number(note.get("t")) else None
+            string = note.get("s") if _integer(note.get("s")) else None
+            yield note_path + (note_index, "bnv"), note["bnv"], note_time, string
+
+    for chord_path, chords in _arrangement_arrays(document, "chords"):
+        for chord_index, chord in enumerate(chords):
+            if not isinstance(chord, dict):
+                continue
+            chord_time = chord.get("t") if _finite_number(chord.get("t")) else None
+            chord_notes = chord.get("notes")
+            if not isinstance(chord_notes, list):
+                continue
+            for note_index, note in enumerate(chord_notes):
+                if not isinstance(note, dict) or not isinstance(note.get("bnv"), list):
+                    continue
+                string = note.get("s") if _integer(note.get("s")) else None
+                yield (
+                    chord_path + (chord_index, "notes", note_index, "bnv"),
+                    note["bnv"],
+                    chord_time,
+                    string,
+                )
 
 
 def _arrangement_arrays(
@@ -2108,13 +2293,17 @@ def _valid_drum_identity(value) -> bytes | None:
     return _canonical_json(value)
 
 
-def _apply_delete_operation(
+def _apply_operation(
     document: dict,
     operation: dict,
     removed: set[tuple[tuple[str | int, ...], int]],
+    reordered: set[tuple[str | int, ...]],
 ) -> None:
     if not isinstance(operation, dict):
         raise RepairPlanningError("invalid_plan", "The repair preview is invalid.")
+    if operation.get("operation") == "stable_sort_bend_points":
+        _apply_bend_point_sort_operation(document, operation, reordered)
+        return
     if operation.get("operation") == "delete_notes_matching_chords":
         _apply_note_chord_delete_operation(document, operation, removed)
         return
@@ -2168,6 +2357,68 @@ def _apply_delete_operation(
         raise RepairPlanningError("invalid_plan", "The repair preview is invalid.")
     for index in declared_indexes:
         del values[index]
+
+
+def _apply_bend_point_sort_operation(
+    document: dict,
+    operation: dict,
+    reordered: set[tuple[str | int, ...]],
+) -> None:
+    raw_path = operation.get("array_path")
+    if not isinstance(raw_path, list) or len(raw_path) < 2 or raw_path[-1] != "bnv":
+        raise RepairPlanningError("invalid_plan", "The repair preview is invalid.")
+    path = tuple(raw_path)
+    if path in reordered:
+        raise RepairPlanningError("invalid_plan", "The repair preview is invalid.")
+    values = _value_at_path(document, path)
+    if (
+        not isinstance(values, list)
+        or operation.get("expected_length") != len(values)
+        or len(values) < 2
+    ):
+        raise RepairPlanningError(
+            "source_changed",
+            "The song changed after this preview. Review the safe fix again before applying it.",
+        )
+    if not all(
+        isinstance(point, dict)
+        and _finite_number(point.get("t"))
+        and _finite_number(point.get("v"))
+        for point in values
+    ):
+        raise RepairPlanningError(
+            "source_changed",
+            "The bend curve changed after this preview. Review the safe fix again before applying it.",
+        )
+    original_digest = hashlib.sha256(_canonical_json(values)).hexdigest()
+    if operation.get("original_sha256") != original_digest:
+        raise RepairPlanningError(
+            "source_changed",
+            "The bend curve changed after this preview. Review the safe fix again before applying it.",
+        )
+    sorted_indices = list(sorted(
+        range(len(values)), key=lambda index: values[index]["t"]
+    ))
+    declared_indices = operation.get("sorted_indices")
+    moved_count = sum(
+        index != original_index
+        for index, original_index in enumerate(sorted_indices)
+    )
+    if (
+        not moved_count
+        or not isinstance(declared_indices, list)
+        or any(not _integer(index) for index in declared_indices)
+        or declared_indices != sorted_indices
+        or not _integer(operation.get("moved_count"))
+        or operation["moved_count"] != moved_count
+    ):
+        raise RepairPlanningError("invalid_plan", "The repair preview is invalid.")
+    sorted_values = [values[index] for index in sorted_indices]
+    sorted_digest = hashlib.sha256(_canonical_json(sorted_values)).hexdigest()
+    if operation.get("sorted_sha256") != sorted_digest:
+        raise RepairPlanningError("invalid_plan", "The repair preview is invalid.")
+    values[:] = sorted_values
+    reordered.add(path)
 
 
 def _apply_note_chord_delete_operation(
@@ -2270,12 +2521,20 @@ def _apply_note_chord_delete_operation(
 
 def _musical_position_count(
     document: dict,
-    operations: list[DeleteArrayItems | DeleteNotesMatchingChords],
+    operations: list[
+        DeleteArrayItems | DeleteNotesMatchingChords | StableSortBendPoints
+    ],
     rule_code: str,
 ) -> int:
     positions: set[bytes] = set()
     for operation in operations:
-        if isinstance(operation, DeleteArrayItems):
+        if isinstance(operation, StableSortBendPoints):
+            positions.add(_canonical_json({
+                "path": list(operation.array_path[:-1]),
+                "t": operation.note_time,
+                "s": operation.string,
+            }))
+        elif isinstance(operation, DeleteArrayItems):
             values = _value_at_path(document, operation.array_path)
             for group in operation.duplicate_groups:
                 value = values[group.keep_index]
@@ -2393,10 +2652,20 @@ def _digest_json(value) -> str:
     return hashlib.sha256(_canonical_json(value)).hexdigest()
 
 
-def _summary(removed_count: int, arrays_affected: int, noun: str) -> str:
-    item_label = noun if removed_count == 1 else f"{noun}s"
+def _summary(
+    change_count: int,
+    arrays_affected: int,
+    noun: str,
+    change_kind: str,
+) -> str:
+    item_label = noun if change_count == 1 else f"{noun}s"
     list_label = "list" if arrays_affected == 1 else "lists"
+    if change_kind == "reorder":
+        return (
+            f"Put {change_count} {item_label} into chronological point order "
+            f"across {arrays_affected} {list_label}; preserve every bend point."
+        )
     return (
-        f"Remove {removed_count} exact duplicate {item_label} from "
+        f"Remove {change_count} exact duplicate {item_label} from "
         f"{arrays_affected} {list_label}; keep the first authored copy."
     )

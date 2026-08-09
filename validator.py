@@ -25,7 +25,7 @@ from jsonschema import Draft202012Validator
 
 
 SPEC_REVISION = "52548b742f64c2a35052a141976ea1b7889f4b1a"
-VALIDATOR_VERSION = f"rules-12:feedpak-{SPEC_REVISION}"
+VALIDATOR_VERSION = f"rules-13:feedpak-{SPEC_REVISION}"
 SUPPORTED_MAJOR = 1
 SCHEMA_DIR = Path(__file__).resolve().parent / "schemas"
 MAX_TEXT_BYTES = 64 * 1024 * 1024
@@ -80,6 +80,7 @@ _RULE_TITLES = {
     "chart.duplicate-anchor": "Identical duplicate anchor",
     "chart.duplicate-handshape": "Identical duplicate handshape",
     "chart.note-duplicates-chord": "Standalone note duplicates a chord",
+    "chart.bend-points-out-of-order": "Bend points out of order",
     "chart.conflicting-duplicate-note": "Conflicting notes on one string",
     "chart.string-conflict": "Overlapping notes on one string",
     "chart.coincident-chords": "Chords start at the same time",
@@ -133,6 +134,7 @@ _SAFE_REPAIR_CANDIDATES = {
     "chart.duplicate-anchor",
     "chart.duplicate-handshape",
     "chart.note-duplicates-chord",
+    "chart.bend-points-out-of-order",
     "drums.duplicate-hit",
 }
 
@@ -164,6 +166,10 @@ _RULE_EXPERIENCE = {
     "chart.duplicate-handshape": (
         "The same chord-shape guide may be processed more than once over the same time span.",
         "One identical handshape remains with the same chord and duration, keeping the guidance clear and compact.",
+    ),
+    "chart.bend-points-out-of-order": (
+        "FeedBack has to reorder the bend curve while loading it, so the saved Feedpak, editor view, and other tools may not agree on how it should progress.",
+        "Saving the existing points in chronological order makes the same authored bend curve portable and predictable without deleting or inventing any points.",
     ),
     "drums.duplicate-hit": (
         "FeedBack may process or draw the same drum hit more than once at one position.",
@@ -369,6 +375,12 @@ def rule_metadata(code: str, severity: str = "warning", category: str = "validat
         guidance = (
             "The standalone note exactly repeats a member of the chord. Keep the "
             "complete chord and remove only the matching standalone copy."
+        )
+    elif code == "chart.bend-points-out-of-order":
+        repairability = "safe_candidate"
+        guidance = (
+            "Put the existing bend points in chronological order. Preserve every "
+            "point and keep equal-time points in their authored order."
         )
     elif code in _SAFE_REPAIR_CANDIDATES:
         repairability = "safe_candidate"

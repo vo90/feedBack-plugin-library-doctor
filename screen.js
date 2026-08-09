@@ -223,6 +223,35 @@
   function text(node, value) { if (node) node.textContent = value == null ? '' : String(value); }
   function number(value) { return Number(value || 0).toLocaleString(); }
 
+  function repairChangeCount(value) {
+    return Number(value?.change_count ?? value?.removed_count ?? 0);
+  }
+
+  function plannedRepairChange(value) {
+    const count = repairChangeCount(value);
+    const itemName = value?.item_name || 'item';
+    if (value?.change_kind === 'reorder') {
+      return `put ${number(count)} ${itemName}${count === 1 ? '' : 's'} into chronological point order`;
+    }
+    return `remove ${number(count)} redundant ${itemName} ${count === 1 ? 'copy' : 'copies'}`;
+  }
+
+  function completedRepairChange(value) {
+    const count = repairChangeCount(value);
+    const itemName = value?.item_name || 'item';
+    if (value?.change_kind === 'reorder') {
+      return `Reordered ${number(count)} ${itemName}${count === 1 ? '' : 's'} into chronological point order without removing any bend points`;
+    }
+    if (value?.change_kind === 'combined') {
+      const summaries = Array.isArray(value?.repair_summaries)
+        ? value.repair_summaries.filter((item) => repairChangeCount(item) > 0)
+        : [];
+      if (summaries.length === 1) return completedRepairChange(summaries[0]);
+      return `Applied ${number(count)} safe stored ${count === 1 ? 'change' : 'changes'}`;
+    }
+    return `Removed ${number(count)} redundant ${itemName} ${count === 1 ? 'copy' : 'copies'}`;
+  }
+
   function duration(value) {
     let seconds = Math.max(0, Math.round(Number(value || 0)));
     const hours = Math.floor(seconds / 3600);
@@ -557,7 +586,7 @@
     ));
     card.appendChild(batchSummaryGrid([
       [preview.eligible_count, 'Eligible Feedpaks'],
-      [preview.removed_count, 'Redundant entries'],
+      [repairChangeCount(preview), 'Safe chart changes'],
       [preview.blocked_count, 'Blocked and excluded'],
       [preview.no_longer_needed_count, 'No longer need repair'],
     ]));
@@ -572,7 +601,7 @@
       item.appendChild(make(
         'span',
         '',
-        `${number(rule.removed_count)} redundant ${rule.item_name || 'item'} ${Number(rule.removed_count) === 1 ? 'copy' : 'copies'} across ${number(rule.package_count)} Feedpak${Number(rule.package_count) === 1 ? '' : 's'}.`,
+        `${plannedRepairChange(rule)} across ${number(rule.package_count)} Feedpak${Number(rule.package_count) === 1 ? '' : 's'}.`,
       ));
       ruleList.appendChild(item);
     });
@@ -589,7 +618,7 @@
       row.appendChild(make(
         'span',
         '',
-        `${number(item.removed_count)} redundant entries | ${number(item.rule_count)} repair ${Number(item.rule_count) === 1 ? 'type' : 'types'} | ${item.package}`,
+        `${number(repairChangeCount(item))} safe chart ${repairChangeCount(item) === 1 ? 'change' : 'changes'} | ${number(item.rule_count)} repair ${Number(item.rule_count) === 1 ? 'type' : 'types'} | ${item.package}`,
       ));
       packageList.appendChild(row);
     });
@@ -740,7 +769,7 @@
       [preview.eligible_count, 'Ready to restore'],
       [preview.already_restored_count, 'Already restored'],
       [preview.blocked_count, 'Blocked and excluded'],
-      [preview.entries_to_restore, 'Entries that will return'],
+      [preview.changes_to_restore ?? preview.entries_to_restore, 'Safe changes to restore'],
     ]));
 
     const packages = make('details', 'lh-batch-details');
@@ -753,7 +782,7 @@
       row.appendChild(make(
         'span',
         '',
-        `${number(item.removed_count)} original chart entries will return across ${number(item.member_count)} chart ${Number(item.member_count) === 1 ? 'file' : 'files'}. ${item.package}`,
+        `${number(repairChangeCount(item))} safe chart ${repairChangeCount(item) === 1 ? 'change will' : 'changes will'} return to the saved original state across ${number(item.member_count)} chart ${Number(item.member_count) === 1 ? 'file' : 'files'}. ${item.package}`,
       ));
       packageList.appendChild(row);
     });
@@ -810,7 +839,7 @@
     confirmation.appendChild(make(
       'p',
       '',
-      `Restore the saved original chart data for ${number(preview.eligible_count)} Feedpak${Number(preview.eligible_count) === 1 ? '' : 's'}? Safe repair findings and ${number(preview.entries_to_restore)} redundant chart entries are expected to return. Other package files are preserved.`,
+      `Restore the saved original chart data for ${number(preview.eligible_count)} Feedpak${Number(preview.eligible_count) === 1 ? '' : 's'}? ${number(preview.changes_to_restore ?? preview.entries_to_restore)} safe chart ${Number(preview.changes_to_restore ?? preview.entries_to_restore) === 1 ? 'change will' : 'changes will'} return to the saved state, and the related findings are expected to return. Other package files are preserved.`,
     ));
     const apply = make('button', 'lh-button lh-button-danger', `Undo repairs for ${number(preview.eligible_count)} Feedpaks`);
     const cancel = make('button', 'lh-button', 'Keep repaired versions');
@@ -864,7 +893,7 @@
       [result.restored_count, 'Originals restored'],
       [result.skipped_count, 'Skipped safely'],
       [result.failed_count, 'Failed'],
-      [result.restored_entry_count, 'Chart entries returned'],
+      [result.restored_change_count ?? result.restored_entry_count, 'Safe changes restored'],
     ]));
     if (Number(result.cache_refresh_failed_count || 0) > 0) {
       card.appendChild(make(
@@ -898,7 +927,7 @@
           'span',
           '',
           outcome.outcome === 'restored'
-            ? `${number(outcome.restored_count)} original chart entries returned. ${outcome.cache_updated === false ? 'Displayed scan result needs a manual refresh. ' : ''}${outcome.package}`
+            ? `${number(repairChangeCount(outcome))} safe chart ${repairChangeCount(outcome) === 1 ? 'change was' : 'changes were'} restored to the original state. ${outcome.cache_updated === false ? 'Displayed scan result needs a manual refresh. ' : ''}${outcome.package}`
             : `${outcome.message || 'No additional details.'} ${outcome.package}`,
         ));
         list.appendChild(row);
@@ -939,11 +968,11 @@
       result.currently_repaired_count
         ?? outcomes.filter((item) => item.outcome === 'success').length,
     );
-    const currentRemoved = Number(
-      result.current_removed_count
+    const currentChanges = Number(
+      result.current_change_count
         ?? outcomes
           .filter((item) => item.outcome === 'success')
-          .reduce((total, item) => total + Number(item.removed_count || 0), 0),
+          .reduce((total, item) => total + repairChangeCount(item), 0),
     );
     card.appendChild(make(
       'h4',
@@ -963,7 +992,7 @@
       [currentlyRepaired, 'Currently repaired'],
       [restoredCount, 'Originals restored'],
       [result.failed_count, 'Repair failures'],
-      [currentRemoved, 'Entries currently removed'],
+      [currentChanges, 'Current safe changes'],
     ]));
     card.appendChild(make('p', '', result.recovery_summary));
     if (Number(result.cache_refresh_failed_count || 0) > 0) {
@@ -1008,7 +1037,7 @@
           'span',
           '',
           outcome.outcome === 'success'
-            ? `${number(outcome.removed_count)} redundant entries removed. ${outcome.cache_updated === false ? 'Displayed scan result needs a manual refresh. ' : ''}${outcome.package}`
+            ? `${completedRepairChange(outcome)}. ${outcome.cache_updated === false ? 'Displayed scan result needs a manual refresh. ' : ''}${outcome.package}`
             : `${outcome.message || 'No additional details.'} ${outcome.package}`,
         ));
         if (outcome.outcome === 'success' && outcome.backup_id) {
@@ -1188,7 +1217,9 @@
     item.appendChild(make('strong', 'lh-finding-title', rule.title || definition.title || 'Safe repair available'));
     appendFindingExplanation(
       item,
-      `${number(affected)} musical ${affected === 1 ? 'position contains' : 'positions contain'} redundant ${pluralItem} with identical stored values across ${scope}. These arrangement-level findings share one package-wide repair.`,
+      definition.change_kind === 'reorder'
+        ? `${number(affected)} bend ${affected === 1 ? 'curve has' : 'curves have'} points stored outside chronological order across ${scope}. Every point can be preserved while these arrangement-level findings share one package-wide repair.`
+        : `${number(affected)} musical ${affected === 1 ? 'position contains' : 'positions contain'} redundant ${pluralItem} with identical stored values across ${scope}. These arrangement-level findings share one package-wide repair.`,
       rule.player_impact,
       rule.fix_benefit,
       'Review the single package-wide fix below. Its preview recalculates every declared source file and shows the complete change before anything is saved.',
@@ -1210,7 +1241,7 @@
         '',
         finding.arrangement_id || String(finding.location || '').split(':')[0] || 'Package source',
       ));
-      evidence.appendChild(make('p', '', finding.message || 'Duplicate entries were found.'));
+      evidence.appendChild(make('p', '', finding.message || 'A safe chart issue was found.'));
       const meta = [];
       if (finding.time != null) meta.push(`First example: ${Number(finding.time).toFixed(4)}s`);
       if (finding.string != null) meta.push(`String ${Number(finding.string) + 1}`);
@@ -1290,22 +1321,33 @@
   }
 
   function repairChangeSummary(receipt) {
-    const count = Number(receipt.removed_count || 0);
+    const count = repairChangeCount(receipt);
     const positions = Number(receipt.musical_positions || 0);
     const itemName = receipt.item_name || 'item';
+    const restored = receipt.outcome === 'restored' || receipt.action === 'restore';
     if (receipt.legacy_receipt) {
       return 'The package still matches an earlier successful Library Doctor repair. That older version did not store the exact item count in its result receipt.';
     }
     if (!count) return 'The saved original chart data was restored.';
     const summaries = Array.isArray(receipt.repair_summaries)
-      ? receipt.repair_summaries.filter((item) => Number(item.removed_count || 0) > 0)
+      ? receipt.repair_summaries.filter((item) => repairChangeCount(item) > 0)
       : [];
+    if (restored) {
+      const restoredChange = summaries.length === 1 ? summaries[0] : receipt;
+      if (restoredChange.change_kind === 'reorder') {
+        return `Restored the saved original bend-point order for ${number(repairChangeCount(restoredChange))} bend ${repairChangeCount(restoredChange) === 1 ? 'curve' : 'curves'}. The repaired ordering finding is expected to return.`;
+      }
+      return `Restored the saved original chart data for ${number(count)} safe ${count === 1 ? 'change' : 'changes'}. The related repaired findings are expected to return.`;
+    }
     if (summaries.length > 1) {
-      const changes = summaries.map((item) => {
-        const itemCount = Number(item.removed_count || 0);
-        return `${number(itemCount)} ${item.item_name || 'item'} ${itemCount === 1 ? 'copy' : 'copies'}`;
-      });
-      return `Applied ${number(summaries.length)} safe repair types in one transaction and removed ${number(count)} redundant stored entries: ${changes.join(', ')}. The first identical authored entries were kept.`;
+      const changes = summaries.map((item) => plannedRepairChange(item));
+      return `Applied ${number(summaries.length)} safe repair types in one transaction with ${number(count)} safe stored ${count === 1 ? 'change' : 'changes'}: ${changes.join('; ')}.`;
+    }
+    if (receipt.change_kind === 'combined' && summaries.length === 1) {
+      return `${completedRepairChange(summaries[0])}.`;
+    }
+    if (receipt.change_kind === 'reorder') {
+      return `${completedRepairChange(receipt)}${positions ? ` at ${number(positions)} musical ${positions === 1 ? 'position' : 'positions'}` : ''}. Every authored bend point and property was preserved.`;
     }
     return `Removed ${number(count)} redundant ${itemName} ${count === 1 ? 'copy' : 'copies'}${positions ? ` at ${number(positions)} musical ${positions === 1 ? 'position' : 'positions'}` : ''}. The first identical authored entry was kept.`;
   }
@@ -1384,7 +1426,7 @@
         : 'You can review the finding and try again; the existing package remains the version FeedBack will load.'],
     ] : restored ? [
       ['What happened', repairChangeSummary(receipt)],
-      ['What to expect in game', receipt.player_result || 'The original entries are present again, so the repaired finding may return when the package is scanned.'],
+      ['What to expect in game', receipt.player_result || 'The original chart data is present again, so the repaired finding may return when the package is scanned.'],
       ['Why this is useful', receipt.user_value || 'This returns the chart to the state saved immediately before the repair.'],
       ['What happened to the Feedpak', receipt.file_handling?.summary || 'The original chart data was restored at the same package path. No duplicate song was added.'],
     ] : [
@@ -1437,7 +1479,7 @@
       '',
       receipt.rule_code === 'package.all-safe'
         ? 'Undo will restore all original chart files saved before this combined repair. The repaired safe findings are expected to return. Other package files are preserved.'
-        : 'Undo will restore the original chart files saved before this repair. The repaired duplicate finding is expected to return. Other package files are preserved.',
+        : 'Undo will restore the original chart files saved before this repair. The repaired finding is expected to return. Other package files are preserved.',
     ));
     const confirm = make('button', 'lh-button lh-button-danger', 'Restore original chart data');
     const cancel = make('button', 'lh-button', 'Keep repaired version');
@@ -1576,15 +1618,14 @@
         card.appendChild(make(
           'p',
           '',
-          `This will apply ${number(plan.rule_count)} safe repair ${plan.rule_count === 1 ? 'type' : 'types'} and remove ${number(plan.removed_count)} redundant stored ${plan.removed_count === 1 ? 'entry' : 'entries'} across ${number(plan.member_count)} chart ${plan.member_count === 1 ? 'file' : 'files'}.`,
+          `This will apply ${number(plan.rule_count)} safe repair ${plan.rule_count === 1 ? 'type' : 'types'} and make ${number(repairChangeCount(plan))} safe stored ${repairChangeCount(plan) === 1 ? 'change' : 'changes'} across ${number(plan.member_count)} chart ${plan.member_count === 1 ? 'file' : 'files'}.`,
         ));
         const list = make('ul', 'lh-all-safe-list');
         (plan.repair_summaries || []).forEach((summary) => {
-          const count = Number(summary.removed_count || 0);
           list.appendChild(make(
             'li',
             '',
-            `${summary.title}: remove ${number(count)} redundant ${summary.item_name || 'item'} ${count === 1 ? 'copy' : 'copies'} from ${number(summary.member_count)} chart ${summary.member_count === 1 ? 'file' : 'files'}.`,
+            `${summary.title}: ${plannedRepairChange(summary)} across ${number(summary.member_count)} chart ${summary.member_count === 1 ? 'file' : 'files'}.`,
           ));
         });
         card.appendChild(list);
@@ -1681,12 +1722,14 @@
         card.appendChild(make(
           'p',
           '',
-          `Remove ${number(plan.removed_count)} redundant stored ${itemName} ${plan.removed_count === 1 ? 'copy' : 'copies'} at ${number(plan.musical_positions)} musical ${plan.musical_positions === 1 ? 'position' : 'positions'}, across ${number(plan.arrays_affected)} ${itemName} ${plan.arrays_affected === 1 ? 'list' : 'lists'}. The first authored copy is kept.`,
+          plan.change_kind === 'reorder'
+            ? `Put the points in ${number(repairChangeCount(plan))} ${itemName}${repairChangeCount(plan) === 1 ? '' : 's'} into chronological order at ${number(plan.musical_positions)} musical ${plan.musical_positions === 1 ? 'position' : 'positions'}. Every point and stored property is kept.`
+            : `Remove ${number(plan.removed_count)} redundant stored ${itemName} ${plan.removed_count === 1 ? 'copy' : 'copies'} at ${number(plan.musical_positions)} musical ${plan.musical_positions === 1 ? 'position' : 'positions'}, across ${number(plan.arrays_affected)} ${itemName} ${plan.arrays_affected === 1 ? 'list' : 'lists'}. The first authored copy is kept.`,
         ));
         card.appendChild(make(
           'p',
           '',
-          plan.description || 'Only exact redundant copies will be removed.',
+          plan.description || 'Only the safe stored issue shown in this preview will be changed.',
         ));
         appendRepairPreviewAnswers(card, plan);
         if (Array.isArray(plan.blockers) && plan.blockers.length) {
@@ -1715,7 +1758,7 @@
         card.appendChild(make(
           'p',
           '',
-          'No supported exact duplicates are currently available to repair in this package.',
+          'This safe issue is no longer available to repair in this package.',
         ));
         if (Array.isArray(plan.blockers) && plan.blockers.length) {
           card.appendChild(make('p', 'lh-repair-warning', plan.blockers[0].message));

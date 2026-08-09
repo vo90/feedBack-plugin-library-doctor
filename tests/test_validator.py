@@ -432,6 +432,19 @@ def test_slide_and_bend_curves_are_checked_against_highway_behavior(tmp_path, va
         "chart.bend-point-outside-sustain",
         "chart.bend-exceeds-peak",
     }.issubset(_codes(report))
+    bend_finding = next(
+        item for item in report["findings"]
+        if item["code"] == "chart.bend-points-out-of-order"
+    )
+    assert bend_finding["rule"]["title"] == "Bend points out of order"
+    assert bend_finding["rule"]["repairability"] == "safe_candidate"
+    assert bend_finding["rule"]["guidance"] == (
+        "Put the existing bend points in chronological order. Preserve every "
+        "point and keep equal-time points in their authored order."
+    )
+    assert "without deleting or inventing any points" in (
+        bend_finding["rule"]["fix_benefit"]
+    )
 
 
 def test_invalid_slide_and_negative_bend_values_are_errors(tmp_path, validator):

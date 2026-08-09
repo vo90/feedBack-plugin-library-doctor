@@ -157,6 +157,10 @@ class BatchRepairManager:
         result["current_removed_count"] = sum(
             int(item.get("removed_count") or 0) for item in currently_repaired
         )
+        result["current_change_count"] = sum(
+            int(item.get("change_count", item.get("removed_count")) or 0)
+            for item in currently_repaired
+        )
 
     def start_preview(self, snapshot: dict) -> dict:
         candidates = snapshot.get("candidates") if isinstance(snapshot, dict) else None
@@ -547,6 +551,9 @@ class BatchRepairManager:
                             "artist": candidate.get("artist") or "",
                             "rule_codes": list(plan.get("rule_codes") or []),
                             "rule_count": int(plan.get("rule_count") or 0),
+                            "change_count": int(
+                                plan.get("change_count", plan.get("removed_count")) or 0
+                            ),
                             "removed_count": int(plan.get("removed_count") or 0),
                             "member_count": int(plan.get("member_count") or 0),
                             "repair_summaries": copy.deepcopy(
@@ -566,10 +573,19 @@ class BatchRepairManager:
                                 "rule_code": code,
                                 "title": summary.get("title") or code,
                                 "item_name": summary.get("item_name") or "item",
+                                "change_kind": summary.get(
+                                    "change_kind", "remove_duplicates"
+                                ),
                                 "package_count": 0,
+                                "change_count": 0,
                                 "removed_count": 0,
                             })
                             total_for_rule["package_count"] += 1
+                            total_for_rule["change_count"] += int(
+                                summary.get(
+                                    "change_count", summary.get("removed_count")
+                                ) or 0
+                            )
                             total_for_rule["removed_count"] += int(
                                 summary.get("removed_count") or 0
                             )
@@ -631,6 +647,7 @@ class BatchRepairManager:
                 "eligible_count": len(eligible),
                 "blocked_count": len(blocked),
                 "no_longer_needed_count": no_longer_needed,
+                "change_count": sum(item["change_count"] for item in eligible),
                 "removed_count": sum(item["removed_count"] for item in eligible),
                 "changed_member_count": sum(item["member_count"] for item in eligible),
                 "rule_summaries": list(rule_totals.values()),
@@ -682,6 +699,7 @@ class BatchRepairManager:
         succeeded = 0
         skipped = 0
         failed = 0
+        change_count = 0
         removed_count = 0
         cache_refresh_failed = 0
         try:
@@ -713,6 +731,9 @@ class BatchRepairManager:
                             exc,
                         )
                     succeeded += 1
+                    change_count += int(
+                        result.get("change_count", result.get("removed_count")) or 0
+                    )
                     removed_count += int(result.get("removed_count") or 0)
                     outcomes.append({
                         "package": package,
@@ -721,6 +742,10 @@ class BatchRepairManager:
                         "outcome": "success",
                         "message": "Repair completed and the validated Feedpak replaced the package at the same path.",
                         "backup_id": result.get("backup_id"),
+                        "change_kind": result.get("change_kind", "combined"),
+                        "change_count": int(
+                            result.get("change_count", result.get("removed_count")) or 0
+                        ),
                         "removed_count": int(result.get("removed_count") or 0),
                         "rule_codes": list(result.get("rule_codes") or []),
                         "repair_summaries": copy.deepcopy(
@@ -743,6 +768,7 @@ class BatchRepairManager:
                         "code": exc.code,
                         "message": str(exc),
                         "backup_id": None,
+                        "change_count": 0,
                         "removed_count": 0,
                         "rule_codes": list(item.get("rule_codes") or []),
                         "cache_updated": False,
@@ -765,6 +791,7 @@ class BatchRepairManager:
                             "The repair could not be confirmed. Scan this Feedpak before trying again."
                         ),
                         "backup_id": None,
+                        "change_count": 0,
                         "removed_count": 0,
                         "rule_codes": list(item.get("rule_codes") or []),
                         "cache_updated": False,
@@ -788,6 +815,7 @@ class BatchRepairManager:
                 "successful_count": succeeded,
                 "skipped_count": skipped,
                 "failed_count": failed,
+                "change_count": change_count,
                 "removed_count": removed_count,
                 "backup_count": succeeded,
                 "cache_refresh_failed_count": cache_refresh_failed,
@@ -883,9 +911,18 @@ class BatchRepairManager:
                         "title": plan.get("title") or candidate.get("title") or package,
                         "artist": plan.get("artist") or candidate.get("artist") or "",
                         "backup_id": candidate["backup_id"],
+                        "change_kind": plan.get("change_kind", "combined"),
+                        "change_count": int(
+                            plan.get(
+                                "change_count", candidate.get("removed_count")
+                            ) or 0
+                        ),
                         "removed_count": int(candidate.get("removed_count") or 0),
                         "member_count": int(plan.get("member_count") or 0),
                         "rule_codes": list(candidate.get("rule_codes") or []),
+                        "repair_summaries": copy.deepcopy(
+                            plan.get("repair_summaries") or []
+                        ),
                     }
                     eligible.append(public_item)
                     plans.append({
@@ -942,6 +979,9 @@ class BatchRepairManager:
                 "entries_to_restore": sum(
                     item["removed_count"] for item in eligible
                 ),
+                "changes_to_restore": sum(
+                    item["change_count"] for item in eligible
+                ),
                 "changed_member_count": sum(
                     item["member_count"] for item in eligible
                 ),
@@ -991,6 +1031,7 @@ class BatchRepairManager:
         restored = 0
         skipped = 0
         failed = 0
+        restored_changes = 0
         restored_entries = 0
         cache_refresh_failed = 0
         deep_audio = bool(self._state.get("deep_audio"))
@@ -1024,6 +1065,10 @@ class BatchRepairManager:
                         )
                     self.mark_restored(package, item["backup_id"])
                     restored += 1
+                    restored_change_count = int(
+                        result.get("change_count", item.get("change_count")) or 0
+                    )
+                    restored_changes += restored_change_count
                     restored_entries += int(item.get("removed_count") or 0)
                     outcomes.append({
                         "package": package,
@@ -1032,7 +1077,16 @@ class BatchRepairManager:
                         "outcome": "restored",
                         "message": "Original chart data restored and validated.",
                         "backup_id": item["backup_id"],
+                        "change_kind": result.get(
+                            "change_kind", item.get("change_kind", "combined")
+                        ),
+                        "change_count": restored_change_count,
                         "restored_count": int(item.get("removed_count") or 0),
+                        "repair_summaries": copy.deepcopy(
+                            result.get("repair_summaries")
+                            or item.get("repair_summaries")
+                            or []
+                        ),
                         "cache_updated": cache_updated,
                         "file_state": "restored",
                     })
@@ -1052,6 +1106,7 @@ class BatchRepairManager:
                         "code": exc.code,
                         "message": str(exc),
                         "backup_id": item["backup_id"],
+                        "change_count": 0,
                         "restored_count": 0,
                         "cache_updated": False,
                         "file_state": getattr(exc, "file_state", "unchanged"),
@@ -1073,6 +1128,7 @@ class BatchRepairManager:
                             "Undo could not be confirmed. Scan this Feedpak before trying again."
                         ),
                         "backup_id": item["backup_id"],
+                        "change_count": 0,
                         "restored_count": 0,
                         "cache_updated": False,
                         "file_state": "verify_required",
@@ -1093,6 +1149,7 @@ class BatchRepairManager:
                 "restored_count": restored,
                 "skipped_count": skipped,
                 "failed_count": failed,
+                "restored_change_count": restored_changes,
                 "restored_entry_count": restored_entries,
                 "cache_refresh_failed_count": cache_refresh_failed,
                 "outcomes": outcomes,

@@ -55,6 +55,7 @@ def test_catalog_is_an_explicit_allowlist(repair):
         "chart.duplicate-anchor",
         "chart.duplicate-handshape",
         "chart.note-duplicates-chord",
+        "chart.bend-points-out-of-order",
         "drums.duplicate-hit",
     ]
     assert {item["safety"] for item in catalog} == {"safe_automatic"}
@@ -74,6 +75,9 @@ def test_catalog_is_an_explicit_allowlist(repair):
         repair.repair_for_rule("chart.note-duplicates-chord")["item_name"]
         == "standalone note"
     )
+    bend_repair = repair.repair_for_rule("chart.bend-points-out-of-order")
+    assert bend_repair["item_name"] == "bend curve"
+    assert bend_repair["change_kind"] == "reorder"
     assert repair.repair_for_rule("drums.duplicate-hit")["item_name"] == "drum hit"
     assert repair.repair_for_rule("chart.string-conflict") is None
 
@@ -341,6 +345,133 @@ def test_note_chord_repair_requires_the_matching_chord_to_remain_unchanged(repai
         repair.apply_json_member(raw, tampered)
 
     assert caught.value.code == "source_changed"
+
+
+def test_bend_repair_stably_orders_every_curve_without_losing_data(repair):
+    top_points = [
+        {"t": 0.5, "v": 1.0, "future": {"label": "last"}},
+        {"t": 0.1, "v": 0.25, "future": {"label": "equal-first"}},
+        {"t": 0.1, "v": 0.5, "future": {"label": "equal-second"}},
+    ]
+    level_points = [{"t": 0.4, "v": 0.8}, {"t": 0.0, "v": 0.0}]
+    chord_points = [{"t": 0.2, "v": 0.5}, {"t": 0.1, "v": 0.25}]
+    document = {
+        "notes": [{"t": 10.0, "s": 0, "f": 3, "bnv": top_points}],
+        "chords": [{
+            "t": 30.0,
+            "notes": [{"s": 2, "f": 7, "bnv": chord_points}],
+        }],
+        "phrases": [{
+            "levels": [{
+                "notes": [{"t": 20.0, "s": 1, "f": 5, "bnv": level_points}],
+            }],
+        }],
+    }
+
+    plan = _plan(
+        repair,
+        document,
+        rule_code="chart.bend-points-out-of-order",
+    )
+    action = plan["actions"][0]
+
+    assert action["change_kind"] == "reorder"
+    assert action["change_count"] == 3
+    assert action["removed_count"] == 0
+    assert action["arrays_affected"] == 3
+    assert action["musical_positions"] == 3
+    assert [operation["sorted_indices"] for operation in action["operations"]] == [
+        [1, 2, 0],
+        [1, 0],
+        [1, 0],
+    ]
+
+    repaired = json.loads(
+        repair.apply_json_member(_raw(document), plan).decode("utf-8")
+    )
+    assert repaired["notes"][0]["bnv"] == [
+        top_points[1], top_points[2], top_points[0]
+    ]
+    assert repaired["phrases"][0]["levels"][0]["notes"][0]["bnv"] == [
+        level_points[1], level_points[0]
+    ]
+    assert repaired["chords"][0]["notes"][0]["bnv"] == [
+        chord_points[1], chord_points[0]
+    ]
+
+
+def test_bend_repair_ignores_ordered_curves_and_refuses_invalid_mixed_curves(repair):
+    ordered = {
+        "notes": [{
+            "t": 1.0,
+            "s": 0,
+            "f": 3,
+            "bnv": [{"t": 0.0, "v": 0.0}, {"t": 0.5, "v": 1.0}],
+        }],
+    }
+    assert _plan(
+        repair,
+        ordered,
+        rule_code="chart.bend-points-out-of-order",
+    )["actions"] == []
+
+    invalid = {
+        "notes": [{
+            "t": 1.0,
+            "s": 0,
+            "f": 3,
+            "bnv": [
+                {"t": 0.5, "v": 1.0},
+                {"t": "unknown", "v": 0.5},
+                {"t": 0.0, "v": 0.0},
+            ],
+        }],
+    }
+    with pytest.raises(repair.RepairPlanningError) as caught:
+        _plan(
+            repair,
+            invalid,
+            rule_code="chart.bend-points-out-of-order",
+        )
+    assert caught.value.code == "invalid_bend_curve"
+
+
+def test_bend_repair_rejects_tampered_ordering_instructions(repair):
+    document = {
+        "notes": [{
+            "t": 1.0,
+            "s": 0,
+            "f": 3,
+            "bnv": [{"t": 0.5, "v": 1.0}, {"t": 0.0, "v": 0.0}],
+        }],
+    }
+    raw = _raw(document)
+    plan = _plan(
+        repair,
+        document,
+        rule_code="chart.bend-points-out-of-order",
+    )
+    tampered = copy.deepcopy(plan)
+    tampered["actions"][0]["operations"][0]["sorted_indices"] = [0, 1]
+    unsigned = {key: value for key, value in tampered.items() if key != "plan_id"}
+    tampered["plan_id"] = repair._digest_json(unsigned)
+
+    with pytest.raises(repair.RepairPlanningError) as caught:
+        repair.apply_json_member(raw, tampered)
+
+    assert caught.value.code == "invalid_plan"
+
+    boolean_indexes = copy.deepcopy(plan)
+    boolean_indexes["actions"][0]["operations"][0]["sorted_indices"] = [
+        True, False
+    ]
+    unsigned = {
+        key: value for key, value in boolean_indexes.items() if key != "plan_id"
+    }
+    boolean_indexes["plan_id"] = repair._digest_json(unsigned)
+    with pytest.raises(repair.RepairPlanningError) as boolean_caught:
+        repair.apply_json_member(raw, boolean_indexes)
+    assert boolean_caught.value.code == "invalid_plan"
 
 
 def test_plans_only_exact_drum_hit_duplicates(repair):

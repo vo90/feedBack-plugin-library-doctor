@@ -100,7 +100,9 @@ absent.
 
 The repair allowlist removes exact duplicate standalone notes, members inside
 one chord, complete chord events, anchors, handshapes, and drum hits. It can also
-remove a standalone note that exactly repeats one explicit member of a chord.
+remove a standalone note that exactly repeats one explicit member of a chord and
+put out-of-order bend points into chronological order without removing any bend
+point.
 Ordinary duplicates keep the first entry and delete only later copies whose
 complete JSON properties and values match within the same event array or chord.
 For a note that repeats a chord member, the complete chord is preserved and the
@@ -108,6 +110,10 @@ standalone copy is removed only when its time and every stored note property
 match one unambiguous chord member. Root events and each mastery-level event
 list remain separate. Events with different sustain, fret, velocity, technique,
 time span, or other data are never selected automatically.
+For bend curves, the existing point timestamps are stable-sorted; every point,
+unknown future property, and the authored order between equal-time points is
+preserved. A curve that also contains an invalid point is blocked rather than
+guessed at.
 
 A preview is bound to the exact current source bytes and validator version. If
 the package changes before confirmation, Library Doctor refuses the stale plan.
@@ -165,7 +171,8 @@ remains available afterward.
 - Contradictory events on the same string at the same time; exact duplicate
   standalone notes, chord members, complete chords, anchors, and handshapes;
   standalone notes that exactly repeat an explicit chord member; conflicting
-  duplicate strings inside one chord; and nonidentical coincident chord events.
+  duplicate strings inside one chord; nonidentical coincident chord events; and
+  bend-curve points stored outside chronological order.
   Root events and every difficulty level are checked independently so
   alternative mastery levels are never compared with each other. Events with
   different sustain, technique, time span, or other stored properties are left
