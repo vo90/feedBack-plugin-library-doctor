@@ -1191,7 +1191,7 @@ def test_timeline_distinguishes_exact_duplicates_from_conflicting_repeated_times
         "sections[3]"
     )
     assert findings["timeline.duplicate-section"]["rule"]["repairability"] == (
-        "conditional"
+        "safe_candidate"
     )
     assert "will not guess" in findings[
         "timeline.repeated-beat-time"

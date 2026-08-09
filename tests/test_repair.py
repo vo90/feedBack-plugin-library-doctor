@@ -64,6 +64,7 @@ def test_catalog_is_an_explicit_allowlist(repair):
         "chart.bend-points-out-of-order",
         "lyrics.out-of-order",
         "timeline.duplicate-beat",
+        "timeline.duplicate-section",
         "drums.duplicate-hit",
     ]
     assert {item["safety"] for item in catalog} == {"safe_automatic"}
@@ -93,6 +94,9 @@ def test_catalog_is_an_explicit_allowlist(repair):
     beat_repair = repair.repair_for_rule("timeline.duplicate-beat")
     assert beat_repair["source_kind"] == "timeline"
     assert beat_repair["item_name"] == "beat marker"
+    section_repair = repair.repair_for_rule("timeline.duplicate-section")
+    assert section_repair["source_kind"] == "timeline"
+    assert section_repair["item_name"] == "section marker"
     assert repair.repair_for_rule("drums.duplicate-hit")["item_name"] == "drum hit"
     assert repair.repair_for_rule("chart.string-conflict") is None
 
@@ -618,6 +622,50 @@ def test_plans_only_exact_valid_beat_marker_duplicates(repair):
     assert repaired["beats"] == [first, conflicting, invalid, invalid]
 
 
+def test_plans_only_exact_valid_section_marker_duplicates(repair):
+    first = {
+        "name": "Intro",
+        "time": 1.0,
+        "number": 1,
+        "future": {"source": "author"},
+    }
+    exact_copy = {
+        "future": {"source": "author"},
+        "number": 1,
+        "time": 1.0,
+        "name": "Intro",
+    }
+    conflicting = {
+        "name": "Verse",
+        "time": 1.0,
+        "number": 1,
+        "future": {"source": "author"},
+    }
+    invalid = {"time": 2.0, "number": 2, "future": {"source": "author"}}
+    document = {
+        "version": 1,
+        "beats": [],
+        "sections": [first, exact_copy, conflicting, invalid, dict(invalid)],
+    }
+
+    plan = _plan(
+        repair,
+        document,
+        source_kind="timeline",
+        rule_code="timeline.duplicate-section",
+    )
+    action = plan["actions"][0]
+
+    assert action["rule_code"] == "timeline.duplicate-section"
+    assert action["removed_count"] == 1
+    assert action["musical_positions"] == 1
+    assert action["operations"][0]["array_path"] == ["sections"]
+    assert action["operations"][0]["remove_indices"] == [1]
+
+    repaired = json.loads(repair.apply_json_member(_raw(document), plan))
+    assert repaired["sections"] == [first, conflicting, invalid, invalid]
+
+
 def test_plan_is_deterministic_and_bound_to_exact_source_bytes(repair):
     document = {"notes": [{"t": 1, "s": 0, "f": 3}] * 2}
     first = _plan(repair, document)
@@ -788,6 +836,23 @@ def test_invalid_entries_are_not_considered_repairable_duplicates(repair):
         source_kind="timeline",
     )
     assert timeline_plan["actions"] == []
+
+    section_plan = _plan(
+        repair,
+        {
+            "sections": [
+                {"name": "Intro", "time": True},
+                {"name": "Intro", "time": True},
+                {"name": "Verse", "time": 1.0, "number": False},
+                {"name": "Verse", "time": 1.0, "number": False},
+                {"time": 2.0},
+                {"time": 2.0},
+            ]
+        },
+        source_kind="timeline",
+        rule_code="timeline.duplicate-section",
+    )
+    assert section_plan["actions"] == []
 
 
 def test_malformed_optional_phrase_containers_are_ignored_safely(repair):

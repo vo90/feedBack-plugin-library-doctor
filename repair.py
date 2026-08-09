@@ -26,7 +26,7 @@ from typing import Iterator
 import yaml
 
 
-REPAIR_CATALOG_VERSION = "repairs-7"
+REPAIR_CATALOG_VERSION = "repairs-8"
 REPAIR_PLAN_SCHEMA = "library_doctor.repair_plan.v1"
 MAX_REPAIR_TEXT_BYTES = 64 * 1024 * 1024
 MAX_REPAIR_STRUCTURE_ITEMS = 2_000_000
@@ -435,6 +435,28 @@ _REPAIR_DEFINITIONS = (
         ),
     ),
     RepairDefinition(
+        rule_code="timeline.duplicate-section",
+        action_kind="remove_exact_duplicate_section_markers",
+        source_kind="timeline",
+        item_name="section marker",
+        safety="safe_automatic",
+        title="Remove exact duplicate section markers",
+        description=(
+            "Keep the first section marker and remove only later copies with "
+            "identical name, time, number, and every other stored property from "
+            "the active song timeline."
+        ),
+        player_result=(
+            "The same named song sections and boundaries remain, with one stored "
+            "instruction at each repaired position. Conflicting section markers, "
+            "if present, remain visible for manual review."
+        ),
+        user_value=(
+            "FeedBack receives clean section and navigation data without changing "
+            "any authored label or time and without guessing between conflicting data."
+        ),
+    ),
+    RepairDefinition(
         rule_code="drums.duplicate-hit",
         action_kind="remove_exact_duplicate_drum_hits",
         source_kind="drum_tab",
@@ -480,6 +502,7 @@ _ALL_SAFE_RULE_ORDER = (
     "chart.duplicate-handshape",
     "lyrics.out-of-order",
     "timeline.duplicate-beat",
+    "timeline.duplicate-section",
     "drums.duplicate-hit",
 )
 
@@ -1168,16 +1191,24 @@ class RepairService:
         package_path: Path,
         manifest: dict,
         source_kind: str,
+        rule_code: str | None = None,
     ) -> list[str]:
         """Resolve the active files for one repair role.
 
         Timeline selection mirrors FeedBack and the validator: a complete
         song-wide sidecar overrides legacy arrangement-embedded data.  Without
-        one, only the first usable legacy beat grid is active.  This prevents a
-        repair from changing dormant copies that the game does not consume.
+        one, only the first usable legacy grid for the requested timeline type
+        is active. Beat and section fallbacks are selected independently. This
+        prevents a repair from changing dormant copies that the game does not
+        consume.
         """
         if source_kind != "timeline":
             return self._repair_member_paths(manifest, source_kind)
+
+        timeline_field = {
+            "timeline.duplicate-beat": "beats",
+            "timeline.duplicate-section": "sections",
+        }.get(rule_code, "beats")
 
         declared = manifest.get("song_timeline")
         if isinstance(declared, str) and declared:
@@ -1216,8 +1247,9 @@ class RepairService:
                     ):
                         return [member_path]
 
-        # FeedBack's legacy fallback takes the first non-empty beat array from
-        # arrangement order. Once found, later embedded grids are inactive.
+        # FeedBack's legacy fallback takes the first non-empty array of each
+        # timeline type from arrangement order. Once found, later embedded
+        # grids of that type are inactive.
         seen = set()
         for entry in manifest["arrangements"]:
             member = entry.get("file") if isinstance(entry, dict) else None
@@ -1249,8 +1281,8 @@ class RepairService:
                 return [member_path]
             if (
                 isinstance(data, dict)
-                and isinstance(data.get("beats"), list)
-                and data["beats"]
+                and isinstance(data.get(timeline_field), list)
+                and data[timeline_field]
             ):
                 return [member_path]
         return []
@@ -1263,7 +1295,7 @@ class RepairService:
             )
         manifest = self._read_repair_manifest(package_path)
         member_paths = self._resolved_repair_member_paths(
-            package_path, manifest, definition["source_kind"]
+            package_path, manifest, definition["source_kind"], rule_code
         )
 
         planned = []
@@ -1344,11 +1376,19 @@ class RepairService:
         """Build one ordered plan for every supported safe repair in a package."""
         manifest = self._read_repair_manifest(package_path)
         member_sources: dict[str, set[str]] = {}
-        for source_kind in ("arrangement", "lyrics", "timeline", "drum_tab"):
+        member_rules: dict[str, set[str]] = {}
+        for rule_code in _ALL_SAFE_RULE_ORDER:
+            definition = _REPAIR_BY_RULE[rule_code]
             for member_path in self._resolved_repair_member_paths(
-                package_path, manifest, source_kind
+                package_path,
+                manifest,
+                definition.source_kind,
+                rule_code,
             ):
-                member_sources.setdefault(member_path, set()).add(source_kind)
+                member_sources.setdefault(member_path, set()).add(
+                    definition.source_kind
+                )
+                member_rules.setdefault(member_path, set()).add(rule_code)
 
         planned = []
         blockers = []
@@ -1388,7 +1428,7 @@ class RepairService:
                 steps = []
                 for rule_code in _ALL_SAFE_RULE_ORDER:
                     definition = _REPAIR_BY_RULE[rule_code]
-                    if definition.source_kind not in source_kinds:
+                    if rule_code not in member_rules[member_path]:
                         continue
                     plan = plan_json_member(
                         candidate_raw,
@@ -2041,6 +2081,8 @@ def plan_json_member(
         operations = _plan_lyric_cue_order(document)
     elif definition.rule_code == "timeline.duplicate-beat":
         operations = _plan_exact_beat_duplicates(document)
+    elif definition.rule_code == "timeline.duplicate-section":
+        operations = _plan_exact_section_duplicates(document)
     elif definition.rule_code == "drums.duplicate-hit":
         operations = _plan_exact_drum_duplicates(document)
     else:  # The explicit catalog dispatch above should make this unreachable.
@@ -2474,6 +2516,16 @@ def _plan_exact_beat_duplicates(document: dict) -> list[DeleteArrayItems]:
     return [operation] if operation is not None else []
 
 
+def _plan_exact_section_duplicates(document: dict) -> list[DeleteArrayItems]:
+    sections = document.get("sections")
+    if not isinstance(sections, list):
+        return []
+    operation = _duplicate_operation(
+        ("sections",), sections, _valid_section_identity
+    )
+    return [operation] if operation is not None else []
+
+
 def _duplicate_operation(
     path: tuple[str | int, ...],
     values: list,
@@ -2571,6 +2623,17 @@ def _valid_beat_identity(value) -> bytes | None:
         not isinstance(value, dict)
         or not _finite_number(value.get("time"))
         or not _integer(value.get("measure"))
+    ):
+        return None
+    return _canonical_json(value)
+
+
+def _valid_section_identity(value) -> bytes | None:
+    if (
+        not isinstance(value, dict)
+        or not isinstance(value.get("name"), str)
+        or not _finite_number(value.get("time"))
+        or ("number" in value and not _integer(value["number"]))
     ):
         return None
     return _canonical_json(value)
@@ -2903,6 +2966,12 @@ def _musical_position_count(
                     position = {
                         "time": value["time"],
                         "measure": value["measure"],
+                    }
+                elif rule_code == "timeline.duplicate-section":
+                    position = {
+                        "time": value["time"],
+                        "name": value["name"],
+                        "number": value.get("number"),
                     }
                 else:
                     position = {"t": value["t"], "s": value["s"]}

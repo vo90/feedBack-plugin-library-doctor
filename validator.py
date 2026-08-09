@@ -25,7 +25,7 @@ from jsonschema import Draft202012Validator
 
 
 SPEC_REVISION = "52548b742f64c2a35052a141976ea1b7889f4b1a"
-VALIDATOR_VERSION = f"rules-15:feedpak-{SPEC_REVISION}"
+VALIDATOR_VERSION = f"rules-16:feedpak-{SPEC_REVISION}"
 SUPPORTED_MAJOR = 1
 SCHEMA_DIR = Path(__file__).resolve().parent / "schemas"
 MAX_TEXT_BYTES = 64 * 1024 * 1024
@@ -143,6 +143,7 @@ _SAFE_REPAIR_CANDIDATES = {
     "chart.bend-points-out-of-order",
     "lyrics.out-of-order",
     "timeline.duplicate-beat",
+    "timeline.duplicate-section",
     "drums.duplicate-hit",
 }
 
@@ -433,10 +434,10 @@ def rule_metadata(code: str, severity: str = "warning", category: str = "validat
             "remove only later exact copies; leave conflicting beat data for review."
         )
     elif code == "timeline.duplicate-section":
-        repairability = "conditional"
+        repairability = "safe_candidate"
         guidance = (
-            "The stored section markers are identical, but automatic section repair "
-            "is not enabled yet. Review the duplicate before removing the later copy."
+            "The stored section markers are identical. Keep the first marker and "
+            "remove only later exact copies; leave conflicting section data for review."
         )
     elif code in {
         "timeline.repeated-beat-time", "timeline.repeated-section-time"
