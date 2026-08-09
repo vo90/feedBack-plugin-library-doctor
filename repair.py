@@ -881,6 +881,8 @@ class RepairService:
                 "rule_code": prepared["rule_code"],
                 "rule_codes": prepared["rule_codes"],
                 "repair_summaries": prepared["repair_summaries"],
+                "returning_finding_codes": prepared["returning_finding_codes"],
+                "returning_finding_count": prepared["returning_finding_count"],
                 "backup_id": backup_id,
                 "change_kind": prepared["change_kind"],
                 "change_count": prepared["change_count"],
@@ -961,12 +963,18 @@ class RepairService:
                 rule_codes = [
                     definition.rule_code for definition in _REPAIR_DEFINITIONS
                 ]
-            introduced = _report_codes(after) - _report_codes(before)
-            if introduced - set(rule_codes):
-                raise RepairPlanningError(
-                    "restore_verification_failed",
-                    "The original song data did not pass recovery validation, so the repaired Feedpak was left unchanged.",
-                )
+            # Undo deliberately restores the exact pre-repair bytes, including
+            # every finding those bytes originally produced. One safe repair can
+            # remove secondary findings as a consequence (for example, deleting
+            # an exact duplicate beat can also remove an out-of-order warning).
+            # Those related findings must be allowed to return. Safety comes
+            # from the verified backup hashes, exact current repaired-member
+            # hashes, full candidate construction/integrity checks, validation,
+            # and atomic commit. It does not come from requiring the original
+            # to be as healthy as its repaired replacement.
+            returning_finding_codes = sorted(
+                _report_codes(after) - _report_codes(before)
+            )
 
             backup_summary = metadata.get("summary")
             if not isinstance(backup_summary, dict):
@@ -989,6 +997,8 @@ class RepairService:
                 "rule_code": rule_code,
                 "rule_codes": rule_codes,
                 "repair_summaries": backup_summary.get("repair_summaries", []),
+                "returning_finding_codes": returning_finding_codes,
+                "returning_finding_count": len(returning_finding_codes),
                 "change_kind": backup_summary.get(
                     "change_kind", "remove_duplicates"
                 ),
@@ -1001,9 +1011,11 @@ class RepairService:
                 "member_count": len(source_members),
                 "item_name": backup_summary.get("item_name", "item"),
                 "player_result": (
-                    "After Undo, the package contains all original song data again; the safe findings repaired together may return."
+                    "After Undo, the package contains all original song data again; "
+                    "the repaired findings and related findings may return in the refreshed report."
                     if combined_repair else
-                    "After Undo, the package contains the original song data again; the finding that was repaired may return."
+                    "After Undo, the package contains the original song data again; "
+                    "the repaired finding and related findings may return in the refreshed report."
                 ),
                 "user_value": (
                     "This returns the entire combined repair to its exact saved starting point if the song did not behave as expected."

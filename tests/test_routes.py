@@ -792,6 +792,90 @@ def test_duplicate_beat_repair_uses_active_sidecar_and_leaves_conflicts_for_revi
     client.close()
 
 
+def test_undo_restores_exact_original_when_related_timeline_findings_return(
+    tmp_path,
+):
+    client, library = _client(tmp_path)
+    package = _valid_package(library)
+    manifest_path = package / "manifest.yaml"
+    manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    manifest["song_timeline"] = "song_timeline.json"
+    manifest_path.write_text(
+        yaml.safe_dump(manifest, sort_keys=False), encoding="utf-8"
+    )
+
+    first = {"time": 0.0, "measure": 0}
+    second = {"time": 1.0, "measure": 0}
+    timeline = {
+        "version": 1,
+        "beats": [first, second, dict(first)],
+        "sections": [],
+    }
+    timeline_path = package / "song_timeline.json"
+    original = json.dumps(timeline).encode("utf-8")
+    timeline_path.write_bytes(original)
+
+    client.post("/api/plugins/library_doctor/scan")
+    _wait_for_scan(client)
+    original_codes = {
+        finding["code"]
+        for finding in client.get(
+            "/api/plugins/library_doctor/results"
+        ).json()["items"][0]["findings"]
+    }
+    assert {
+        "timeline.duplicate-beat",
+        "timeline.beats-out-of-order",
+    } <= original_codes
+
+    plan = client.post(
+        "/api/plugins/library_doctor/repair/preview",
+        json={
+            "package": "Artist/Song.feedpak",
+            "rule_code": "timeline.duplicate-beat",
+        },
+    ).json()
+    applied = client.post(
+        "/api/plugins/library_doctor/repair/apply",
+        json={
+            "package": "Artist/Song.feedpak",
+            "rule_code": "timeline.duplicate-beat",
+            "plan_id": plan["plan_id"],
+        },
+    )
+    assert applied.status_code == 200
+    assert applied.json()["report"]["findings"] == []
+
+    restored = client.post(
+        "/api/plugins/library_doctor/repair/restore",
+        json={
+            "package": "Artist/Song.feedpak",
+            "backup_id": applied.json()["backup_id"],
+        },
+    )
+
+    assert restored.status_code == 200
+    result = restored.json()
+    assert result["returning_finding_codes"] == [
+        "timeline.beats-out-of-order",
+        "timeline.duplicate-beat",
+    ]
+    assert result["returning_finding_count"] == 2
+    assert "related findings may return" in result["player_result"]
+    assert timeline_path.read_bytes() == original
+    assert {
+        finding["code"] for finding in result["report"]["findings"]
+    } == original_codes
+    refreshed_codes = {
+        finding["code"]
+        for finding in client.get(
+            "/api/plugins/library_doctor/results"
+        ).json()["items"][0]["findings"]
+    }
+    assert refreshed_codes == original_codes
+    client.close()
+
+
 def test_fix_all_safe_issues_refuses_a_stale_preview_without_changing_files(tmp_path):
     client, library = _client(tmp_path)
     package = _valid_package(library)

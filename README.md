@@ -159,8 +159,10 @@ another full copy of large audio and artwork assets. It is stored under
 `library_doctor/repair_backups` in FeedBack's config directory and is retained
 after repair. **Undo this repair** restores those exact original song-data bytes only
 when the repaired files have not subsequently changed; unrelated current package
-members are preserved. Recovery is validated before it is saved, and the backup
-remains available afterward.
+members are preserved. Recovery is validated before it is saved. Findings that
+were present in the exact original are allowed to return, because restoring that
+previous state is the purpose of Undo; they are shown again in the refreshed
+package report. The backup remains available afterward.
 
 ## Checks
 
