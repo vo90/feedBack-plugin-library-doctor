@@ -14,11 +14,17 @@ always has priority.
 
 ## Install
 
-Library Doctor is designed to remain an optional plugin. Once this repository
-is published at an HTTPS Git URL, desktop users can paste that URL into
-**Plugins → Plugin Manager → Install Plugin**, restart FeedBack, and enable the
-Library Doctor pedal if necessary. FeedBack installs the small Python runtime
-dependency from `requirements.txt` during plugin startup.
+Library Doctor is designed to remain an optional plugin. To install it in the
+FeedBack desktop app:
+
+1. Open **Plugins → Plugin Manager → Install Plugin**.
+2. Paste `https://github.com/vo90/feedBack-plugin-library-doctor.git`.
+3. Select **Install**, then restart FeedBack when prompted.
+4. Enable the Library Doctor pedal in Plugin Manager if it is switched off.
+
+The Plugin Manager uses Git to download and update plugins, so `git` must be
+available on the computer's `PATH`. FeedBack installs Library Doctor's small
+Python runtime dependency from `requirements.txt` during plugin startup.
 
 For local development, put this repository directly under FeedBack Desktop's
 user-plugins directory (or point `SLOPSMITH_PLUGINS_DIR` at its parent
