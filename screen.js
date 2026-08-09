@@ -586,7 +586,7 @@
     ));
     card.appendChild(batchSummaryGrid([
       [preview.eligible_count, 'Eligible Feedpaks'],
-      [repairChangeCount(preview), 'Safe chart changes'],
+      [repairChangeCount(preview), 'Safe song-data changes'],
       [preview.blocked_count, 'Blocked and excluded'],
       [preview.no_longer_needed_count, 'No longer need repair'],
     ]));
@@ -618,7 +618,7 @@
       row.appendChild(make(
         'span',
         '',
-        `${number(repairChangeCount(item))} safe chart ${repairChangeCount(item) === 1 ? 'change' : 'changes'} | ${number(item.rule_count)} repair ${Number(item.rule_count) === 1 ? 'type' : 'types'} | ${item.package}`,
+        `${number(repairChangeCount(item))} safe song-data ${repairChangeCount(item) === 1 ? 'change' : 'changes'} | ${number(item.rule_count)} repair ${Number(item.rule_count) === 1 ? 'type' : 'types'} | ${item.package}`,
       ));
       packageList.appendChild(row);
     });
@@ -782,7 +782,7 @@
       row.appendChild(make(
         'span',
         '',
-        `${number(repairChangeCount(item))} safe chart ${repairChangeCount(item) === 1 ? 'change will' : 'changes will'} return to the saved original state across ${number(item.member_count)} chart ${Number(item.member_count) === 1 ? 'file' : 'files'}. ${item.package}`,
+        `${number(repairChangeCount(item))} safe song-data ${repairChangeCount(item) === 1 ? 'change will' : 'changes will'} return to the saved original state across ${number(item.member_count)} ${Number(item.member_count) === 1 ? 'file' : 'files'}. ${item.package}`,
       ));
       packageList.appendChild(row);
     });
@@ -812,7 +812,7 @@
       card.appendChild(make(
         'p',
         'lh-batch-warning',
-        'Blocked Feedpaks will remain unchanged. Undo will continue only with packages whose repaired chart files and retained backups still pass every safety check.',
+        'Blocked Feedpaks will remain unchanged. Undo will continue only with packages whose repaired song-data files and retained backups still pass every safety check.',
       ));
     }
 
@@ -839,7 +839,7 @@
     confirmation.appendChild(make(
       'p',
       '',
-      `Restore the saved original chart data for ${number(preview.eligible_count)} Feedpak${Number(preview.eligible_count) === 1 ? '' : 's'}? ${number(preview.changes_to_restore ?? preview.entries_to_restore)} safe chart ${Number(preview.changes_to_restore ?? preview.entries_to_restore) === 1 ? 'change will' : 'changes will'} return to the saved state, and the related findings are expected to return. Other package files are preserved.`,
+      `Restore the saved original song data for ${number(preview.eligible_count)} Feedpak${Number(preview.eligible_count) === 1 ? '' : 's'}? ${number(preview.changes_to_restore ?? preview.entries_to_restore)} safe song-data ${Number(preview.changes_to_restore ?? preview.entries_to_restore) === 1 ? 'change will' : 'changes will'} return to the saved state, and the related findings are expected to return. Other package files are preserved.`,
     ));
     const apply = make('button', 'lh-button lh-button-danger', `Undo repairs for ${number(preview.eligible_count)} Feedpaks`);
     const cancel = make('button', 'lh-button', 'Keep repaired versions');
@@ -927,7 +927,7 @@
           'span',
           '',
           outcome.outcome === 'restored'
-            ? `${number(repairChangeCount(outcome))} safe chart ${repairChangeCount(outcome) === 1 ? 'change was' : 'changes were'} restored to the original state. ${outcome.cache_updated === false ? 'Displayed scan result needs a manual refresh. ' : ''}${outcome.package}`
+            ? `${number(repairChangeCount(outcome))} safe song-data ${repairChangeCount(outcome) === 1 ? 'change was' : 'changes were'} restored to the original state. ${outcome.cache_updated === false ? 'Displayed scan result needs a manual refresh. ' : ''}${outcome.package}`
             : `${outcome.message || 'No additional details.'} ${outcome.package}`,
         ));
         list.appendChild(row);
@@ -1094,9 +1094,9 @@
     confirmation.appendChild(make(
       'p',
       '',
-      'Undo restores the original chart files saved for this Feedpak before its batch repair. Other successfully repaired Feedpaks are not affected.',
+      'Undo restores the original song-data files saved for this Feedpak before its batch repair. Other successfully repaired Feedpaks are not affected.',
     ));
-    const restore = make('button', 'lh-button lh-button-danger', 'Restore original chart data');
+    const restore = make('button', 'lh-button lh-button-danger', 'Restore original song data');
     const keep = make('button', 'lh-button', 'Keep repaired version');
     restore.type = 'button';
     keep.type = 'button';
@@ -1127,7 +1127,7 @@
     } catch (error) {
       restore.disabled = false;
       keep.disabled = false;
-      text(restore, 'Restore original chart data');
+      text(restore, 'Restore original song data');
       confirmation.appendChild(make('p', 'lh-inline-error', error.message));
     }
   }
@@ -1241,7 +1241,7 @@
         '',
         finding.arrangement_id || String(finding.location || '').split(':')[0] || 'Package source',
       ));
-      evidence.appendChild(make('p', '', finding.message || 'A safe chart issue was found.'));
+      evidence.appendChild(make('p', '', finding.message || 'A safe song-data issue was found.'));
       const meta = [];
       if (finding.time != null) meta.push(`First example: ${Number(finding.time).toFixed(4)}s`);
       if (finding.string != null) meta.push(`String ${Number(finding.string) + 1}`);
@@ -1328,7 +1328,7 @@
     if (receipt.legacy_receipt) {
       return 'The package still matches an earlier successful Library Doctor repair. That older version did not store the exact item count in its result receipt.';
     }
-    if (!count) return 'The saved original chart data was restored.';
+    if (!count) return 'The saved original song data was restored.';
     const summaries = Array.isArray(receipt.repair_summaries)
       ? receipt.repair_summaries.filter((item) => repairChangeCount(item) > 0)
       : [];
@@ -1337,7 +1337,7 @@
       if (restoredChange.change_kind === 'reorder') {
         return `Restored the saved original bend-point order for ${number(repairChangeCount(restoredChange))} bend ${repairChangeCount(restoredChange) === 1 ? 'curve' : 'curves'}. The repaired ordering finding is expected to return.`;
       }
-      return `Restored the saved original chart data for ${number(count)} safe ${count === 1 ? 'change' : 'changes'}. The related repaired findings are expected to return.`;
+      return `Restored the saved original song data for ${number(count)} safe ${count === 1 ? 'change' : 'changes'}. The related repaired findings are expected to return.`;
     }
     if (summaries.length > 1) {
       const changes = summaries.map((item) => plannedRepairChange(item));
@@ -1399,7 +1399,7 @@
     copy.appendChild(make(
       'h3',
       '',
-      failed ? 'The repair was not completed' : restored ? 'The original chart data was restored' : 'The repair completed successfully',
+      failed ? 'The repair was not completed' : restored ? 'The original song data was restored' : 'The repair completed successfully',
     ));
     copy.appendChild(make(
       'p',
@@ -1426,14 +1426,14 @@
         : 'You can review the finding and try again; the existing package remains the version FeedBack will load.'],
     ] : restored ? [
       ['What happened', repairChangeSummary(receipt)],
-      ['What to expect in game', receipt.player_result || 'The original chart data is present again, so the repaired finding may return when the package is scanned.'],
-      ['Why this is useful', receipt.user_value || 'This returns the chart to the state saved immediately before the repair.'],
-      ['What happened to the Feedpak', receipt.file_handling?.summary || 'The original chart data was restored at the same package path. No duplicate song was added.'],
+      ['What to expect in game', receipt.player_result || 'The original song data is present again, so the repaired finding may return when the package is scanned.'],
+      ['Why this is useful', receipt.user_value || 'This returns the song data to the state saved immediately before the repair.'],
+      ['What happened to the Feedpak', receipt.file_handling?.summary || 'The original song data was restored at the same package path. No duplicate song was added.'],
     ] : [
       ['What changed', repairChangeSummary(receipt)],
-      ['What to expect in game', receipt.player_result || 'FeedBack will load the repaired chart the next time the song is opened.'],
+      ['What to expect in game', receipt.player_result || 'FeedBack will load the repaired song data the next time the song is opened.'],
       ['Why the fix matters', receipt.user_value || 'The repaired data is now unambiguous and passed the current validation checks.'],
-      ['What happened to the Feedpak', receipt.file_handling?.summary || 'The validated candidate replaced the package at the same path. No duplicate song was added, and original changed chart files were backed up.'],
+      ['What happened to the Feedpak', receipt.file_handling?.summary || 'The validated candidate replaced the package at the same path. No duplicate song was added, and original changed song-data files were backed up.'],
     ];
     blocks.forEach(([label, value]) => {
       const block = make('div', 'lh-repair-result-answer');
@@ -1478,10 +1478,10 @@
       'p',
       '',
       receipt.rule_code === 'package.all-safe'
-        ? 'Undo will restore all original chart files saved before this combined repair. The repaired safe findings are expected to return. Other package files are preserved.'
-        : 'Undo will restore the original chart files saved before this repair. The repaired finding is expected to return. Other package files are preserved.',
+        ? 'Undo will restore all original song-data files saved before this combined repair. The repaired safe findings are expected to return. Other package files are preserved.'
+        : 'Undo will restore the original song-data files saved before this repair. The repaired finding is expected to return. Other package files are preserved.',
     ));
-    const confirm = make('button', 'lh-button lh-button-danger', 'Restore original chart data');
+    const confirm = make('button', 'lh-button lh-button-danger', 'Restore original song data');
     const cancel = make('button', 'lh-button', 'Keep repaired version');
     confirm.type = 'button';
     cancel.type = 'button';
@@ -1547,7 +1547,7 @@
       [
         'What happens to the Feedpak',
         plan.file_handling?.summary || (
-          'A complete repaired candidate is validated first. It then replaces the existing Feedpak at the same path, while the original changed chart files are kept in private recovery storage. No duplicate song is added to the library.'
+          'A complete repaired candidate is validated first. It then replaces the existing Feedpak at the same path, while the original changed song-data files are kept in private recovery storage. No duplicate song is added to the library.'
         ),
       ],
     ].forEach(([label, value]) => {
@@ -1560,7 +1560,7 @@
     card.appendChild(make(
       'p',
       'lh-muted',
-      'If candidate creation, backup, integrity checking, or validation fails, the existing Feedpak is not replaced. After a successful repair, Undo can restore the saved original chart data.',
+      'If candidate creation, backup, integrity checking, or validation fails, the existing Feedpak is not replaced. After a successful repair, Undo can restore the saved original song data.',
     ));
   }
 
@@ -1618,14 +1618,14 @@
         card.appendChild(make(
           'p',
           '',
-          `This will apply ${number(plan.rule_count)} safe repair ${plan.rule_count === 1 ? 'type' : 'types'} and make ${number(repairChangeCount(plan))} safe stored ${repairChangeCount(plan) === 1 ? 'change' : 'changes'} across ${number(plan.member_count)} chart ${plan.member_count === 1 ? 'file' : 'files'}.`,
+          `This will apply ${number(plan.rule_count)} safe repair ${plan.rule_count === 1 ? 'type' : 'types'} and make ${number(repairChangeCount(plan))} safe stored ${repairChangeCount(plan) === 1 ? 'change' : 'changes'} across ${number(plan.member_count)} song-data ${plan.member_count === 1 ? 'file' : 'files'}.`,
         ));
         const list = make('ul', 'lh-all-safe-list');
         (plan.repair_summaries || []).forEach((summary) => {
           list.appendChild(make(
             'li',
             '',
-            `${summary.title}: ${plannedRepairChange(summary)} across ${number(summary.member_count)} chart ${summary.member_count === 1 ? 'file' : 'files'}.`,
+            `${summary.title}: ${plannedRepairChange(summary)} across ${number(summary.member_count)} song-data ${summary.member_count === 1 ? 'file' : 'files'}.`,
           ));
         });
         card.appendChild(list);
@@ -1651,14 +1651,14 @@
           'p',
           '',
           blockers.length
-            ? 'Library Doctor cannot safely apply the combined repair because at least one referenced chart file could not be prepared. Nothing will be changed.'
+            ? 'Library Doctor cannot safely apply the combined repair because at least one referenced song-data file could not be prepared. Nothing will be changed.'
             : 'No supported safe repairs are currently available in this package.',
         ));
         blockers.forEach((blocker) => {
           card.appendChild(make(
             'p',
             'lh-repair-warning',
-            `${blocker.member_path || 'Referenced chart file'}: ${blocker.message}`,
+            `${blocker.member_path || 'Referenced song-data file'}: ${blocker.message}`,
           ));
         });
         const close = make('button', 'lh-button', 'Close');

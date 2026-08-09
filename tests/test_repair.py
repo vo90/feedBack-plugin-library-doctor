@@ -37,7 +37,11 @@ def _plan(
     return repair.plan_json_member(
         _raw(document),
         member_path=path or (
-            "arrangements/lead.json" if source_kind == "arrangement" else "drums.json"
+            "arrangements/lead.json"
+            if source_kind == "arrangement"
+            else "lyrics.json"
+            if source_kind == "lyrics"
+            else "drums.json"
         ),
         source_kind=source_kind,
         validator_version="rules-test",
@@ -56,6 +60,7 @@ def test_catalog_is_an_explicit_allowlist(repair):
         "chart.duplicate-handshape",
         "chart.note-duplicates-chord",
         "chart.bend-points-out-of-order",
+        "lyrics.out-of-order",
         "drums.duplicate-hit",
     ]
     assert {item["safety"] for item in catalog} == {"safe_automatic"}
@@ -78,6 +83,10 @@ def test_catalog_is_an_explicit_allowlist(repair):
     bend_repair = repair.repair_for_rule("chart.bend-points-out-of-order")
     assert bend_repair["item_name"] == "bend curve"
     assert bend_repair["change_kind"] == "reorder"
+    lyric_repair = repair.repair_for_rule("lyrics.out-of-order")
+    assert lyric_repair["source_kind"] == "lyrics"
+    assert lyric_repair["item_name"] == "lyric timeline"
+    assert lyric_repair["change_kind"] == "reorder"
     assert repair.repair_for_rule("drums.duplicate-hit")["item_name"] == "drum hit"
     assert repair.repair_for_rule("chart.string-conflict") is None
 
@@ -474,6 +483,87 @@ def test_bend_repair_rejects_tampered_ordering_instructions(repair):
     assert boolean_caught.value.code == "invalid_plan"
 
 
+def test_lyric_repair_stably_orders_cues_without_changing_content(repair):
+    cues = [
+        {"t": 2.0, "d": 0.25, "w": "later", "future": {"id": 3}},
+        {"t": 1.0, "d": 0.5, "w": "equal first", "future": {"id": 1}},
+        {"t": 1.0, "d": 0.75, "w": "equal second", "future": {"id": 2}},
+    ]
+
+    plan = _plan(
+        repair,
+        cues,
+        source_kind="lyrics",
+        rule_code="lyrics.out-of-order",
+    )
+    action = plan["actions"][0]
+
+    assert action["change_kind"] == "reorder"
+    assert action["change_count"] == 1
+    assert action["removed_count"] == 0
+    assert action["arrays_affected"] == 1
+    assert action["musical_positions"] == 1
+    assert action["operations"][0]["array_path"] == []
+    assert action["operations"][0]["sorted_indices"] == [1, 2, 0]
+
+    repaired = json.loads(
+        repair.apply_json_member(_raw(cues), plan).decode("utf-8")
+    )
+    assert repaired == [cues[1], cues[2], cues[0]]
+    assert sorted(repaired, key=lambda cue: cue["future"]["id"]) == sorted(
+        cues, key=lambda cue: cue["future"]["id"]
+    )
+
+
+def test_lyric_repair_ignores_ordered_cues_and_refuses_invalid_mixed_timeline(repair):
+    ordered = [
+        {"t": 1.0, "d": 0.2, "w": "first"},
+        {"t": 2.0, "d": 0.2, "w": "second"},
+    ]
+    assert _plan(
+        repair,
+        ordered,
+        source_kind="lyrics",
+        rule_code="lyrics.out-of-order",
+    )["actions"] == []
+
+    invalid = [
+        {"t": 2.0, "d": 0.2, "w": "later"},
+        {"t": "unknown", "d": 0.2, "w": "invalid"},
+        {"t": 1.0, "d": 0.2, "w": "earlier"},
+    ]
+    with pytest.raises(repair.RepairPlanningError) as caught:
+        _plan(
+            repair,
+            invalid,
+            source_kind="lyrics",
+            rule_code="lyrics.out-of-order",
+        )
+    assert caught.value.code == "invalid_lyric_timeline"
+
+
+def test_lyric_repair_rejects_tampered_ordering_instructions(repair):
+    cues = [
+        {"t": 2.0, "d": 0.2, "w": "later"},
+        {"t": 1.0, "d": 0.2, "w": "earlier"},
+    ]
+    raw = _raw(cues)
+    plan = _plan(
+        repair,
+        cues,
+        source_kind="lyrics",
+        rule_code="lyrics.out-of-order",
+    )
+    tampered = copy.deepcopy(plan)
+    tampered["actions"][0]["operations"][0]["sorted_indices"] = [0, 1]
+    unsigned = {key: value for key, value in tampered.items() if key != "plan_id"}
+    tampered["plan_id"] = repair._digest_json(unsigned)
+
+    with pytest.raises(repair.RepairPlanningError) as caught:
+        repair.apply_json_member(raw, tampered)
+    assert caught.value.code == "invalid_plan"
+
+
 def test_plans_only_exact_drum_hit_duplicates(repair):
     document = {
         "version": 1,
@@ -675,8 +765,8 @@ def test_unknown_source_kind_and_wrong_extension_are_refused(repair):
     with pytest.raises(repair.RepairPlanningError) as unknown:
         repair.plan_json_member(
             b"{}",
-            member_path="lyrics.json",
-            source_kind="lyrics",
+            member_path="unknown.json",
+            source_kind="unknown",
             validator_version="rules-test",
         )
     assert unknown.value.code == "unsupported_source_kind"
@@ -689,6 +779,23 @@ def test_unknown_source_kind_and_wrong_extension_are_refused(repair):
             validator_version="rules-test",
         )
     assert extension.value.code == "unsupported_text_format"
+
+
+def test_lyric_member_discovery_includes_primary_and_additional_tracks_once(repair):
+    manifest = {
+        "arrangements": [],
+        "lyrics": "lyrics/main.json",
+        "lyric_tracks": [
+            {"id": "main", "file": "lyrics/main.json"},
+            {"id": "translation", "file": "lyrics/swedish.json"},
+            {"id": "unsafe", "file": "../outside.json"},
+        ],
+    }
+
+    assert repair.RepairService._repair_member_paths(manifest, "lyrics") == [
+        "lyrics/main.json",
+        "lyrics/swedish.json",
+    ]
 
 
 def test_history_reader_preserves_pre_rename_receipts(repair, tmp_path):

@@ -453,12 +453,92 @@ def test_bend_point_order_repair_is_lossless_validated_and_reversible(tmp_path):
     client.close()
 
 
+def test_lyric_order_repair_is_lossless_validated_and_reversible(tmp_path):
+    client, library = _client(tmp_path)
+    package = _valid_package(library)
+    manifest_path = package / "manifest.yaml"
+    manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    manifest["lyrics"] = "lyrics.json"
+    manifest_path.write_text(
+        yaml.safe_dump(manifest, sort_keys=False), encoding="utf-8"
+    )
+    cues = [
+        {"t": 2.0, "d": 0.2, "w": "later", "future": {"id": 3}},
+        {"t": 1.0, "d": 0.2, "w": "equal first", "future": {"id": 1}},
+        {"t": 1.0, "d": 0.3, "w": "equal second", "future": {"id": 2}},
+    ]
+    lyrics_path = package / "lyrics.json"
+    original = json.dumps(cues).encode("utf-8")
+    lyrics_path.write_bytes(original)
+    client.post("/api/plugins/library_doctor/scan")
+    _wait_for_scan(client)
+
+    before = client.get("/api/plugins/library_doctor/results").json()
+    finding = next(
+        item for item in before["items"][0]["findings"]
+        if item["code"] == "lyrics.out-of-order"
+    )
+    assert finding["rule"]["repairability"] == "safe_candidate"
+
+    preview = client.post(
+        "/api/plugins/library_doctor/repair/preview",
+        json={
+            "package": "Artist/Song.feedpak",
+            "rule_code": "lyrics.out-of-order",
+        },
+    )
+    assert preview.status_code == 200
+    plan = preview.json()
+    assert plan["available"] is True
+    assert plan["change_kind"] == "reorder"
+    assert plan["change_count"] == 1
+    assert plan["removed_count"] == 0
+
+    applied = client.post(
+        "/api/plugins/library_doctor/repair/apply",
+        json={
+            "package": "Artist/Song.feedpak",
+            "rule_code": "lyrics.out-of-order",
+            "plan_id": plan["plan_id"],
+        },
+    )
+    assert applied.status_code == 200
+    result = applied.json()
+    repaired = json.loads(lyrics_path.read_text(encoding="utf-8"))
+    assert repaired == [cues[1], cues[2], cues[0]]
+    assert sorted(repaired, key=lambda cue: cue["future"]["id"]) == sorted(
+        cues, key=lambda cue: cue["future"]["id"]
+    )
+    refreshed = client.get("/api/plugins/library_doctor/results").json()
+    assert not any(
+        item["code"] == "lyrics.out-of-order"
+        for item in refreshed["items"][0]["findings"]
+    )
+
+    restored = client.post(
+        "/api/plugins/library_doctor/repair/restore",
+        json={
+            "package": "Artist/Song.feedpak",
+            "backup_id": result["backup_id"],
+        },
+    )
+    assert restored.status_code == 200
+    assert lyrics_path.read_bytes() == original
+    restored_results = client.get("/api/plugins/library_doctor/results").json()
+    assert any(
+        item["code"] == "lyrics.out-of-order"
+        for item in restored_results["items"][0]["findings"]
+    )
+    client.close()
+
+
 def test_fix_all_safe_issues_is_one_validated_reversible_package_transaction(tmp_path):
     client, library = _client(tmp_path)
     package = _valid_package(library)
     manifest_path = package / "manifest.yaml"
     manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
     manifest["drum_tab"] = "drums.json"
+    manifest["lyrics"] = "lyrics.json"
     manifest_path.write_text(
         yaml.safe_dump(manifest, sort_keys=False), encoding="utf-8"
     )
@@ -491,6 +571,12 @@ def test_fix_all_safe_issues_is_one_validated_reversible_package_transaction(tmp
     }).encode("utf-8")
     drums_path = package / "drums.json"
     drums_path.write_bytes(original_drums)
+    original_lyrics = json.dumps([
+        {"t": 2.0, "d": 0.2, "w": "later"},
+        {"t": 1.0, "d": 0.2, "w": "earlier"},
+    ]).encode("utf-8")
+    lyrics_path = package / "lyrics.json"
+    lyrics_path.write_bytes(original_lyrics)
 
     client.post("/api/plugins/library_doctor/scan")
     _wait_for_scan(client)
@@ -511,11 +597,12 @@ def test_fix_all_safe_issues_is_one_validated_reversible_package_transaction(tmp
         "chart.note-duplicates-chord",
         "chart.duplicate-anchor",
         "chart.duplicate-handshape",
+        "lyrics.out-of-order",
         "drums.duplicate-hit",
     ]
-    assert plan["rule_count"] == 7
+    assert plan["rule_count"] == 8
     assert plan["removed_count"] == 8
-    assert plan["member_count"] == 2
+    assert plan["member_count"] == 3
 
     applied = client.post(
         "/api/plugins/library_doctor/repair/all/apply",
@@ -540,6 +627,9 @@ def test_fix_all_safe_issues_is_one_validated_reversible_package_transaction(tmp
     assert len(repaired["anchors"]) == 1
     assert len(repaired["handshapes"]) == 1
     assert len(json.loads(drums_path.read_text(encoding="utf-8"))["hits"]) == 1
+    assert [cue["t"] for cue in json.loads(
+        lyrics_path.read_text(encoding="utf-8")
+    )] == [1.0, 2.0]
     backups = list(
         (tmp_path / "config" / "library_doctor" / "repair_backups").glob("*.zip")
     )
@@ -548,8 +638,8 @@ def test_fix_all_safe_issues_is_one_validated_reversible_package_transaction(tmp
         metadata = json.loads(backup.read("repair.json"))
         assert metadata["rule_code"] == "package.all-safe"
         assert metadata["rule_codes"] == plan["rule_codes"]
-        assert len(metadata["members"]) == 2
-        assert len(metadata["summary"]["repair_summaries"]) == 7
+        assert len(metadata["members"]) == 3
+        assert len(metadata["summary"]["repair_summaries"]) == 8
 
     refreshed = client.get("/api/plugins/library_doctor/results").json()
     refreshed_codes = {
@@ -568,6 +658,7 @@ def test_fix_all_safe_issues_is_one_validated_reversible_package_transaction(tmp
     assert restored.json()["rule_codes"] == plan["rule_codes"]
     assert arrangement_path.read_bytes() == original_arrangement
     assert drums_path.read_bytes() == original_drums
+    assert lyrics_path.read_bytes() == original_lyrics
     assert backups[0].exists()
     client.close()
 

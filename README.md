@@ -77,7 +77,7 @@ between packages. Stopping also takes effect between packages: completed repairs
 remain valid and recoverable, while packages not yet started remain unchanged.
 The completed result distinguishes repairs that are still active from originals
 that have since been restored. **Review Undo all remaining repairs** first checks
-every retained backup and current repaired chart without changing anything. A
+every retained backup and current repaired song-data file without changing anything. A
 second confirmation restores eligible Feedpaks one at a time. Packages changed
 after repair or backed by an unreadable recovery file are excluded rather than
 overwritten; already-restored packages are not attempted again.
@@ -101,8 +101,8 @@ absent.
 The repair allowlist removes exact duplicate standalone notes, members inside
 one chord, complete chord events, anchors, handshapes, and drum hits. It can also
 remove a standalone note that exactly repeats one explicit member of a chord and
-put out-of-order bend points into chronological order without removing any bend
-point.
+put out-of-order bend points and lyric cues into chronological order without
+removing any bend point or lyric cue.
 Ordinary duplicates keep the first entry and delete only later copies whose
 complete JSON properties and values match within the same event array or chord.
 For a note that repeats a chord member, the complete chord is preserved and the
@@ -114,6 +114,11 @@ For bend curves, the existing point timestamps are stable-sorted; every point,
 unknown future property, and the authored order between equal-time points is
 preserved. A curve that also contains an invalid point is blocked rather than
 guessed at.
+For lyrics, the complete cue list is stable-sorted by its existing start times;
+every word, duration, unknown future property, and the authored order between
+equal-time cues is preserved. A timeline that also contains an invalid cue is
+blocked rather than guessed at. The primary lyrics and additional lyric tracks
+declared by the manifest use the same safeguards.
 
 A preview is bound to the exact current source bytes and validator version. If
 the package changes before confirmation, Library Doctor refuses the stale plan.
@@ -124,7 +129,7 @@ has priority.
 **Fix all safe issues** recalculates each eligible repair against the result of
 the previous step, using a fixed dependency order. The plugin then builds and
 validates one complete candidate, creates one backup, and saves once. If any
-referenced chart file cannot be prepared safely, the combined repair is blocked
+referenced song-data file cannot be prepared safely, the combined repair is blocked
 and no partial set of fixes is applied. This button covers only the explicit
 deterministic allowlist above; warnings that require musical judgment remain
 unchanged.
@@ -143,10 +148,10 @@ builds a complete candidate beside the package, verifies every archive member,
 runs the current package validation, and creates a private recovery backup
 before replacing the archive at the same path (or atomically writing each changed
 file in an unpacked directory package). The backup
-contains the original bytes of only the chart files changed by the repair, not
+contains the original bytes of only the song-data files changed by the repair, not
 another full copy of large audio and artwork assets. It is stored under
 `library_doctor/repair_backups` in FeedBack's config directory and is retained
-after repair. **Undo this repair** restores those exact original chart bytes only
+after repair. **Undo this repair** restores those exact original song-data bytes only
 when the repaired files have not subsequently changed; unrelated current package
 members are preserved. Recovery is validated before it is saved, and the backup
 remains available afterward.
@@ -182,11 +187,14 @@ remains available afterward.
   will be played. Out-of-order phrase windows are structural warnings when
   their selected levels are empty; they become errors when any selectable
   mastery setting produces a nonchronological playable stream.
-- Song-level beat and section timelines that are not chronological or contain
-  markers significantly beyond the declared song duration. A five-second
-  allowance avoids false warnings from normal trailing beat grids. This covers
-  both the preferred `song_timeline` sidecar and the legacy
-  arrangement-embedded timeline that FeedBack actually selects as its fallback.
+- Song-level beat and section timelines that are not chronological, repeat an
+  identical marker, repeat an earlier timestamp with conflicting data, or
+  contain markers significantly beyond the declared song duration. These are
+  reported separately so repeated data is not mistaken for a simple sorting
+  problem. A five-second allowance avoids false warnings from normal trailing
+  beat grids. This covers both the preferred `song_timeline` sidecar and the
+  legacy arrangement-embedded timeline that FeedBack actually selects as its
+  fallback.
 - Per-chart and song-level tempo/time-signature timelines that are out of order,
   significantly beyond the song, or contain conflicting values at one time.
 - Timed drum, vocal-pitch, pitch-contour, key, and harmony sidecars that are out

@@ -1151,6 +1151,47 @@ def test_negative_preroll_and_equal_timeline_times_are_allowed(tmp_path, validat
     assert not any(code.startswith("timeline.") for code in _codes(report))
 
 
+def test_timeline_distinguishes_exact_duplicates_from_conflicting_repeated_times(
+    tmp_path, validator,
+):
+    manifest = _manifest(song_timeline="song_timeline.json")
+    timeline = {
+        "version": 1,
+        "beats": [
+            {"time": 1.0, "measure": 1},
+            {"time": 2.0, "measure": 1},
+            {"time": 1.0, "measure": 1},
+            {"time": 2.0, "measure": 2},
+        ],
+        "sections": [
+            {"name": "Intro", "time": 1.0, "number": 1},
+            {"name": "Verse", "time": 5.0, "number": 1},
+            {"name": "Intro", "time": 1.0, "number": 2},
+            {"name": "Verse", "time": 5.0, "number": 1},
+        ],
+    }
+
+    report = validator.validate_feedpak(_package(
+        tmp_path,
+        manifest=manifest,
+        files={"song_timeline.json": json.dumps(timeline)},
+    ))
+    findings = {item["code"]: item for item in report["findings"]}
+
+    assert findings["timeline.duplicate-beat"]["affected_count"] == 1
+    assert findings["timeline.duplicate-beat"]["location"].endswith("beats[2]")
+    assert findings["timeline.repeated-beat-time"]["affected_count"] == 1
+    assert findings["timeline.repeated-beat-time"]["severity"] == "error"
+    assert findings["timeline.repeated-section-time"]["affected_count"] == 1
+    assert findings["timeline.duplicate-section"]["affected_count"] == 1
+    assert findings["timeline.duplicate-section"]["location"].endswith(
+        "sections[3]"
+    )
+    assert "will not guess" in findings[
+        "timeline.repeated-beat-time"
+    ]["rule"]["guidance"]
+
+
 def test_small_song_timeline_overrun_is_allowed(tmp_path, validator):
     manifest = _manifest(song_timeline="song_timeline.json")
     timeline = {
@@ -1351,6 +1392,14 @@ def test_lyric_timeline_checks_are_separate_from_schema_validation(tmp_path, val
         "lyrics.out-of-order",
         "lyrics.after-duration",
     }.issubset(_codes(report))
+    finding = next(
+        item for item in report["findings"]
+        if item["code"] == "lyrics.out-of-order"
+    )
+    assert finding["rule"]["repairability"] == "safe_candidate"
+    assert finding["affected_count"] == 1
+    assert finding["location"] == "lyrics.json:[1]"
+    assert finding["time"] == -1.0
 
 
 def test_empty_declared_lyrics_are_a_warning(tmp_path, validator):

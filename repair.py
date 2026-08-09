@@ -26,7 +26,7 @@ from typing import Iterator
 import yaml
 
 
-REPAIR_CATALOG_VERSION = "repairs-5"
+REPAIR_CATALOG_VERSION = "repairs-6"
 REPAIR_PLAN_SCHEMA = "library_doctor.repair_plan.v1"
 MAX_REPAIR_TEXT_BYTES = 64 * 1024 * 1024
 MAX_REPAIR_STRUCTURE_ITEMS = 2_000_000
@@ -224,6 +224,30 @@ class StableSortBendPoints:
         }
 
 
+@dataclass(frozen=True)
+class StableSortLyricCues:
+    expected_length: int
+    original_sha256: str
+    sorted_sha256: str
+    sorted_indices: tuple[int, ...]
+    moved_count: int
+
+    @property
+    def remove_indices(self) -> tuple[int, ...]:
+        return ()
+
+    def to_dict(self) -> dict:
+        return {
+            "operation": "stable_sort_lyric_cues",
+            "array_path": [],
+            "expected_length": self.expected_length,
+            "original_sha256": self.original_sha256,
+            "sorted_sha256": self.sorted_sha256,
+            "sorted_indices": list(self.sorted_indices),
+            "moved_count": self.moved_count,
+        }
+
+
 _REPAIR_DEFINITIONS = (
     RepairDefinition(
         rule_code="chart.duplicate-note",
@@ -367,6 +391,28 @@ _REPAIR_DEFINITIONS = (
         change_kind="reorder",
     ),
     RepairDefinition(
+        rule_code="lyrics.out-of-order",
+        action_kind="reorder_lyric_cues",
+        source_kind="lyrics",
+        item_name="lyric timeline",
+        safety="safe_automatic",
+        title="Put lyric cues in chronological order",
+        description=(
+            "Stable-sort the existing lyric cues by their start times. Every "
+            "cue, word, duration, and stored property is preserved, and cues "
+            "with equal start times keep their authored order."
+        ),
+        player_result=(
+            "FeedBack receives the same lyric cues in playback order, so the "
+            "lyric display no longer has to process a cue after a later one."
+        ),
+        user_value=(
+            "Lyrics advance predictably with the song without deleting, "
+            "rewriting, or retiming any authored text."
+        ),
+        change_kind="reorder",
+    ),
+    RepairDefinition(
         rule_code="drums.duplicate-hit",
         action_kind="remove_exact_duplicate_drum_hits",
         source_kind="drum_tab",
@@ -394,6 +440,7 @@ _REPAIR_BY_RULE = {
 
 _DEFAULT_REPAIR_BY_SOURCE = {
     "arrangement": _REPAIR_BY_RULE["chart.duplicate-note"],
+    "lyrics": _REPAIR_BY_RULE["lyrics.out-of-order"],
     "drum_tab": _REPAIR_BY_RULE["drums.duplicate-hit"],
 }
 
@@ -408,6 +455,7 @@ _ALL_SAFE_RULE_ORDER = (
     "chart.note-duplicates-chord",
     "chart.duplicate-anchor",
     "chart.duplicate-handshape",
+    "lyrics.out-of-order",
     "drums.duplicate-hit",
 )
 
@@ -416,7 +464,7 @@ _ALL_SAFE_DEFINITION = {
     "safety": "safe_automatic",
     "title": "Fix all safe issues",
     "description": (
-        "Apply every deterministic safe chart repair currently available in "
+        "Apply every deterministic safe song-data repair currently available in "
         "this Feedpak as one validated transaction."
     ),
     "player_result": (
@@ -464,10 +512,14 @@ def apply_json_member(raw: bytes, plan: dict) -> bytes:
 
     document = _parse_json(raw)
     _inspect_structure(document)
-    if not isinstance(document, dict):
+    source_kind = source.get("source_kind")
+    expected_shape = list if source_kind == "lyrics" else dict
+    if source_kind not in _DEFAULT_REPAIR_BY_SOURCE or not isinstance(
+        document, expected_shape
+    ):
         raise RepairPlanningError(
             "invalid_document_shape",
-            "The song file must contain a JSON object before it can be repaired.",
+            "The song file does not have the expected JSON structure for this repair.",
         )
 
     removed: set[tuple[tuple[str | int, ...], int]] = set()
@@ -731,10 +783,10 @@ class RepairService:
                     "musical_positions": 0,
                     "item_name": "item",
                     "player_result": (
-                        "The repaired chart data is still present. This repair predates detailed result receipts, so its exact item count is unavailable."
+                        "The repaired song data is still present. This repair predates detailed result receipts, so its exact item count is unavailable."
                     ),
                     "user_value": (
-                        "The package passed validation at repair time, and its saved original chart data can still be restored with Undo."
+                        "The package passed validation at repair time, and its saved original song data can still be restored with Undo."
                     ),
                     "file_handling": self._file_handling(backup_id),
                     "legacy_receipt": True,
@@ -752,7 +804,7 @@ class RepairService:
         *,
         deep_audio: bool = False,
     ) -> dict:
-        """Restore the chart members saved before a successful repair.
+        """Restore the song-data members saved before a successful repair.
 
         Restoration refuses to overwrite a package whose repaired members have
         changed since the backup was made.  Unrelated current package members
@@ -787,7 +839,7 @@ class RepairService:
                     "duplicate_library_package_created": False,
                     "backup_retained": True,
                     "summary": (
-                        "The saved original chart data was restored at the same Feedpak path. "
+                        "The saved original song data was restored at the same Feedpak path. "
                         "The recovery backup was kept, and no second song package was added."
                     ),
                 },
@@ -887,7 +939,7 @@ class RepairService:
             if introduced - set(rule_codes):
                 raise RepairPlanningError(
                     "restore_verification_failed",
-                    "The original chart data did not pass recovery validation, so the repaired Feedpak was left unchanged.",
+                    "The original song data did not pass recovery validation, so the repaired Feedpak was left unchanged.",
                 )
 
             backup_summary = metadata.get("summary")
@@ -923,17 +975,17 @@ class RepairService:
                 "member_count": len(source_members),
                 "item_name": backup_summary.get("item_name", "item"),
                 "player_result": (
-                    "After Undo, the package contains all original chart data again; the safe findings repaired together may return."
+                    "After Undo, the package contains all original song data again; the safe findings repaired together may return."
                     if combined_repair else
-                    "After Undo, the package contains the original chart data again; the finding that was repaired may return."
+                    "After Undo, the package contains the original song data again; the finding that was repaired may return."
                 ),
                 "user_value": (
                     "This returns the entire combined repair to its exact saved starting point if the song did not behave as expected."
                     if combined_repair else
-                    "This returns the chart to the exact data saved before the repair if the repaired song did not behave as expected."
+                    "This returns the song to the exact data saved before the repair if the repaired song did not behave as expected."
                 ),
                 "file_handling": (
-                    "The saved original chart files will replace only the repaired chart files at the same Feedpak path. "
+                    "The saved original song-data files will replace only the repaired files at the same Feedpak path. "
                     "Other package members are preserved, the recovery backup is retained, and no duplicate song is created."
                 ),
                 "_package_path": package_path,
@@ -1019,6 +1071,7 @@ class RepairService:
         pointer_key = (
             "file" if source_kind == "arrangement"
             else "drum_tab" if source_kind == "drum_tab"
+            else "lyrics" if source_kind == "lyrics"
             else None
         )
         if pointer_key is None:
@@ -1029,6 +1082,27 @@ class RepairService:
 
         member_paths = []
         seen = set()
+        if pointer_key == "lyrics":
+            candidates = []
+            if isinstance(manifest.get("lyrics"), str):
+                candidates.append(manifest["lyrics"])
+            lyric_tracks = manifest.get("lyric_tracks")
+            if isinstance(lyric_tracks, list):
+                candidates.extend(
+                    track.get("file")
+                    for track in lyric_tracks
+                    if isinstance(track, dict) and isinstance(track.get("file"), str)
+                )
+            for member in candidates:
+                try:
+                    safe_member = _validate_member_path(member)
+                except RepairPlanningError:
+                    continue
+                if safe_member in seen:
+                    continue
+                seen.add(safe_member)
+                member_paths.append(safe_member)
+            return member_paths
         if pointer_key == "drum_tab" and isinstance(manifest.get("drum_tab"), str):
             try:
                 safe_member = _validate_member_path(manifest["drum_tab"])
@@ -1138,7 +1212,7 @@ class RepairService:
         """Build one ordered plan for every supported safe repair in a package."""
         manifest = self._read_repair_manifest(package_path)
         member_sources: dict[str, set[str]] = {}
-        for source_kind in ("arrangement", "drum_tab"):
+        for source_kind in ("arrangement", "lyrics", "drum_tab"):
             for member_path in self._repair_member_paths(manifest, source_kind):
                 member_sources.setdefault(member_path, set()).add(source_kind)
 
@@ -1160,8 +1234,8 @@ class RepairService:
                     "member_path": member_path,
                     "code": "ambiguous_source",
                     "message": (
-                        "The same source file is declared as both a string arrangement "
-                        "and a drum tab, so it cannot be changed automatically."
+                        "The same source file is declared for more than one song-data "
+                        "role, so it cannot be changed automatically."
                     ),
                 })
                 continue
@@ -1259,7 +1333,7 @@ class RepairService:
             "plan_id": _digest_json(unsigned),
             "available": bool(planned) and not blockers,
             **_ALL_SAFE_DEFINITION,
-            "item_name": "chart item",
+            "item_name": "song-data item",
             "change_kind": "combined",
             "change_count": sum(
                 summary["change_count"] for summary in repair_summaries
@@ -1291,11 +1365,11 @@ class RepairService:
             "duplicate_library_package_created": False,
             "backup_created": backup_id is not None,
             "backup_id": backup_id,
-            "backup_contents": "original_changed_chart_files",
+            "backup_contents": "original_changed_song_data_files",
             "summary": (
                 "Library Doctor builds and validates a complete candidate first. Only then does it replace "
                 "the existing Feedpak at the same path. It does not add a second playable song to the library. "
-                "The original changed chart files are kept in private recovery storage."
+                "The original changed song-data files are kept in private recovery storage."
             ),
         }
 
@@ -1719,7 +1793,7 @@ class RepairService:
                     "The repaired song files could not be saved and automatic rollback was incomplete. "
                     "Do not use this package until it has been restored from the recovery backup."
                     if rollback_failed else
-                    "The repaired song files could not be saved. The original chart files were restored."
+                    "The repaired song files could not be saved. The original song-data files were restored."
                 ),
                 file_state="recovery_required" if rollback_failed else "unchanged",
             ) from exc
@@ -1780,7 +1854,7 @@ def plan_json_member(
     if not safe_member_path.lower().endswith(".json"):
         raise RepairPlanningError(
             "unsupported_text_format",
-            "Automatic chart repairs currently require an ordinary JSON file.",
+            "Automatic song-data repairs currently require an ordinary JSON file.",
         )
     if not isinstance(raw, bytes):
         raise TypeError("raw must be bytes")
@@ -1794,10 +1868,11 @@ def plan_json_member(
 
     document = _parse_json(raw)
     _inspect_structure(document)
-    if not isinstance(document, dict):
+    expected_shape = list if source_kind == "lyrics" else dict
+    if not isinstance(document, expected_shape):
         raise RepairPlanningError(
             "invalid_document_shape",
-            "The song file must contain a JSON object before it can be repaired.",
+            "The song file does not have the expected JSON structure for this repair.",
         )
 
     if definition.rule_code == "chart.duplicate-note":
@@ -1820,6 +1895,8 @@ def plan_json_member(
         operations = _plan_exact_note_chord_duplicates(document)
     elif definition.rule_code == "chart.bend-points-out-of-order":
         operations = _plan_bend_point_order(document)
+    elif definition.rule_code == "lyrics.out-of-order":
+        operations = _plan_lyric_cue_order(document)
     elif definition.rule_code == "drums.duplicate-hit":
         operations = _plan_exact_drum_duplicates(document)
     else:  # The explicit catalog dispatch above should make this unreachable.
@@ -2103,6 +2180,50 @@ def _plan_bend_point_order(document: dict) -> list[StableSortBendPoints]:
     return operations
 
 
+def _plan_lyric_cue_order(document: list) -> list[StableSortLyricCues]:
+    parsed_times = [
+        cue.get("t")
+        for cue in document
+        if isinstance(cue, dict) and _finite_number(cue.get("t"))
+    ]
+    if not any(
+        current < previous
+        for previous, current in zip(parsed_times, parsed_times[1:])
+    ):
+        return []
+
+    if not all(
+        isinstance(cue, dict)
+        and _finite_number(cue.get("t"))
+        and _finite_number(cue.get("d"))
+        and isinstance(cue.get("w"), str)
+        for cue in document
+    ):
+        raise RepairPlanningError(
+            "invalid_lyric_timeline",
+            "The out-of-order lyric timeline also contains an invalid cue, so "
+            "Library Doctor will not guess how to reorder it.",
+        )
+
+    sorted_indices = tuple(sorted(
+        range(len(document)), key=lambda index: document[index]["t"]
+    ))
+    moved_count = sum(
+        index != original_index
+        for index, original_index in enumerate(sorted_indices)
+    )
+    if not moved_count:
+        return []
+    sorted_cues = [document[index] for index in sorted_indices]
+    return [StableSortLyricCues(
+        expected_length=len(document),
+        original_sha256=hashlib.sha256(_canonical_json(document)).hexdigest(),
+        sorted_sha256=hashlib.sha256(_canonical_json(sorted_cues)).hexdigest(),
+        sorted_indices=sorted_indices,
+        moved_count=moved_count,
+    )]
+
+
 def _note_arrays(document: dict) -> Iterator[tuple[tuple[str | int, ...], list]]:
     yield from _arrangement_arrays(document, "notes")
 
@@ -2294,13 +2415,16 @@ def _valid_drum_identity(value) -> bytes | None:
 
 
 def _apply_operation(
-    document: dict,
+    document,
     operation: dict,
     removed: set[tuple[tuple[str | int, ...], int]],
     reordered: set[tuple[str | int, ...]],
 ) -> None:
     if not isinstance(operation, dict):
         raise RepairPlanningError("invalid_plan", "The repair preview is invalid.")
+    if operation.get("operation") == "stable_sort_lyric_cues":
+        _apply_lyric_cue_sort_operation(document, operation, reordered)
+        return
     if operation.get("operation") == "stable_sort_bend_points":
         _apply_bend_point_sort_operation(document, operation, reordered)
         return
@@ -2421,6 +2545,64 @@ def _apply_bend_point_sort_operation(
     reordered.add(path)
 
 
+def _apply_lyric_cue_sort_operation(
+    document,
+    operation: dict,
+    reordered: set[tuple[str | int, ...]],
+) -> None:
+    if operation.get("array_path") != [] or () in reordered:
+        raise RepairPlanningError("invalid_plan", "The repair preview is invalid.")
+    if (
+        not isinstance(document, list)
+        or operation.get("expected_length") != len(document)
+        or len(document) < 2
+    ):
+        raise RepairPlanningError(
+            "source_changed",
+            "The lyrics changed after this preview. Review the safe fix again before applying it.",
+        )
+    if not all(
+        isinstance(cue, dict)
+        and _finite_number(cue.get("t"))
+        and _finite_number(cue.get("d"))
+        and isinstance(cue.get("w"), str)
+        for cue in document
+    ):
+        raise RepairPlanningError(
+            "source_changed",
+            "The lyrics changed after this preview. Review the safe fix again before applying it.",
+        )
+    original_digest = hashlib.sha256(_canonical_json(document)).hexdigest()
+    if operation.get("original_sha256") != original_digest:
+        raise RepairPlanningError(
+            "source_changed",
+            "The lyrics changed after this preview. Review the safe fix again before applying it.",
+        )
+    sorted_indices = list(sorted(
+        range(len(document)), key=lambda index: document[index]["t"]
+    ))
+    declared_indices = operation.get("sorted_indices")
+    moved_count = sum(
+        index != original_index
+        for index, original_index in enumerate(sorted_indices)
+    )
+    if (
+        not moved_count
+        or not isinstance(declared_indices, list)
+        or any(not _integer(index) for index in declared_indices)
+        or declared_indices != sorted_indices
+        or not _integer(operation.get("moved_count"))
+        or operation["moved_count"] != moved_count
+    ):
+        raise RepairPlanningError("invalid_plan", "The repair preview is invalid.")
+    sorted_cues = [document[index] for index in sorted_indices]
+    sorted_digest = hashlib.sha256(_canonical_json(sorted_cues)).hexdigest()
+    if operation.get("sorted_sha256") != sorted_digest:
+        raise RepairPlanningError("invalid_plan", "The repair preview is invalid.")
+    document[:] = sorted_cues
+    reordered.add(())
+
+
 def _apply_note_chord_delete_operation(
     document: dict,
     operation: dict,
@@ -2520,15 +2702,18 @@ def _apply_note_chord_delete_operation(
 
 
 def _musical_position_count(
-    document: dict,
+    document,
     operations: list[
         DeleteArrayItems | DeleteNotesMatchingChords | StableSortBendPoints
+        | StableSortLyricCues
     ],
     rule_code: str,
 ) -> int:
     positions: set[bytes] = set()
     for operation in operations:
-        if isinstance(operation, StableSortBendPoints):
+        if isinstance(operation, StableSortLyricCues):
+            positions.add(_canonical_json({"path": [], "timeline": "lyrics"}))
+        elif isinstance(operation, StableSortBendPoints):
             positions.add(_canonical_json({
                 "path": list(operation.array_path[:-1]),
                 "t": operation.note_time,
@@ -2576,7 +2761,7 @@ def _value_at_path(document, path: tuple[str | int, ...]):
     return value
 
 
-def _render_json(document: dict, original: bytes) -> bytes:
+def _render_json(document, original: bytes) -> bytes:
     try:
         original_text = original.decode("utf-8")
         multiline = "\n" in original_text or "\r" in original_text

@@ -475,7 +475,7 @@ class BatchRepairManager:
                     ):
                         outcome["outcome"] = "restored"
                         outcome["message"] = (
-                            "The original chart data saved before this batch repair was restored."
+                            "The original song data saved before this batch repair was restored."
                         )
                         outcome["file_state"] = "restored"
                         if cache_updated is not None:
@@ -623,7 +623,7 @@ class BatchRepairManager:
                             "code": first.get("code") or "blocked",
                             "blocker_count": len(plan["blockers"]),
                             "message": first.get("message") or (
-                                "A referenced chart file cannot be changed safely."
+                                "A referenced song-data file cannot be changed safely."
                             ),
                         })
                     else:
@@ -1014,7 +1014,7 @@ class BatchRepairManager:
                 "blocked": blocked,
                 "file_handling": (
                     "Each eligible Feedpak is checked and restored separately from its retained backup. "
-                    "Only chart files saved by its repair are restored; unrelated package files and the backup are preserved."
+                    "Only song-data files saved by its repair are restored; unrelated package files and the backup are preserved."
                 ),
             }
             with self._lock:
@@ -1104,7 +1104,7 @@ class BatchRepairManager:
                         "title": result.get("title") or item["title"],
                         "artist": result.get("artist") or item["artist"],
                         "outcome": "restored",
-                        "message": "Original chart data restored and validated.",
+                        "message": "Original song data restored and validated.",
                         "backup_id": item["backup_id"],
                         "change_kind": result.get(
                             "change_kind", item.get("change_kind", "combined")

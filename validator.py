@@ -25,7 +25,7 @@ from jsonschema import Draft202012Validator
 
 
 SPEC_REVISION = "52548b742f64c2a35052a141976ea1b7889f4b1a"
-VALIDATOR_VERSION = f"rules-13:feedpak-{SPEC_REVISION}"
+VALIDATOR_VERSION = f"rules-14:feedpak-{SPEC_REVISION}"
 SUPPORTED_MAJOR = 1
 SCHEMA_DIR = Path(__file__).resolve().parent / "schemas"
 MAX_TEXT_BYTES = 64 * 1024 * 1024
@@ -81,6 +81,7 @@ _RULE_TITLES = {
     "chart.duplicate-handshape": "Identical duplicate handshape",
     "chart.note-duplicates-chord": "Standalone note duplicates a chord",
     "chart.bend-points-out-of-order": "Bend points out of order",
+    "chart.phrases-out-of-order": "Phrase windows out of order",
     "chart.conflicting-duplicate-note": "Conflicting notes on one string",
     "chart.string-conflict": "Overlapping notes on one string",
     "chart.coincident-chords": "Chords start at the same time",
@@ -88,6 +89,11 @@ _RULE_TITLES = {
     "review.impossible-chord-fingering": "Impossible chord fingering",
     "lyrics.too-few-line-breaks": "Lyrics may be missing line breaks",
     "lyrics.empty-text": "Lyric entry has no visible text",
+    "lyrics.out-of-order": "Lyric cues out of order",
+    "timeline.duplicate-beat": "Identical duplicate beat marker",
+    "timeline.repeated-beat-time": "Repeated beat time has conflicting data",
+    "timeline.duplicate-section": "Identical duplicate section marker",
+    "timeline.repeated-section-time": "Repeated section time has conflicting data",
     "media.preview-is-full-mix": "Preview duplicates the full song audio",
     "media.preview-full-length": "Preview is almost the full song length",
     "media.preview-too-long": "Preview is unusually long",
@@ -135,6 +141,7 @@ _SAFE_REPAIR_CANDIDATES = {
     "chart.duplicate-handshape",
     "chart.note-duplicates-chord",
     "chart.bend-points-out-of-order",
+    "lyrics.out-of-order",
     "drums.duplicate-hit",
 }
 
@@ -202,6 +209,22 @@ _RULE_EXPERIENCE = {
     "timeline.sections-out-of-order": (
         "Section names can appear in the wrong sequence or at unexpected moments during the song.",
         "Chronological sections make navigation and the displayed song structure match playback.",
+    ),
+    "timeline.duplicate-beat": (
+        "FeedBack can receive the same rhythm-grid instruction more than once, creating a repeated or zero-length beat interval.",
+        "Keeping one identical beat marker produces a clean timing grid without changing its intended position or measure.",
+    ),
+    "timeline.repeated-beat-time": (
+        "A beat time reappears after the grid has already advanced, but its stored measure data disagrees with the earlier marker.",
+        "Choosing the correct grid segment restores an unambiguous beat and measure progression.",
+    ),
+    "timeline.duplicate-section": (
+        "FeedBack can process the same section boundary more than once, making navigation data redundant.",
+        "Keeping one identical marker preserves the section boundary while removing redundant timeline data.",
+    ),
+    "timeline.repeated-section-time": (
+        "A section time reappears after the song structure has advanced, but the marker data disagrees with the earlier entry.",
+        "Choosing the intended marker gives FeedBack one clear section name and position at that moment.",
     ),
     "lyrics.empty-text": (
         "A lyric cue occurs but has nothing visible to show, which can create unexplained gaps in the lyrics.",
@@ -381,6 +404,42 @@ def rule_metadata(code: str, severity: str = "warning", category: str = "validat
         guidance = (
             "Put the existing bend points in chronological order. Preserve every "
             "point and keep equal-time points in their authored order."
+        )
+    elif code == "lyrics.out-of-order":
+        repairability = "safe_candidate"
+        guidance = (
+            "Put the existing lyric cues in chronological order. Preserve every "
+            "cue and keep equal-time cues in their authored order."
+        )
+    elif code == "chart.phrases-out-of-order":
+        repairability = "conditional"
+        guidance = (
+            "Review the phrase windows and any overlap findings together. Do not "
+            "simply sort overlapping phrases because they may repeat playable data."
+        )
+    elif code in {
+        "timeline.beats-out-of-order", "timeline.sections-out-of-order"
+    }:
+        repairability = "conditional"
+        guidance = (
+            "Review the first backward jump together with duplicate or conflicting "
+            "timestamp findings. Reorder only when every marker is otherwise valid."
+        )
+    elif code in {
+        "timeline.duplicate-beat", "timeline.duplicate-section"
+    }:
+        repairability = "conditional"
+        guidance = (
+            "The stored entries are identical, but automatic timeline repair is not "
+            "enabled yet. Review the duplicate before removing the later copy."
+        )
+    elif code in {
+        "timeline.repeated-beat-time", "timeline.repeated-section-time"
+    }:
+        repairability = "manual"
+        guidance = (
+            "The repeated time has different stored data. Choose the intended marker "
+            "in an authoring tool; Library Doctor will not guess."
         )
     elif code in _SAFE_REPAIR_CANDIDATES:
         repairability = "safe_candidate"
@@ -2051,7 +2110,7 @@ class _TabValidator:
             ),
             (
                 "chart.phrases-out-of-order", "warning",
-                lambda count: f"{count} phrase timeline(s) are not chronological; sort the phrase windows to keep the authoring data unambiguous.",
+                lambda count: f"{count} phrase timeline(s) move backward in time; review overlaps and repeated windows before changing their order.",
             ),
             (
                 "chart.mastery-events-out-of-order", "error",
@@ -3438,7 +3497,7 @@ def _validate_song_timeline_semantics(
             "error",
             "timeline.beats-out-of-order",
             "timeline.beat-after-duration",
-            "Beat markers are not chronological; FeedBack can calculate the wrong tempo or measure.",
+            "Beat markers move backward in time. Repeated or conflicting timestamps may be the cause; review the grid before reordering it.",
             "beat marker(s) occur significantly after the manifest duration.",
         ),
         (
@@ -3446,7 +3505,7 @@ def _validate_song_timeline_semantics(
             "error",
             "timeline.sections-out-of-order",
             "timeline.section-after-duration",
-            "Section markers are not chronological; FeedBack can show the wrong current or upcoming section.",
+            "Section markers move backward in time. Repeated or conflicting timestamps may be the cause; review the structure before reordering it.",
             "section marker(s) occur significantly after the manifest duration.",
         ),
         (
@@ -3474,12 +3533,32 @@ def _validate_song_timeline_semantics(
         previous: float | None = None
         first_inversion: tuple[int, float] | None = None
         after_duration: list[tuple[int, float]] = []
+        exact_entries: dict[str, int] = {}
+        entries_by_time: dict[int, dict[str, int]] = {}
+        previous_tick: int | None = None
+        exact_duplicates: list[tuple[int, int, float]] = []
+        repeated_time_conflicts: list[tuple[int, int, float]] = []
         for index, raw in enumerate(items):
             if not isinstance(raw, dict):
                 continue
             event_time = _number(raw.get("time"))
             if event_time is None:
                 continue
+            tick = _time_key(event_time)
+            identity = _exact_json_identity(raw)
+            first_exact = exact_entries.get(identity) if identity is not None else None
+            earlier_at_time = entries_by_time.get(tick)
+            if field in {"beats", "sections"} and identity is not None:
+                if first_exact is not None:
+                    exact_duplicates.append((index, first_exact, event_time))
+                elif earlier_at_time and previous_tick != tick:
+                    first_conflict = next(iter(earlier_at_time.values()))
+                    repeated_time_conflicts.append(
+                        (index, first_conflict, event_time)
+                    )
+            if identity is not None:
+                exact_entries.setdefault(identity, index)
+                entries_by_time.setdefault(tick, {}).setdefault(identity, index)
             if (
                 first_inversion is None
                 and previous is not None
@@ -3487,6 +3566,7 @@ def _validate_song_timeline_semantics(
             ):
                 first_inversion = (index, event_time)
             previous = event_time
+            previous_tick = tick
             if (
                 duration is not None
                 and duration > 0
@@ -3503,6 +3583,43 @@ def _validate_song_timeline_semantics(
                 location=f"{relpath}:{field}[{index}]",
                 arrangement_id=arrangement_id,
                 time=event_time,
+            )
+        if exact_duplicates:
+            index, original_index, event_time = exact_duplicates[0]
+            label = "beat" if field == "beats" else "section"
+            marker_label = "marker" if len(exact_duplicates) == 1 else "markers"
+            duplicate_verb = "duplicates" if len(exact_duplicates) == 1 else "duplicate"
+            findings.add(
+                "warning",
+                f"timeline.duplicate-{label}",
+                (
+                    f"{len(exact_duplicates)} {label} {marker_label} exactly {duplicate_verb} "
+                    f"an earlier entry; first duplicate repeats {field}[{original_index}]."
+                ),
+                location=f"{relpath}:{field}[{index}]",
+                arrangement_id=arrangement_id,
+                time=event_time,
+                affected_count=len(exact_duplicates),
+            )
+        if repeated_time_conflicts:
+            index, original_index, event_time = repeated_time_conflicts[0]
+            label = "beat" if field == "beats" else "section"
+            marker_label = (
+                "marker" if len(repeated_time_conflicts) == 1 else "markers"
+            )
+            repeat_verb = "repeats" if len(repeated_time_conflicts) == 1 else "repeat"
+            findings.add(
+                "error",
+                f"timeline.repeated-{label}-time",
+                (
+                    f"{len(repeated_time_conflicts)} {label} {marker_label} {repeat_verb} an "
+                    f"earlier timestamp with different data after the timeline has "
+                    f"advanced; first conflicts with {field}[{original_index}]."
+                ),
+                location=f"{relpath}:{field}[{index}]",
+                arrangement_id=arrangement_id,
+                time=event_time,
+                affected_count=len(repeated_time_conflicts),
             )
         if after_duration:
             index, event_time = after_duration[0]
@@ -3617,12 +3734,25 @@ def _validate_lyrics_semantics(
             time=start,
             affected_count=len(invalid_timing),
         )
-    if any(current[1] < previous[1] for previous, current in zip(valid, valid[1:])):
+    inversions = [
+        current
+        for previous, current in zip(valid, valid[1:])
+        if current[1] < previous[1]
+    ]
+    if inversions:
+        index, start, _length = inversions[0]
+        transition_label = "transition" if len(inversions) == 1 else "transitions"
+        move_verb = "moves" if len(inversions) == 1 else "move"
         findings.add(
             "warning",
             "lyrics.out-of-order",
-            "Lyric syllables are not ordered by start time.",
-            location=relpath,
+            (
+                f"{len(inversions)} lyric cue {transition_label} {move_verb} backward in "
+                f"time; first out-of-order cue starts at {start:.4f}s."
+            ),
+            location=f"{relpath}:[{index}]",
+            time=start,
+            affected_count=len(inversions),
         )
     if after_duration:
         index, start = after_duration[0]
