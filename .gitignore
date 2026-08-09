@@ -1,7 +1,10 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.tmp-pytest-*/
+.test-temp-*/
 .coverage
+.tmp-coverage-*.xml
 htmlcov/
 .venv/
 library_health.db*
