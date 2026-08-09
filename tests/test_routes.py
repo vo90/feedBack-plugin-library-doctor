@@ -539,6 +539,10 @@ def test_fix_all_safe_issues_is_one_validated_reversible_package_transaction(tmp
     manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
     manifest["drum_tab"] = "drums.json"
     manifest["lyrics"] = "lyrics.json"
+    manifest["arrangements"].append({
+        "id": "rhythm",
+        "file": "arrangements/rhythm.json",
+    })
     manifest_path.write_text(
         yaml.safe_dump(manifest, sort_keys=False), encoding="utf-8"
     )
@@ -552,11 +556,14 @@ def test_fix_all_safe_issues_is_one_validated_reversible_package_transaction(tmp
     note = {"t": 2.0, **chord_note}
     anchor = {"time": 1.0, "fret": 3, "width": 4}
     handshape = {"start_time": 1.0, "end_time": 3.0, "chord_id": 0}
+    beat = {"time": 1.0, "measure": 0}
     arrangement = {
         "notes": [note, dict(note)],
         "chords": [chord, json.loads(json.dumps(chord))],
         "anchors": [anchor, dict(anchor)],
         "handshapes": [handshape, dict(handshape)],
+        "beats": [beat, dict(beat)],
+        "sections": [],
         "templates": [{
             "frets": [-1, 5, 7, -1, -1, -1],
             "fingers": [-1, 1, 3, -1, -1, -1],
@@ -565,6 +572,15 @@ def test_fix_all_safe_issues_is_one_validated_reversible_package_transaction(tmp
     arrangement_path = package / "arrangements" / "lead.json"
     original_arrangement = json.dumps(arrangement).encode("utf-8")
     arrangement_path.write_bytes(original_arrangement)
+    inactive_beat = {"time": 9.0, "measure": 9}
+    rhythm_path = package / "arrangements" / "rhythm.json"
+    rhythm_original = json.dumps({
+        "notes": [],
+        "chords": [],
+        "beats": [inactive_beat, dict(inactive_beat)],
+        "sections": [],
+    }).encode("utf-8")
+    rhythm_path.write_bytes(rhythm_original)
     hit = {"t": 4.0, "p": "snare", "v": 100}
     original_drums = json.dumps({
         "version": 1, "hits": [hit, dict(hit)]
@@ -598,10 +614,11 @@ def test_fix_all_safe_issues_is_one_validated_reversible_package_transaction(tmp
         "chart.duplicate-anchor",
         "chart.duplicate-handshape",
         "lyrics.out-of-order",
+        "timeline.duplicate-beat",
         "drums.duplicate-hit",
     ]
-    assert plan["rule_count"] == 8
-    assert plan["removed_count"] == 8
+    assert plan["rule_count"] == 9
+    assert plan["removed_count"] == 9
     assert plan["member_count"] == 3
 
     applied = client.post(
@@ -626,6 +643,8 @@ def test_fix_all_safe_issues_is_one_validated_reversible_package_transaction(tmp
     ]
     assert len(repaired["anchors"]) == 1
     assert len(repaired["handshapes"]) == 1
+    assert repaired["beats"] == [beat]
+    assert rhythm_path.read_bytes() == rhythm_original
     assert len(json.loads(drums_path.read_text(encoding="utf-8"))["hits"]) == 1
     assert [cue["t"] for cue in json.loads(
         lyrics_path.read_text(encoding="utf-8")
@@ -639,7 +658,7 @@ def test_fix_all_safe_issues_is_one_validated_reversible_package_transaction(tmp
         assert metadata["rule_code"] == "package.all-safe"
         assert metadata["rule_codes"] == plan["rule_codes"]
         assert len(metadata["members"]) == 3
-        assert len(metadata["summary"]["repair_summaries"]) == 8
+        assert len(metadata["summary"]["repair_summaries"]) == 9
 
     refreshed = client.get("/api/plugins/library_doctor/results").json()
     refreshed_codes = {
@@ -657,9 +676,119 @@ def test_fix_all_safe_issues_is_one_validated_reversible_package_transaction(tmp
     assert restored.status_code == 200
     assert restored.json()["rule_codes"] == plan["rule_codes"]
     assert arrangement_path.read_bytes() == original_arrangement
+    assert rhythm_path.read_bytes() == rhythm_original
     assert drums_path.read_bytes() == original_drums
     assert lyrics_path.read_bytes() == original_lyrics
     assert backups[0].exists()
+    client.close()
+
+
+def test_duplicate_beat_repair_uses_active_sidecar_and_leaves_conflicts_for_review(
+    tmp_path,
+):
+    client, library = _client(tmp_path)
+    package = _valid_package(library)
+    manifest_path = package / "manifest.yaml"
+    manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    manifest["song_timeline"] = "song_timeline.json"
+    manifest_path.write_text(
+        yaml.safe_dump(manifest, sort_keys=False), encoding="utf-8"
+    )
+
+    arrangement_path = package / "arrangements" / "lead.json"
+    dormant_beat = {"time": 9.0, "measure": 9}
+    arrangement_path.write_text(
+        json.dumps({
+            "notes": [],
+            "chords": [],
+            "beats": [dormant_beat, dict(dormant_beat)],
+            "sections": [],
+        }),
+        encoding="utf-8",
+    )
+    dormant_original = arrangement_path.read_bytes()
+
+    first = {"time": 0.0, "measure": 0}
+    repeated_time = {"time": 1.0, "measure": 0}
+    conflict = {"time": 1.0, "measure": 1}
+    timeline = {
+        "version": 1,
+        "beats": [
+            first,
+            repeated_time,
+            dict(first),
+            {"time": 2.0, "measure": 0},
+            conflict,
+        ],
+        "sections": [],
+    }
+    timeline_path = package / "song_timeline.json"
+    timeline_original = json.dumps(timeline).encode("utf-8")
+    timeline_path.write_bytes(timeline_original)
+
+    client.post("/api/plugins/library_doctor/scan")
+    _wait_for_scan(client)
+    findings = {
+        item["code"]: item
+        for item in client.get(
+            "/api/plugins/library_doctor/results"
+        ).json()["items"][0]["findings"]
+    }
+    assert findings["timeline.duplicate-beat"]["rule"]["repairability"] == (
+        "safe_candidate"
+    )
+    assert "timeline.repeated-beat-time" in findings
+
+    preview = client.post(
+        "/api/plugins/library_doctor/repair/preview",
+        json={
+            "package": "Artist/Song.feedpak",
+            "rule_code": "timeline.duplicate-beat",
+        },
+    )
+    plan = preview.json()
+
+    assert preview.status_code == 200
+    assert plan["available"] is True
+    assert plan["removed_count"] == 1
+    assert plan["member_count"] == 1
+    assert "Conflicting beat markers" in plan["player_result"]
+
+    applied = client.post(
+        "/api/plugins/library_doctor/repair/apply",
+        json={
+            "package": "Artist/Song.feedpak",
+            "rule_code": "timeline.duplicate-beat",
+            "plan_id": plan["plan_id"],
+        },
+    )
+
+    assert applied.status_code == 200
+    repaired = json.loads(timeline_path.read_text(encoding="utf-8"))
+    assert repaired["beats"] == [
+        first,
+        repeated_time,
+        {"time": 2.0, "measure": 0},
+        conflict,
+    ]
+    assert arrangement_path.read_bytes() == dormant_original
+    refreshed_codes = {
+        finding["code"]
+        for finding in applied.json()["report"]["findings"]
+    }
+    assert "timeline.duplicate-beat" not in refreshed_codes
+    assert "timeline.repeated-beat-time" in refreshed_codes
+
+    restored = client.post(
+        "/api/plugins/library_doctor/repair/restore",
+        json={
+            "package": "Artist/Song.feedpak",
+            "backup_id": applied.json()["backup_id"],
+        },
+    )
+    assert restored.status_code == 200
+    assert timeline_path.read_bytes() == timeline_original
+    assert arrangement_path.read_bytes() == dormant_original
     client.close()
 
 
@@ -750,10 +879,13 @@ def test_batch_preview_and_apply_repair_each_eligible_feedpak_separately(tmp_pat
     first_path = first / "arrangements" / "lead.json"
     first_note = {"t": 2.0, "s": 1, "f": 5}
     first_anchor = {"time": 1.0, "fret": 3, "width": 4}
+    first_beat = {"time": 0.0, "measure": 0}
     first_path.write_text(json.dumps({
         "notes": [first_note, dict(first_note)],
         "chords": [],
         "anchors": [first_anchor, dict(first_anchor)],
+        "beats": [first_beat, dict(first_beat)],
+        "sections": [],
     }), encoding="utf-8")
 
     second = _valid_package(library, "Second.feedpak")
@@ -796,7 +928,7 @@ def test_batch_preview_and_apply_repair_each_eligible_feedpak_separately(tmp_pat
     assert preview["eligible_count"] == 2
     assert preview["blocked_count"] == 1
     assert preview["no_longer_needed_count"] == 0
-    assert preview["removed_count"] == 3
+    assert preview["removed_count"] == 4
     assert {item["package"] for item in preview["packages"]} == {
         "First.feedpak", "Second.feedpak",
     }
@@ -816,9 +948,11 @@ def test_batch_preview_and_apply_repair_each_eligible_feedpak_separately(tmp_pat
     assert result["skipped_count"] == 0
     assert result["failed_count"] == 0
     assert result["backup_count"] == 2
-    assert result["removed_count"] == 3
-    assert len(json.loads(first_path.read_text(encoding="utf-8"))["notes"]) == 1
-    assert len(json.loads(first_path.read_text(encoding="utf-8"))["anchors"]) == 1
+    assert result["removed_count"] == 4
+    repaired_first = json.loads(first_path.read_text(encoding="utf-8"))
+    assert len(repaired_first["notes"]) == 1
+    assert len(repaired_first["anchors"]) == 1
+    assert repaired_first["beats"] == [first_beat]
     assert len(json.loads(second_path.read_text(encoding="utf-8"))["notes"]) == 1
     assert len(json.loads(blocked_path.read_text(encoding="utf-8"))["notes"]) == 2
     backups = list(
@@ -830,6 +964,10 @@ def test_batch_preview_and_apply_repair_each_eligible_feedpak_separately(tmp_pat
     by_package = {item["package"]: item for item in refreshed["items"]}
     assert not any(
         finding["code"].startswith("chart.duplicate")
+        for finding in by_package["First.feedpak"]["findings"]
+    )
+    assert not any(
+        finding["code"] == "timeline.duplicate-beat"
         for finding in by_package["First.feedpak"]["findings"]
     )
     assert not any(
@@ -869,6 +1007,7 @@ def test_batch_preview_and_apply_repair_each_eligible_feedpak_separately(tmp_pat
     restored_first = json.loads(first_path.read_text(encoding="utf-8"))
     assert len(restored_first["notes"]) == 2
     assert len(restored_first["anchors"]) == 2
+    assert restored_first["beats"] == [first_beat, first_beat]
 
     undo_started = client.post(
         "/api/plugins/library_doctor/repair/batch/undo/preview"

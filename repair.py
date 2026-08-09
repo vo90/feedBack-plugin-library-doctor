@@ -26,7 +26,7 @@ from typing import Iterator
 import yaml
 
 
-REPAIR_CATALOG_VERSION = "repairs-6"
+REPAIR_CATALOG_VERSION = "repairs-7"
 REPAIR_PLAN_SCHEMA = "library_doctor.repair_plan.v1"
 MAX_REPAIR_TEXT_BYTES = 64 * 1024 * 1024
 MAX_REPAIR_STRUCTURE_ITEMS = 2_000_000
@@ -413,6 +413,28 @@ _REPAIR_DEFINITIONS = (
         change_kind="reorder",
     ),
     RepairDefinition(
+        rule_code="timeline.duplicate-beat",
+        action_kind="remove_exact_duplicate_beat_markers",
+        source_kind="timeline",
+        item_name="beat marker",
+        safety="safe_automatic",
+        title="Remove exact duplicate beat markers",
+        description=(
+            "Keep the first beat marker and remove only later copies with "
+            "identical time, measure, and every other stored property from the "
+            "active song timeline."
+        ),
+        player_result=(
+            "The same beat and measure grid remains, with one stored instruction "
+            "at each repaired position. Conflicting beat markers, if present, "
+            "remain visible for manual review."
+        ),
+        user_value=(
+            "FeedBack receives a clean rhythm grid without changing any authored "
+            "beat time or measure and without guessing between conflicting data."
+        ),
+    ),
+    RepairDefinition(
         rule_code="drums.duplicate-hit",
         action_kind="remove_exact_duplicate_drum_hits",
         source_kind="drum_tab",
@@ -441,6 +463,7 @@ _REPAIR_BY_RULE = {
 _DEFAULT_REPAIR_BY_SOURCE = {
     "arrangement": _REPAIR_BY_RULE["chart.duplicate-note"],
     "lyrics": _REPAIR_BY_RULE["lyrics.out-of-order"],
+    "timeline": _REPAIR_BY_RULE["timeline.duplicate-beat"],
     "drum_tab": _REPAIR_BY_RULE["drums.duplicate-hit"],
 }
 
@@ -456,6 +479,7 @@ _ALL_SAFE_RULE_ORDER = (
     "chart.duplicate-anchor",
     "chart.duplicate-handshape",
     "lyrics.out-of-order",
+    "timeline.duplicate-beat",
     "drums.duplicate-hit",
 )
 
@@ -469,11 +493,13 @@ _ALL_SAFE_DEFINITION = {
     ),
     "player_result": (
         "Eligible redundant instructions are removed and supported ordering "
-        "problems are normalized without changing the intended musical data."
+        "problems are normalized without changing the intended musical data. "
+        "Findings that require judgment, including conflicting entries, remain "
+        "unchanged in the refreshed package report."
     ),
     "user_value": (
         "The song is cleaned in one step without requiring a separate confirmation "
-        "for every safe repair type."
+        "for every safe repair type or guessing how ambiguous data should be authored."
     ),
 }
 
@@ -1125,6 +1151,98 @@ class RepairService:
             member_paths.append(safe_member)
         return member_paths
 
+    def _resolved_repair_member_paths(
+        self,
+        package_path: Path,
+        manifest: dict,
+        source_kind: str,
+    ) -> list[str]:
+        """Resolve the active files for one repair role.
+
+        Timeline selection mirrors FeedBack and the validator: a complete
+        song-wide sidecar overrides legacy arrangement-embedded data.  Without
+        one, only the first usable legacy beat grid is active.  This prevents a
+        repair from changing dormant copies that the game does not consume.
+        """
+        if source_kind != "timeline":
+            return self._repair_member_paths(manifest, source_kind)
+
+        declared = manifest.get("song_timeline")
+        if isinstance(declared, str) and declared:
+            try:
+                member_path = _validate_member_path(declared)
+            except RepairPlanningError:
+                member_path = None
+            if member_path is not None:
+                # A commented sidecar may be active, but Library Doctor cannot
+                # inspect or rewrite it losslessly. Return it so preview reports
+                # the normal JSONC blocker instead of editing legacy data.
+                if member_path.lower().endswith(".jsonc"):
+                    return [member_path]
+                try:
+                    raw = self._read_member(
+                        package_path, member_path, MAX_REPAIR_TEXT_BYTES
+                    )
+                except RepairPlanningError:
+                    # An unavailable or oversized sidecar cannot override the
+                    # legacy grid in FeedBack, so continue to its fallback.
+                    raw = None
+                if raw is not None:
+                    try:
+                        data = _parse_json(raw)
+                        _inspect_structure(data)
+                    except RepairPlanningError:
+                        # The validator may be more permissive about a value
+                        # (for example duplicate keys or non-finite numbers).
+                        # Refuse this declared sidecar rather than risk editing
+                        # a legacy grid that FeedBack could consider inactive.
+                        return [member_path]
+                    if (
+                        isinstance(data, dict)
+                        and isinstance(data.get("beats"), list)
+                        and isinstance(data.get("sections"), list)
+                    ):
+                        return [member_path]
+
+        # FeedBack's legacy fallback takes the first non-empty beat array from
+        # arrangement order. Once found, later embedded grids are inactive.
+        seen = set()
+        for entry in manifest["arrangements"]:
+            member = entry.get("file") if isinstance(entry, dict) else None
+            if not isinstance(member, str) or not member:
+                continue
+            try:
+                member_path = _validate_member_path(member)
+            except RepairPlanningError:
+                continue
+            if member_path in seen:
+                continue
+            seen.add(member_path)
+            if member_path.lower().endswith(".jsonc"):
+                # We cannot safely determine whether this is the active legacy
+                # grid without a comment-preserving parser/writer.
+                return [member_path]
+            try:
+                raw = self._read_member(
+                    package_path, member_path, MAX_REPAIR_TEXT_BYTES
+                )
+            except RepairPlanningError:
+                continue
+            try:
+                data = _parse_json(raw)
+                _inspect_structure(data)
+            except RepairPlanningError:
+                # Do not skip past a readable arrangement whose permissively
+                # parsed contents could be FeedBack's active legacy grid.
+                return [member_path]
+            if (
+                isinstance(data, dict)
+                and isinstance(data.get("beats"), list)
+                and data["beats"]
+            ):
+                return [member_path]
+        return []
+
     def _plan_package(self, package_path: Path, package_name: str, rule_code: str) -> dict:
         definition = repair_for_rule(rule_code)
         if definition is None:
@@ -1132,7 +1250,9 @@ class RepairService:
                 "unsupported_repair", "This finding does not have a safe automatic repair."
             )
         manifest = self._read_repair_manifest(package_path)
-        member_paths = self._repair_member_paths(manifest, definition["source_kind"])
+        member_paths = self._resolved_repair_member_paths(
+            package_path, manifest, definition["source_kind"]
+        )
 
         planned = []
         blockers = []
@@ -1212,8 +1332,10 @@ class RepairService:
         """Build one ordered plan for every supported safe repair in a package."""
         manifest = self._read_repair_manifest(package_path)
         member_sources: dict[str, set[str]] = {}
-        for source_kind in ("arrangement", "lyrics", "drum_tab"):
-            for member_path in self._repair_member_paths(manifest, source_kind):
+        for source_kind in ("arrangement", "lyrics", "timeline", "drum_tab"):
+            for member_path in self._resolved_repair_member_paths(
+                package_path, manifest, source_kind
+            ):
                 member_sources.setdefault(member_path, set()).add(source_kind)
 
         planned = []
@@ -1229,7 +1351,8 @@ class RepairService:
             for rule_code in _ALL_SAFE_RULE_ORDER
         }
         for member_path, source_kinds in member_sources.items():
-            if len(source_kinds) != 1:
+            compatible_legacy_timeline = source_kinds == {"arrangement", "timeline"}
+            if len(source_kinds) != 1 and not compatible_legacy_timeline:
                 blockers.append({
                     "member_path": member_path,
                     "code": "ambiguous_source",
@@ -1239,7 +1362,12 @@ class RepairService:
                     ),
                 })
                 continue
-            source_kind = next(iter(source_kinds))
+            ordered_source_kinds = [
+                source_kind
+                for source_kind in ("arrangement", "timeline", "lyrics", "drum_tab")
+                if source_kind in source_kinds
+            ]
+            source_kind = ordered_source_kinds[0]
             try:
                 original_raw = self._read_member(
                     package_path, member_path, MAX_REPAIR_TEXT_BYTES
@@ -1248,12 +1376,12 @@ class RepairService:
                 steps = []
                 for rule_code in _ALL_SAFE_RULE_ORDER:
                     definition = _REPAIR_BY_RULE[rule_code]
-                    if definition.source_kind != source_kind:
+                    if definition.source_kind not in source_kinds:
                         continue
                     plan = plan_json_member(
                         candidate_raw,
                         member_path=member_path,
-                        source_kind=source_kind,
+                        source_kind=definition.source_kind,
                         validator_version=self._validator_version,
                         rule_code=rule_code,
                     )
@@ -1281,6 +1409,7 @@ class RepairService:
                 planned.append({
                     "member_path": member_path,
                     "source_kind": source_kind,
+                    "source_kinds": ordered_source_kinds,
                     "raw": original_raw,
                     "replacement": candidate_raw,
                     "steps": steps,
@@ -1316,6 +1445,7 @@ class RepairService:
                 {
                     "member_path": item["member_path"],
                     "source_kind": item["source_kind"],
+                    "source_kinds": item["source_kinds"],
                     "steps": [
                         {
                             "rule_code": step["rule_code"],
@@ -1897,6 +2027,8 @@ def plan_json_member(
         operations = _plan_bend_point_order(document)
     elif definition.rule_code == "lyrics.out-of-order":
         operations = _plan_lyric_cue_order(document)
+    elif definition.rule_code == "timeline.duplicate-beat":
+        operations = _plan_exact_beat_duplicates(document)
     elif definition.rule_code == "drums.duplicate-hit":
         operations = _plan_exact_drum_duplicates(document)
     else:  # The explicit catalog dispatch above should make this unreachable.
@@ -2322,6 +2454,14 @@ def _plan_exact_drum_duplicates(document: dict) -> list[DeleteArrayItems]:
     return [operation] if operation is not None else []
 
 
+def _plan_exact_beat_duplicates(document: dict) -> list[DeleteArrayItems]:
+    beats = document.get("beats")
+    if not isinstance(beats, list):
+        return []
+    operation = _duplicate_operation(("beats",), beats, _valid_beat_identity)
+    return [operation] if operation is not None else []
+
+
 def _duplicate_operation(
     path: tuple[str | int, ...],
     values: list,
@@ -2410,6 +2550,16 @@ def _valid_drum_identity(value) -> bytes | None:
         return None
     piece = value.get("p")
     if not isinstance(piece, str) or not piece:
+        return None
+    return _canonical_json(value)
+
+
+def _valid_beat_identity(value) -> bytes | None:
+    if (
+        not isinstance(value, dict)
+        or not _finite_number(value.get("time"))
+        or not _integer(value.get("measure"))
+    ):
         return None
     return _canonical_json(value)
 
@@ -2737,6 +2887,11 @@ def _musical_position_count(
                     }
                 elif rule_code == "drums.duplicate-hit":
                     position = {"t": value["t"], "p": value["p"]}
+                elif rule_code == "timeline.duplicate-beat":
+                    position = {
+                        "time": value["time"],
+                        "measure": value["measure"],
+                    }
                 else:
                     position = {"t": value["t"], "s": value["s"]}
                 positions.add(_canonical_json(position))

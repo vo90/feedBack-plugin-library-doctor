@@ -99,10 +99,10 @@ absent.
 ## Safe repairs
 
 The repair allowlist removes exact duplicate standalone notes, members inside
-one chord, complete chord events, anchors, handshapes, and drum hits. It can also
-remove a standalone note that exactly repeats one explicit member of a chord and
-put out-of-order bend points and lyric cues into chronological order without
-removing any bend point or lyric cue.
+one chord, complete chord events, anchors, handshapes, beat markers, and drum
+hits. It can also remove a standalone note that exactly repeats one explicit
+member of a chord and put out-of-order bend points and lyric cues into
+chronological order without removing any bend point or lyric cue.
 Ordinary duplicates keep the first entry and delete only later copies whose
 complete JSON properties and values match within the same event array or chord.
 For a note that repeats a chord member, the complete chord is preserved and the
@@ -119,6 +119,12 @@ every word, duration, unknown future property, and the authored order between
 equal-time cues is preserved. A timeline that also contains an invalid cue is
 blocked rather than guessed at. The primary lyrics and additional lyric tracks
 declared by the manifest use the same safeguards.
+For beats, the complete song-wide timeline sidecar is repaired when it is the
+active FeedBack source. Otherwise, Library Doctor follows FeedBack's legacy
+fallback and repairs only the first active arrangement-embedded beat grid. It
+keeps the first marker and removes only later copies with the same time,
+measure, and every stored property. Markers at the same time with different
+data remain unchanged and visible for manual review.
 
 A preview is bound to the exact current source bytes and validator version. If
 the package changes before confirmation, Library Doctor refuses the stale plan.

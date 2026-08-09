@@ -25,7 +25,7 @@ from jsonschema import Draft202012Validator
 
 
 SPEC_REVISION = "52548b742f64c2a35052a141976ea1b7889f4b1a"
-VALIDATOR_VERSION = f"rules-14:feedpak-{SPEC_REVISION}"
+VALIDATOR_VERSION = f"rules-15:feedpak-{SPEC_REVISION}"
 SUPPORTED_MAJOR = 1
 SCHEMA_DIR = Path(__file__).resolve().parent / "schemas"
 MAX_TEXT_BYTES = 64 * 1024 * 1024
@@ -142,6 +142,7 @@ _SAFE_REPAIR_CANDIDATES = {
     "chart.note-duplicates-chord",
     "chart.bend-points-out-of-order",
     "lyrics.out-of-order",
+    "timeline.duplicate-beat",
     "drums.duplicate-hit",
 }
 
@@ -425,13 +426,17 @@ def rule_metadata(code: str, severity: str = "warning", category: str = "validat
             "Review the first backward jump together with duplicate or conflicting "
             "timestamp findings. Reorder only when every marker is otherwise valid."
         )
-    elif code in {
-        "timeline.duplicate-beat", "timeline.duplicate-section"
-    }:
+    elif code == "timeline.duplicate-beat":
+        repairability = "safe_candidate"
+        guidance = (
+            "The stored beat markers are identical. Keep the first marker and "
+            "remove only later exact copies; leave conflicting beat data for review."
+        )
+    elif code == "timeline.duplicate-section":
         repairability = "conditional"
         guidance = (
-            "The stored entries are identical, but automatic timeline repair is not "
-            "enabled yet. Review the duplicate before removing the later copy."
+            "The stored section markers are identical, but automatic section repair "
+            "is not enabled yet. Review the duplicate before removing the later copy."
         )
     elif code in {
         "timeline.repeated-beat-time", "timeline.repeated-section-time"

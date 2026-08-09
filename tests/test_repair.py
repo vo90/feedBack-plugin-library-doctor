@@ -41,6 +41,8 @@ def _plan(
             if source_kind == "arrangement"
             else "lyrics.json"
             if source_kind == "lyrics"
+            else "song_timeline.json"
+            if source_kind == "timeline"
             else "drums.json"
         ),
         source_kind=source_kind,
@@ -61,6 +63,7 @@ def test_catalog_is_an_explicit_allowlist(repair):
         "chart.note-duplicates-chord",
         "chart.bend-points-out-of-order",
         "lyrics.out-of-order",
+        "timeline.duplicate-beat",
         "drums.duplicate-hit",
     ]
     assert {item["safety"] for item in catalog} == {"safe_automatic"}
@@ -87,6 +90,9 @@ def test_catalog_is_an_explicit_allowlist(repair):
     assert lyric_repair["source_kind"] == "lyrics"
     assert lyric_repair["item_name"] == "lyric timeline"
     assert lyric_repair["change_kind"] == "reorder"
+    beat_repair = repair.repair_for_rule("timeline.duplicate-beat")
+    assert beat_repair["source_kind"] == "timeline"
+    assert beat_repair["item_name"] == "beat marker"
     assert repair.repair_for_rule("drums.duplicate-hit")["item_name"] == "drum hit"
     assert repair.repair_for_rule("chart.string-conflict") is None
 
@@ -584,6 +590,34 @@ def test_plans_only_exact_drum_hit_duplicates(repair):
     assert action["operations"][0]["remove_indices"] == [1]
 
 
+def test_plans_only_exact_valid_beat_marker_duplicates(repair):
+    first = {"time": 1.0, "measure": 0, "future": {"source": "author"}}
+    exact_copy = {
+        "future": {"source": "author"},
+        "measure": 0,
+        "time": 1.0,
+    }
+    conflicting = {"time": 1.0, "measure": 1, "future": {"source": "author"}}
+    invalid = {"time": 2.0, "future": {"source": "author"}}
+    document = {
+        "version": 1,
+        "beats": [first, exact_copy, conflicting, invalid, dict(invalid)],
+        "sections": [],
+    }
+
+    plan = _plan(repair, document, source_kind="timeline")
+    action = plan["actions"][0]
+
+    assert action["rule_code"] == "timeline.duplicate-beat"
+    assert action["removed_count"] == 1
+    assert action["musical_positions"] == 1
+    assert action["operations"][0]["array_path"] == ["beats"]
+    assert action["operations"][0]["remove_indices"] == [1]
+
+    repaired = json.loads(repair.apply_json_member(_raw(document), plan))
+    assert repaired["beats"] == [first, conflicting, invalid, invalid]
+
+
 def test_plan_is_deterministic_and_bound_to_exact_source_bytes(repair):
     document = {"notes": [{"t": 1, "s": 0, "f": 3}] * 2}
     first = _plan(repair, document)
@@ -741,6 +775,20 @@ def test_invalid_entries_are_not_considered_repairable_duplicates(repair):
     )
     assert drum_plan["actions"] == []
 
+    timeline_plan = _plan(
+        repair,
+        {
+            "beats": [
+                {"time": True, "measure": 0},
+                {"time": True, "measure": 0},
+                {"time": 1.0, "measure": False},
+                {"time": 1.0, "measure": False},
+            ]
+        },
+        source_kind="timeline",
+    )
+    assert timeline_plan["actions"] == []
+
 
 def test_malformed_optional_phrase_containers_are_ignored_safely(repair):
     document = {
@@ -796,6 +844,53 @@ def test_lyric_member_discovery_includes_primary_and_additional_tracks_once(repa
         "lyrics/main.json",
         "lyrics/swedish.json",
     ]
+
+
+def test_ambiguous_declared_timeline_blocks_instead_of_editing_legacy_grid(
+    repair, tmp_path,
+):
+    library = tmp_path / "library"
+    package = library / "Song.feedpak"
+    (package / "arrangements").mkdir(parents=True)
+    (package / "manifest.yaml").write_text(
+        "arrangements:\n"
+        "  - id: lead\n"
+        "    file: arrangements/lead.json\n"
+        "song_timeline: song_timeline.json\n",
+        encoding="utf-8",
+    )
+    legacy = {
+        "beats": [
+            {"time": 1.0, "measure": 0},
+            {"time": 1.0, "measure": 0},
+        ],
+        "sections": [],
+    }
+    legacy_path = package / "arrangements" / "lead.json"
+    legacy_path.write_bytes(_raw(legacy))
+    legacy_original = legacy_path.read_bytes()
+    (package / "song_timeline.json").write_bytes(
+        b'{"version":1,"beats":[],"sections":[],"beats":[]}'
+    )
+    service = repair.RepairService(
+        config_dir=tmp_path / "config",
+        get_dlc_dir=lambda: library,
+        validate_feedpak=lambda *_args, **_kwargs: {},
+        validator_version="rules-test",
+        log=logging.getLogger("library-doctor-timeline-source-tests"),
+    )
+
+    preview = service.preview("Song.feedpak", "timeline.duplicate-beat")
+
+    assert preview["available"] is False
+    assert preview["blockers"] == [{
+        "member_path": "song_timeline.json",
+        "code": "duplicate_json_key",
+        "message": (
+            "The song file repeats a JSON property and cannot be repaired safely."
+        ),
+    }]
+    assert legacy_path.read_bytes() == legacy_original
 
 
 def test_history_reader_preserves_pre_rename_receipts(repair, tmp_path):

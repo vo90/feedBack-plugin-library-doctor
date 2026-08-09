@@ -1180,12 +1180,18 @@ def test_timeline_distinguishes_exact_duplicates_from_conflicting_repeated_times
 
     assert findings["timeline.duplicate-beat"]["affected_count"] == 1
     assert findings["timeline.duplicate-beat"]["location"].endswith("beats[2]")
+    assert findings["timeline.duplicate-beat"]["rule"]["repairability"] == (
+        "safe_candidate"
+    )
     assert findings["timeline.repeated-beat-time"]["affected_count"] == 1
     assert findings["timeline.repeated-beat-time"]["severity"] == "error"
     assert findings["timeline.repeated-section-time"]["affected_count"] == 1
     assert findings["timeline.duplicate-section"]["affected_count"] == 1
     assert findings["timeline.duplicate-section"]["location"].endswith(
         "sections[3]"
+    )
+    assert findings["timeline.duplicate-section"]["rule"]["repairability"] == (
+        "conditional"
     )
     assert "will not guess" in findings[
         "timeline.repeated-beat-time"
