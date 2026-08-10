@@ -55,6 +55,7 @@ def test_catalog_is_an_explicit_allowlist(repair):
     catalog = repair.repair_catalog()
 
     assert [item["rule_code"] for item in catalog] == [
+        "chart.negative-muted-fret",
         "chart.duplicate-note",
         "chart.duplicate-chord-note",
         "chart.duplicate-chord",
@@ -72,6 +73,10 @@ def test_catalog_is_an_explicit_allowlist(repair):
         "drums.duplicate-hit",
     ]
     assert {item["safety"] for item in catalog} == {"safe_automatic"}
+    mute_repair = repair.repair_for_rule("chart.negative-muted-fret")
+    assert mute_repair["source_kind"] == "arrangement"
+    assert mute_repair["item_name"] == "muted note fret"
+    assert mute_repair["change_kind"] == "normalize"
     assert repair.repair_for_rule("chart.duplicate-note")["source_kind"] == "arrangement"
     assert repair.repair_for_rule("chart.duplicate-note")["item_name"] == "note"
     assert (
@@ -117,6 +122,72 @@ def test_catalog_is_an_explicit_allowlist(repair):
     assert section_order_repair["change_kind"] == "reorder"
     assert repair.repair_for_rule("drums.duplicate-hit")["item_name"] == "drum hit"
     assert repair.repair_for_rule("chart.string-conflict") is None
+
+
+def test_normalizes_all_negative_exact_string_mutes_and_nothing_else(repair):
+    root_mute = {
+        "t": 1.0, "s": 0, "f": -1, "sus": 0.25, "mt": True,
+        "future": {"preserved": True},
+    }
+    fhm_only = {"t": 2.0, "s": 1, "f": -2, "fhm": True}
+    palm_only = {"t": 3.0, "s": 2, "f": -3, "pm": True}
+    malformed_mt = {"t": 4.0, "s": 3, "f": -4, "mt": "true"}
+    chord_mute = {"s": 1, "f": -5, "mt": True, "fhm": True}
+    level_mute = {"t": 6.0, "s": 2, "f": -6, "mt": True}
+    document = {
+        "notes": [root_mute, fhm_only, palm_only, malformed_mt],
+        "chords": [{"t": 5.0, "notes": [chord_mute]}],
+        "phrases": [{
+            "levels": [{
+                "notes": [level_mute],
+                "chords": [{"t": 7.0, "notes": [{"s": 3, "f": -7, "mt": True}]}],
+            }],
+        }],
+    }
+
+    plan = _plan(
+        repair, document, rule_code="chart.negative-muted-fret"
+    )
+    action = plan["actions"][0]
+
+    assert action["change_kind"] == "normalize"
+    assert action["change_count"] == 4
+    assert action["removed_count"] == 0
+    assert action["arrays_affected"] == 4
+    assert action["musical_positions"] == 4
+    assert [operation["note_array_path"] for operation in action["operations"]] == [
+        ["notes"],
+        ["phrases", 0, "levels", 0, "notes"],
+        ["chords", 0, "notes"],
+        ["phrases", 0, "levels", 0, "chords", 0, "notes"],
+    ]
+
+    repaired = json.loads(
+        repair.apply_json_member(_raw(document), plan).decode("utf-8")
+    )
+    assert repaired["notes"][0] == {**root_mute, "f": 0}
+    assert repaired["notes"][1:] == [fhm_only, palm_only, malformed_mt]
+    assert repaired["chords"][0]["notes"][0] == {**chord_mute, "f": 0}
+    assert repaired["phrases"][0]["levels"][0]["notes"][0]["f"] == 0
+    assert repaired["phrases"][0]["levels"][0]["chords"][0]["notes"][0]["f"] == 0
+
+
+def test_muted_fret_normalization_plan_rejects_tampered_eligibility(repair):
+    document = {"notes": [{"t": 1.0, "s": 0, "f": -2, "mt": True}]}
+    raw = _raw(document)
+    plan = _plan(
+        repair, document, rule_code="chart.negative-muted-fret"
+    )
+    tampered = copy.deepcopy(plan)
+    change = tampered["actions"][0]["operations"][0]["changes"][0]
+    change["replacement_fret"] = 1
+    unsigned = {key: value for key, value in tampered.items() if key != "plan_id"}
+    tampered["plan_id"] = repair._digest_json(unsigned)
+
+    with pytest.raises(repair.RepairPlanningError) as caught:
+        repair.apply_json_member(raw, tampered)
+
+    assert caught.value.code == "source_changed"
 
 
 def test_plans_only_exact_top_level_note_duplicates(repair):

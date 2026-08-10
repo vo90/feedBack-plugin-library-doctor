@@ -25,7 +25,7 @@ from jsonschema import Draft202012Validator
 
 
 SPEC_REVISION = "52548b742f64c2a35052a141976ea1b7889f4b1a"
-VALIDATOR_VERSION = f"rules-20:feedpak-{SPEC_REVISION}"
+VALIDATOR_VERSION = f"rules-21:feedpak-{SPEC_REVISION}"
 SUPPORTED_MAJOR = 1
 SCHEMA_DIR = Path(__file__).resolve().parent / "schemas"
 MAX_TEXT_BYTES = 64 * 1024 * 1024
@@ -82,6 +82,7 @@ _RULE_TITLES = {
     "chart.zero-length-handshape": "Zero-length handshape",
     "chart.note-duplicates-chord": "Standalone note duplicates a chord",
     "chart.bend-points-out-of-order": "Bend points out of order",
+    "chart.negative-muted-fret": "Negative fret on a string mute",
     "chart.phrases-out-of-order": "Phrase windows out of order",
     "chart.conflicting-duplicate-note": "Conflicting notes on one string",
     "chart.string-conflict": "Overlapping notes on one string",
@@ -135,6 +136,7 @@ _RULE_AREAS = {
 }
 
 _SAFE_REPAIR_CANDIDATES = {
+    "chart.negative-muted-fret",
     "chart.duplicate-note",
     "chart.duplicate-chord-note",
     "chart.duplicate-chord",
@@ -201,9 +203,13 @@ _RULE_EXPERIENCE = {
         "A chord event can exist in the song data without a playable fret shape, so the player may receive no useful highway instruction.",
         "Adding or correcting the intended shape makes the chord visible and playable.",
     ),
+    "chart.negative-muted-fret": (
+        "The muted strike appears at the open-string end of the highway, but its saved negative fret is outside the standard Feedpak note range and may confuse editors or other tools.",
+        "Fret 0 keeps the same string-mute instruction and FeedBack scoring behavior while giving the note a standard, portable position value.",
+    ),
     "chart.negative-fret": (
-        "A negative fret without FeedBack's supported -1 fret-hand-mute marker cannot be placed on the physical fretboard and may display incorrectly.",
-        "Correcting the fret or marking an intentional fret-hand mute gives the player an unambiguous highway instruction.",
+        "The note has no valid physical fret. FeedBack may misplace it, score an unintended pitch, or show an instruction that cannot be played as written.",
+        "Choosing the intended non-negative fret gives the player an unambiguous and physically meaningful highway instruction.",
     ),
     "chart.invalid-handshape-span": (
         "The chord-shape guide may end before it begins, disappear, or cover the wrong part of the highway.",
@@ -1372,19 +1378,22 @@ class _TabValidator:
         )
 
         if self.check_fretted and fret is not None:
-            # FeedBack deliberately supports ``f: -1`` as the positionless
-            # fret-hand-mute sentinel when the event carries either of its
-            # mute flags. The loader preserves it and the 3D highway draws the
-            # muted X at the open/string lane. Other negative frets remain
-            # invalid; requiring an actual boolean avoids accepting malformed
-            # values such as ``"false"`` that the loader would coerce truthy.
-            supported_fret_hand_mute = (
-                fret == -1
-                and (raw.get("mt") is True or raw.get("fhm") is True)
-            )
-            if fret < 0 and not supported_fret_hand_mute:
+            if fret < 0:
+                # ``mt`` is FeedBack's legacy/general string-mute flag. The
+                # scorer deliberately omits these pitchless events, so every
+                # negative position is safely canonicalized to fret 0 without
+                # changing its played or scored meaning. ``fhm`` alone is not
+                # equivalent: real charts retain normal frets to describe the
+                # muted hand shape, and current scoring still consumes them.
+                # Require the exact boolean to avoid accepting malformed
+                # values such as ``"true"`` that the loader would coerce.
+                code = (
+                    "chart.negative-muted-fret"
+                    if raw.get("mt") is True
+                    else "chart.negative-fret"
+                )
                 self._record(
-                    "chart.negative-fret", location, time=note_time, string=string,
+                    code, location, time=note_time, string=string,
                     occurrence=note_occurrence,
                 )
             elif fret > HIGHWAY_MAX_FRET:
@@ -2171,10 +2180,18 @@ class _TabValidator:
                 lambda count: f"{count} arrangement tuning(s) define more than {HIGHWAY_MAX_STRINGS} strings; the current 3D highway cannot show the extras.",
             ),
             (
+                "chart.negative-muted-fret", "warning",
+                lambda count: (
+                    f"{count} string-muted note(s) use a negative fret. "
+                    "Their pitchless mute behavior can be preserved with the "
+                    "standard fret 0 value."
+                ),
+            ),
+            (
                 "chart.negative-fret", "error",
                 lambda count: (
-                    f"{count} note(s) use a negative fret without the supported "
-                    "-1 fret-hand-mute marker."
+                    f"{count} note(s) use a negative fret without an exact "
+                    "string-mute flag that makes normalization unambiguous."
                 ),
             ),
             (

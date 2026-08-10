@@ -407,7 +407,7 @@ def test_tab_bounds_order_sustain_and_technique_types_are_checked(tmp_path, vali
     assert finding["category"] == "feedback_compatibility"
 
 
-def test_only_boolean_fret_hand_mutes_support_the_negative_one_fret_sentinel(
+def test_only_exact_string_mutes_make_negative_frets_safe_to_normalize(
     tmp_path, validator,
 ):
     arrangement = {
@@ -422,13 +422,20 @@ def test_only_boolean_fret_hand_mutes_support_the_negative_one_fret_sentinel(
     }
 
     report = validator.validate_feedpak(_package(tmp_path, arrangement=arrangement))
+    muted_negative = next(
+        item for item in report["findings"]
+        if item["code"] == "chart.negative-muted-fret"
+    )
     negative = next(
         item for item in report["findings"]
         if item["code"] == "chart.negative-fret"
     )
 
+    assert muted_negative["severity"] == "warning"
+    assert muted_negative["affected_count"] == 2
+    assert "pitchless mute behavior" in muted_negative["message"]
     assert negative["affected_count"] == 3
-    assert "-1 fret-hand-mute marker" in negative["message"]
+    assert "exact string-mute flag" in negative["message"]
     assert "chart.technique-not-boolean" in _codes(report)
 
 
@@ -763,7 +770,7 @@ def test_root_and_mastery_copies_do_not_inflate_chart_event_counts(
     report = validator.validate_feedpak(_package(tmp_path, arrangement=arrangement))
     messages = {item["code"]: item["message"] for item in report["findings"]}
 
-    assert "1 note(s)" in messages["chart.negative-fret"]
+    assert "1 string-muted note(s)" in messages["chart.negative-muted-fret"]
     assert "1 chord event(s)" in messages["chart.invisible-chord"]
     assert "1 handshape(s)" in messages["chart.invalid-handshape-span"]
 

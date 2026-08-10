@@ -303,7 +303,9 @@ def test_exact_duplicate_repair_requires_preview_backs_up_and_refreshes_report(t
         json={"package": "Artist/Song.feedpak", "rule_code": "chart.duplicate-note"},
     )
 
-    assert catalog["items"][0]["rule_code"] == "chart.duplicate-note"
+    assert "chart.duplicate-note" in {
+        item["rule_code"] for item in catalog["items"]
+    }
     assert preview.status_code == 200
     plan = preview.json()
     assert plan["available"] is True
@@ -530,6 +532,82 @@ def test_lyric_order_repair_is_lossless_validated_and_reversible(tmp_path):
         item["code"] == "lyrics.out-of-order"
         for item in restored_results["items"][0]["findings"]
     )
+    client.close()
+
+
+def test_negative_string_mute_repair_normalizes_frets_and_is_reversible(tmp_path):
+    client, library = _client(tmp_path)
+    package = _valid_package(library)
+    arrangement_path = package / "arrangements" / "lead.json"
+    arrangement = {
+        "notes": [
+            {"t": 1.0, "s": 0, "f": -1, "sus": 0.25, "mt": True},
+            {"t": 2.0, "s": 1, "f": -3, "mt": True, "future": "keep"},
+            {"t": 3.0, "s": 2, "f": -1, "fhm": True},
+        ],
+        "chords": [],
+    }
+    original = json.dumps(arrangement).encode("utf-8")
+    arrangement_path.write_bytes(original)
+
+    client.post("/api/plugins/library_doctor/scan")
+    _wait_for_scan(client)
+    report = client.get("/api/plugins/library_doctor/results").json()["items"][0]
+    findings = {item["code"]: item for item in report["findings"]}
+    assert findings["chart.negative-muted-fret"]["affected_count"] == 2
+    assert findings["chart.negative-muted-fret"]["rule"]["repairability"] == (
+        "safe_candidate"
+    )
+    assert findings["chart.negative-fret"]["affected_count"] == 1
+
+    preview = client.post(
+        "/api/plugins/library_doctor/repair/preview",
+        json={
+            "package": "Artist/Song.feedpak",
+            "rule_code": "chart.negative-muted-fret",
+        },
+    )
+    plan = preview.json()
+    assert preview.status_code == 200
+    assert plan["available"] is True
+    assert plan["change_kind"] == "normalize"
+    assert plan["change_count"] == 2
+    assert plan["removed_count"] == 0
+    assert plan["musical_positions"] == 2
+    assert "same pitchless muted strikes" in plan["player_result"].lower()
+
+    applied = client.post(
+        "/api/plugins/library_doctor/repair/apply",
+        json={
+            "package": "Artist/Song.feedpak",
+            "rule_code": "chart.negative-muted-fret",
+            "plan_id": plan["plan_id"],
+        },
+    )
+    assert applied.status_code == 200
+    repaired = json.loads(arrangement_path.read_text(encoding="utf-8"))
+    assert [note["f"] for note in repaired["notes"]] == [0, 0, -1]
+    assert repaired["notes"][0]["mt"] is True
+    assert repaired["notes"][1]["future"] == "keep"
+    assert repaired["notes"][2]["fhm"] is True
+    applied_codes = {
+        item["code"] for item in applied.json()["report"]["findings"]
+    }
+    assert "chart.negative-muted-fret" not in applied_codes
+    assert "chart.negative-fret" in applied_codes
+
+    restored = client.post(
+        "/api/plugins/library_doctor/repair/restore",
+        json={
+            "package": "Artist/Song.feedpak",
+            "backup_id": applied.json()["backup_id"],
+        },
+    )
+    assert restored.status_code == 200
+    assert arrangement_path.read_bytes() == original
+    assert "chart.negative-muted-fret" in {
+        item["code"] for item in restored.json()["report"]["findings"]
+    }
     client.close()
 
 

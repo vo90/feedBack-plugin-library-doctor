@@ -233,6 +233,9 @@
     if (value?.change_kind === 'reorder') {
       return `put ${number(count)} ${itemName}${count === 1 ? '' : 's'} into chronological order`;
     }
+    if (value?.change_kind === 'normalize') {
+      return `normalize ${number(count)} negative ${itemName}${count === 1 ? '' : 's'} to fret 0`;
+    }
     if (value?.change_kind === 'remove_redundant') {
       return `remove ${number(count)} redundant ${itemName} ${count === 1 ? 'record' : 'records'} while preserving the matching chords`;
     }
@@ -244,6 +247,9 @@
     const itemName = value?.item_name || 'item';
     if (value?.change_kind === 'reorder') {
       return `Reordered ${number(count)} ${itemName}${count === 1 ? '' : 's'} chronologically without deleting or altering any authored entries`;
+    }
+    if (value?.change_kind === 'normalize') {
+      return `Normalized ${number(count)} negative ${itemName}${count === 1 ? '' : 's'} to fret 0 while preserving every other stored property`;
     }
     if (value?.change_kind === 'remove_redundant') {
       return `Removed ${number(count)} redundant ${itemName} ${count === 1 ? 'record' : 'records'} while preserving every matching chord`;
@@ -1221,7 +1227,9 @@
     item.dataset.severity = representative.severity || 'warning';
     item.dataset.category = representative.category || 'validation';
     item.appendChild(make('strong', 'lh-finding-title', rule.title || definition.title || 'Safe repair available'));
-    const technicalSummary = definition.change_kind === 'reorder'
+    const technicalSummary = definition.change_kind === 'normalize'
+      ? `${number(affected)} pitchless string-mute ${affected === 1 ? 'position uses' : 'positions use'} a negative fret across ${scope}. Library Doctor can change only those fret values to 0 while preserving every other stored property.`
+      : definition.change_kind === 'reorder'
       ? `${number(affected)} ${itemName}${affected === 1 ? ' has' : 's have'} entries stored outside chronological order across ${scope}. Every stored entry and property can be preserved by one package-wide repair.`
       : definition.change_kind === 'remove_redundant'
         ? `${number(affected)} musical ${affected === 1 ? 'position has' : 'positions have'} a zero-duration shape guide across ${scope}. Library Doctor removes only records whose exact matching chord already preserves the complete playable instruction.`
@@ -1347,6 +1355,9 @@
         const restoredItem = restoredChange.item_name || 'timeline';
         return `Restored the saved original order for ${number(repairChangeCount(restoredChange))} ${restoredItem}${repairChangeCount(restoredChange) === 1 ? '' : 's'}. The repaired ordering finding is expected to return.`;
       }
+      if (restoredChange.change_kind === 'normalize') {
+        return `Restored ${number(repairChangeCount(restoredChange))} original negative muted-note fret ${repairChangeCount(restoredChange) === 1 ? 'value' : 'values'}. The repaired negative-mute finding is expected to return.`;
+      }
       return `Restored the saved original song data for ${number(count)} safe ${count === 1 ? 'change' : 'changes'}. The related repaired findings are expected to return.`;
     }
     if (summaries.length > 1) {
@@ -1358,6 +1369,9 @@
     }
     if (receipt.change_kind === 'reorder') {
       return `${completedRepairChange(receipt)}${positions ? ` at ${number(positions)} musical ${positions === 1 ? 'position' : 'positions'}` : ''}. Every authored entry and property was preserved.`;
+    }
+    if (receipt.change_kind === 'normalize') {
+      return `${completedRepairChange(receipt)}${positions ? ` at ${number(positions)} musical ${positions === 1 ? 'position' : 'positions'}` : ''}.`;
     }
     if (receipt.change_kind === 'remove_redundant') {
       return `${completedRepairChange(receipt)}${positions ? ` at ${number(positions)} musical ${positions === 1 ? 'position' : 'positions'}` : ''}.`;
@@ -1735,7 +1749,9 @@
         card.appendChild(make(
           'p',
           '',
-          plan.change_kind === 'reorder'
+          plan.change_kind === 'normalize'
+            ? `Change ${number(repairChangeCount(plan))} negative ${itemName}${repairChangeCount(plan) === 1 ? '' : 's'} to fret 0 at ${number(plan.musical_positions)} musical ${plan.musical_positions === 1 ? 'position' : 'positions'}, across ${number(plan.arrays_affected)} stored ${plan.arrays_affected === 1 ? 'list' : 'lists'}. Every other property is kept unchanged.`
+            : plan.change_kind === 'reorder'
             ? `Put ${number(repairChangeCount(plan))} ${itemName}${repairChangeCount(plan) === 1 ? '' : 's'} into chronological order across ${number(plan.arrays_affected)} stored ${plan.arrays_affected === 1 ? 'list' : 'lists'}, affecting ${number(plan.musical_positions)} musical ${plan.musical_positions === 1 ? 'position' : 'positions'}. Every entry and stored property is kept.`
             : plan.change_kind === 'remove_redundant'
               ? `Remove ${number(plan.removed_count)} redundant stored ${itemName} ${plan.removed_count === 1 ? 'record' : 'records'} at ${number(plan.musical_positions)} musical ${plan.musical_positions === 1 ? 'position' : 'positions'}, across ${number(plan.arrays_affected)} ${itemName} ${plan.arrays_affected === 1 ? 'list' : 'lists'}. Every matching authored chord is kept unchanged.`

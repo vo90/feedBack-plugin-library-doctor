@@ -26,7 +26,7 @@ from typing import Iterator
 import yaml
 
 
-REPAIR_CATALOG_VERSION = "repairs-11"
+REPAIR_CATALOG_VERSION = "repairs-12"
 REPAIR_PLAN_SCHEMA = "library_doctor.repair_plan.v1"
 MAX_REPAIR_TEXT_BYTES = 64 * 1024 * 1024
 MAX_REPAIR_STRUCTURE_ITEMS = 2_000_000
@@ -236,6 +236,40 @@ class DeleteRedundantHandshapes:
 
 
 @dataclass(frozen=True)
+class MutedFretChange:
+    note_index: int
+    original_fret: int
+    replacement_fret: int
+    note_sha256: str
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class NormalizeMutedNegativeFrets:
+    note_array_path: tuple[str | int, ...]
+    expected_length: int
+    changes: tuple[MutedFretChange, ...]
+
+    @property
+    def remove_indices(self) -> tuple[int, ...]:
+        return ()
+
+    @property
+    def change_count(self) -> int:
+        return len(self.changes)
+
+    def to_dict(self) -> dict:
+        return {
+            "operation": "normalize_muted_negative_frets",
+            "note_array_path": list(self.note_array_path),
+            "expected_length": self.expected_length,
+            "changes": [change.to_dict() for change in self.changes],
+        }
+
+
+@dataclass(frozen=True)
 class StableSortBendPoints:
     array_path: tuple[str | int, ...]
     expected_length: int
@@ -315,6 +349,29 @@ class StableSortTimelineMarkers:
 
 
 _REPAIR_DEFINITIONS = (
+    RepairDefinition(
+        rule_code="chart.negative-muted-fret",
+        action_kind="normalize_muted_negative_frets",
+        source_kind="arrangement",
+        item_name="muted note fret",
+        safety="safe_automatic",
+        title="Normalize negative string-mute frets",
+        description=(
+            "Change only the negative fret value of notes carrying the exact "
+            "string-mute flag `mt: true` to fret 0. Keep every string, time, "
+            "sustain, technique flag, and unknown stored property unchanged."
+        ),
+        player_result=(
+            "The same pitchless muted strikes remain on the same strings and "
+            "at the same times. FeedBack still excludes them from pitch scoring."
+        ),
+        user_value=(
+            "Editors and Feedpak tools receive the standard fret 0 value instead "
+            "of an invalid negative fret, without changing what the player is "
+            "asked to perform."
+        ),
+        change_kind="normalize",
+    ),
     RepairDefinition(
         rule_code="chart.duplicate-note",
         action_kind="remove_exact_duplicate_notes",
@@ -655,6 +712,7 @@ _DEFAULT_REPAIR_BY_SOURCE = {
 # important for relationships that become unambiguous only after exact chord
 # redundancies have been removed.
 _ALL_SAFE_RULE_ORDER = (
+    "chart.negative-muted-fret",
     "chart.bend-points-out-of-order",
     "chart.duplicate-chord-note",
     "chart.duplicate-chord",
@@ -681,8 +739,9 @@ _ALL_SAFE_DEFINITION = {
         "this Feedpak as one validated transaction."
     ),
     "player_result": (
-        "Eligible redundant instructions are removed and supported ordering "
-        "problems are normalized without changing the intended musical data. "
+        "Eligible invalid values are normalized, redundant instructions are "
+        "removed, and supported ordering problems are corrected without changing "
+        "the intended musical data. "
         "Findings that require judgment, including conflicting entries, remain "
         "unchanged in the refreshed package report."
     ),
@@ -739,11 +798,12 @@ def apply_json_member(raw: bytes, plan: dict) -> bytes:
 
     removed: set[tuple[tuple[str | int, ...], int]] = set()
     reordered: set[tuple[str | int, ...]] = set()
+    normalized: set[tuple[tuple[str | int, ...], int]] = set()
     for action in plan.get("actions", []):
         if not isinstance(action, dict) or action.get("safety") != "safe_automatic":
             raise RepairPlanningError("invalid_plan", "The repair preview is invalid.")
         for operation in action.get("operations", []):
-            _apply_operation(document, operation, removed, reordered)
+            _apply_operation(document, operation, removed, reordered, normalized)
     return _render_json(document, raw)
 
 
@@ -2225,7 +2285,9 @@ def plan_json_member(
             "The song file does not have the expected JSON structure for this repair.",
         )
 
-    if definition.rule_code == "chart.duplicate-note":
+    if definition.rule_code == "chart.negative-muted-fret":
+        operations = _plan_muted_negative_frets(document)
+    elif definition.rule_code == "chart.duplicate-note":
         operations = _plan_exact_note_duplicates(document)
     elif definition.rule_code == "chart.duplicate-chord-note":
         operations = _plan_exact_chord_note_duplicates(document)
@@ -2271,11 +2333,15 @@ def plan_json_member(
     actions = []
     if operations:
         removed_count = sum(len(operation.remove_indices) for operation in operations)
-        change_count = (
-            len(operations)
-            if definition.change_kind == "reorder"
-            else removed_count
-        )
+        if definition.change_kind == "reorder":
+            change_count = len(operations)
+        elif definition.change_kind == "normalize":
+            change_count = sum(
+                operation.change_count for operation in operations
+                if isinstance(operation, NormalizeMutedNegativeFrets)
+            )
+        else:
+            change_count = removed_count
         arrays_affected = len(operations)
         musical_positions = _musical_position_count(
             document, operations, definition.rule_code
@@ -2390,6 +2456,57 @@ def _inspect_structure(document) -> None:
             continue
         seen_containers.add(identity)
         stack.extend(value.values() if isinstance(value, dict) else value)
+
+
+def _plan_muted_negative_frets(
+    document: dict,
+) -> list[NormalizeMutedNegativeFrets]:
+    operations = []
+    for path, notes in _arrangement_arrays(document, "notes"):
+        operation = _muted_fret_normalization_operation(path, notes)
+        if operation is not None:
+            operations.append(operation)
+
+    for chord_path, chords in _arrangement_arrays(document, "chords"):
+        for chord_index, chord in enumerate(chords):
+            if not isinstance(chord, dict):
+                continue
+            chord_notes = chord.get("notes")
+            if not isinstance(chord_notes, list):
+                continue
+            operation = _muted_fret_normalization_operation(
+                chord_path + (chord_index, "notes"), chord_notes
+            )
+            if operation is not None:
+                operations.append(operation)
+    return operations
+
+
+def _muted_fret_normalization_operation(
+    path: tuple[str | int, ...], notes: list
+) -> NormalizeMutedNegativeFrets | None:
+    changes = []
+    for note_index, note in enumerate(notes):
+        if (
+            not isinstance(note, dict)
+            or not _integer(note.get("f"))
+            or note["f"] >= 0
+            or note.get("mt") is not True
+        ):
+            continue
+        changes.append(MutedFretChange(
+            note_index=note_index,
+            original_fret=note["f"],
+            replacement_fret=0,
+            note_sha256=hashlib.sha256(_canonical_json(note)).hexdigest(),
+        ))
+    if not changes:
+        return None
+    return NormalizeMutedNegativeFrets(
+        note_array_path=path,
+        expected_length=len(notes),
+        changes=tuple(changes),
+    )
 
 
 def _plan_exact_note_duplicates(document: dict) -> list[DeleteArrayItems]:
@@ -3094,9 +3211,15 @@ def _apply_operation(
     operation: dict,
     removed: set[tuple[tuple[str | int, ...], int]],
     reordered: set[tuple[str | int, ...]],
+    normalized: set[tuple[tuple[str | int, ...], int]],
 ) -> None:
     if not isinstance(operation, dict):
         raise RepairPlanningError("invalid_plan", "The repair preview is invalid.")
+    if operation.get("operation") == "normalize_muted_negative_frets":
+        _apply_muted_fret_normalization_operation(
+            document, operation, normalized
+        )
+        return
     if operation.get("operation") == "stable_sort_lyric_cues":
         _apply_lyric_cue_sort_operation(document, operation, reordered)
         return
@@ -3162,6 +3285,69 @@ def _apply_operation(
         raise RepairPlanningError("invalid_plan", "The repair preview is invalid.")
     for index in declared_indexes:
         del values[index]
+
+
+def _apply_muted_fret_normalization_operation(
+    document: dict,
+    operation: dict,
+    normalized: set[tuple[tuple[str | int, ...], int]],
+) -> None:
+    raw_path = operation.get("note_array_path")
+    if not isinstance(raw_path, list) or not raw_path:
+        raise RepairPlanningError("invalid_plan", "The repair preview is invalid.")
+    path = tuple(raw_path)
+    notes = _value_at_path(document, path)
+    if (
+        not isinstance(notes, list)
+        or operation.get("expected_length") != len(notes)
+    ):
+        raise RepairPlanningError(
+            "source_changed",
+            "The song changed after this preview. Review the safe fix again before applying it.",
+        )
+
+    changes = operation.get("changes")
+    if not isinstance(changes, list) or not changes:
+        raise RepairPlanningError("invalid_plan", "The repair preview is invalid.")
+    indexes = [
+        change.get("note_index") if isinstance(change, dict) else None
+        for change in changes
+    ]
+    if (
+        any(not _integer(index) for index in indexes)
+        or indexes != sorted(indexes)
+        or len(indexes) != len(set(indexes))
+    ):
+        raise RepairPlanningError("invalid_plan", "The repair preview is invalid.")
+
+    targets = []
+    for change, note_index in zip(changes, indexes):
+        if note_index < 0 or note_index >= len(notes):
+            raise RepairPlanningError("source_changed", "The song changed after this preview.")
+        note = notes[note_index]
+        marker = (path, note_index)
+        if (
+            not isinstance(note, dict)
+            or not _integer(change.get("original_fret"))
+            or change["original_fret"] >= 0
+            or change.get("replacement_fret") != 0
+            or not isinstance(change.get("note_sha256"), str)
+            or note.get("f") != change["original_fret"]
+            or note.get("mt") is not True
+            or hashlib.sha256(_canonical_json(note)).hexdigest()
+            != change["note_sha256"]
+        ):
+            raise RepairPlanningError(
+                "source_changed",
+                "The muted note changed after this preview. Review the safe fix again before applying it.",
+            )
+        if marker in normalized:
+            raise RepairPlanningError("invalid_plan", "The repair preview is invalid.")
+        targets.append((marker, note))
+
+    for marker, note in targets:
+        note["f"] = 0
+        normalized.add(marker)
 
 
 def _apply_bend_point_sort_operation(
@@ -3555,13 +3741,34 @@ def _musical_position_count(
     operations: list[
         DeleteArrayItems | DeleteNotesMatchingChords | StableSortBendPoints
         | StableSortLyricCues | StableSortTimelineMarkers
-        | DeleteRedundantHandshapes
+        | DeleteRedundantHandshapes | NormalizeMutedNegativeFrets
     ],
     rule_code: str,
 ) -> int:
     positions: set[bytes] = set()
     for operation in operations:
-        if isinstance(operation, StableSortLyricCues):
+        if isinstance(operation, NormalizeMutedNegativeFrets):
+            notes = _value_at_path(document, operation.note_array_path)
+            chord_time = None
+            if (
+                len(operation.note_array_path) >= 3
+                and operation.note_array_path[-1] == "notes"
+                and _integer(operation.note_array_path[-2])
+                and operation.note_array_path[-3] == "chords"
+            ):
+                chord = _value_at_path(document, operation.note_array_path[:-1])
+                if isinstance(chord, dict) and _finite_number(chord.get("t")):
+                    chord_time = chord["t"]
+            for change in operation.changes:
+                note = notes[change.note_index]
+                note_time = (
+                    note.get("t")
+                    if isinstance(note, dict) and _finite_number(note.get("t"))
+                    else chord_time
+                )
+                string = note.get("s") if isinstance(note, dict) else None
+                positions.add(_canonical_json({"t": note_time, "s": string}))
+        elif isinstance(operation, StableSortLyricCues):
             positions.add(_canonical_json({"path": [], "timeline": "lyrics"}))
         elif isinstance(operation, StableSortBendPoints):
             positions.add(_canonical_json({
@@ -3729,6 +3936,11 @@ def _summary(
         return (
             f"Put {change_count} {item_label} into chronological order across "
             f"{arrays_affected} {list_label}; preserve every stored entry and property."
+        )
+    if change_kind == "normalize":
+        return (
+            f"Normalize {change_count} negative {item_label} to fret 0 across "
+            f"{arrays_affected} {list_label}; preserve every other stored property."
         )
     if change_kind == "remove_redundant":
         return (
