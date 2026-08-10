@@ -662,6 +662,137 @@ def test_zero_length_handshape_that_may_supply_a_chord_is_blocked(tmp_path):
     client.close()
 
 
+def test_reversed_handshape_repair_preserves_matching_chords_and_is_reversible(
+    tmp_path,
+):
+    client, library = _client(tmp_path)
+    package = _valid_package(library)
+    arrangement_path = package / "arrangements" / "lead.json"
+    chord = {
+        "t": 10.0,
+        "id": 0,
+        "notes": [{"s": 0, "f": 3}, {"s": 1, "f": 5}],
+    }
+    handshape = {"chord_id": 0, "start_time": 10.0, "end_time": 9.75}
+    arrangement = {
+        "notes": [],
+        "chords": [chord],
+        "anchors": [],
+        "handshapes": [handshape],
+        "templates": [{"name": "C", "frets": [3, 5], "fingers": [1, 3]}],
+        "phrases": [{
+            "start_time": 0.0,
+            "end_time": 20.0,
+            "max_difficulty": 1,
+            "levels": [{
+                "difficulty": 1,
+                "notes": [],
+                "chords": [json.loads(json.dumps(chord))],
+                "anchors": [],
+                "handshapes": [dict(handshape)],
+            }],
+        }],
+    }
+    original = json.dumps(arrangement).encode("utf-8")
+    arrangement_path.write_bytes(original)
+
+    client.post("/api/plugins/library_doctor/scan")
+    _wait_for_scan(client)
+    report = client.get("/api/plugins/library_doctor/results").json()["items"][0]
+    finding = next(
+        item for item in report["findings"]
+        if item["code"] == "chart.invalid-handshape-span"
+    )
+    assert finding["affected_count"] == 1
+    assert finding["rule"]["repairability"] == "safe_candidate"
+
+    preview = client.post(
+        "/api/plugins/library_doctor/repair/preview",
+        json={
+            "package": "Artist/Song.feedpak",
+            "rule_code": "chart.invalid-handshape-span",
+        },
+    )
+    plan = preview.json()
+
+    assert preview.status_code == 200
+    assert plan["available"] is True
+    assert plan["change_kind"] == "remove_redundant"
+    assert plan["removed_count"] == 2
+    assert plan["musical_positions"] == 1
+    assert "matching authored chord remains" in plan["player_result"].lower()
+
+    applied = client.post(
+        "/api/plugins/library_doctor/repair/apply",
+        json={
+            "package": "Artist/Song.feedpak",
+            "rule_code": "chart.invalid-handshape-span",
+            "plan_id": plan["plan_id"],
+        },
+    )
+
+    assert applied.status_code == 200
+    repaired = json.loads(arrangement_path.read_text(encoding="utf-8"))
+    assert repaired["chords"] == [chord]
+    assert repaired["handshapes"] == []
+    level = repaired["phrases"][0]["levels"][0]
+    assert level["chords"] == [chord]
+    assert level["handshapes"] == []
+    assert "chart.invalid-handshape-span" not in {
+        item["code"] for item in applied.json()["report"]["findings"]
+    }
+
+    restored = client.post(
+        "/api/plugins/library_doctor/repair/restore",
+        json={
+            "package": "Artist/Song.feedpak",
+            "backup_id": applied.json()["backup_id"],
+        },
+    )
+    assert restored.status_code == 200
+    assert arrangement_path.read_bytes() == original
+    assert "chart.invalid-handshape-span" in {
+        item["code"] for item in restored.json()["report"]["findings"]
+    }
+    client.close()
+
+
+def test_reversed_handshape_that_may_supply_a_chord_is_blocked(tmp_path):
+    client, library = _client(tmp_path)
+    package = _valid_package(library)
+    arrangement_path = package / "arrangements" / "lead.json"
+    original = json.dumps({
+        "notes": [],
+        "chords": [],
+        "handshapes": [{
+            "chord_id": 0,
+            "start_time": 10.0,
+            "end_time": 9.75,
+        }],
+        "templates": [{"frets": [3], "fingers": [1]}],
+    }).encode("utf-8")
+    arrangement_path.write_bytes(original)
+
+    client.post("/api/plugins/library_doctor/scan")
+    _wait_for_scan(client)
+    preview = client.post(
+        "/api/plugins/library_doctor/repair/preview",
+        json={
+            "package": "Artist/Song.feedpak",
+            "rule_code": "chart.invalid-handshape-span",
+        },
+    )
+
+    assert preview.status_code == 200
+    plan = preview.json()
+    assert plan["available"] is False
+    assert plan["blockers"][0]["code"] == "reversed_handshape_requires_review"
+    assert "could supply a chord" in plan["blockers"][0]["message"]
+    assert arrangement_path.read_bytes() == original
+    assert not (tmp_path / "config" / "library_doctor" / "repair_backups").exists()
+    client.close()
+
+
 def test_fix_all_safe_issues_is_one_validated_reversible_package_transaction(tmp_path):
     client, library = _client(tmp_path)
     package = _valid_package(library)
@@ -1414,11 +1545,16 @@ def test_batch_preview_and_apply_repair_each_eligible_feedpak_separately(tmp_pat
         "end_time": 4.0,
         "chord_id": 0,
     }
+    first_reversed_handshape = {
+        "start_time": 4.0,
+        "end_time": 3.75,
+        "chord_id": 0,
+    }
     first_path.write_text(json.dumps({
         "notes": [first_note, dict(first_note)],
         "chords": [first_chord],
         "anchors": [first_anchor, dict(first_anchor)],
-        "handshapes": [first_zero_handshape],
+        "handshapes": [first_zero_handshape, first_reversed_handshape],
         "templates": [{"frets": [3], "fingers": [1]}],
         "beats": [first_beat, dict(first_beat)],
         "sections": [first_section, dict(first_section)],
@@ -1464,7 +1600,7 @@ def test_batch_preview_and_apply_repair_each_eligible_feedpak_separately(tmp_pat
     assert preview["eligible_count"] == 2
     assert preview["blocked_count"] == 1
     assert preview["no_longer_needed_count"] == 0
-    assert preview["removed_count"] == 6
+    assert preview["removed_count"] == 7
     assert {item["package"] for item in preview["packages"]} == {
         "First.feedpak", "Second.feedpak",
     }
@@ -1484,7 +1620,7 @@ def test_batch_preview_and_apply_repair_each_eligible_feedpak_separately(tmp_pat
     assert result["skipped_count"] == 0
     assert result["failed_count"] == 0
     assert result["backup_count"] == 2
-    assert result["removed_count"] == 6
+    assert result["removed_count"] == 7
     repaired_first = json.loads(first_path.read_text(encoding="utf-8"))
     assert len(repaired_first["notes"]) == 1
     assert len(repaired_first["anchors"]) == 1
@@ -1551,7 +1687,10 @@ def test_batch_preview_and_apply_repair_each_eligible_feedpak_separately(tmp_pat
     assert len(restored_first["notes"]) == 2
     assert len(restored_first["anchors"]) == 2
     assert restored_first["chords"] == [first_chord]
-    assert restored_first["handshapes"] == [first_zero_handshape]
+    assert restored_first["handshapes"] == [
+        first_zero_handshape,
+        first_reversed_handshape,
+    ]
     assert restored_first["beats"] == [first_beat, first_beat]
     assert restored_first["sections"] == [first_section, first_section]
 

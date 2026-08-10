@@ -61,6 +61,7 @@ def test_catalog_is_an_explicit_allowlist(repair):
         "chart.duplicate-anchor",
         "chart.duplicate-handshape",
         "chart.zero-length-handshape",
+        "chart.invalid-handshape-span",
         "chart.note-duplicates-chord",
         "chart.bend-points-out-of-order",
         "lyrics.out-of-order",
@@ -86,6 +87,9 @@ def test_catalog_is_an_explicit_allowlist(repair):
     zero_length_repair = repair.repair_for_rule("chart.zero-length-handshape")
     assert zero_length_repair["item_name"] == "zero-length handshape"
     assert zero_length_repair["change_kind"] == "remove_redundant"
+    reversed_repair = repair.repair_for_rule("chart.invalid-handshape-span")
+    assert reversed_repair["item_name"] == "reversed handshape"
+    assert reversed_repair["change_kind"] == "remove_redundant"
     assert (
         repair.repair_for_rule("chart.note-duplicates-chord")["item_name"]
         == "standalone note"
@@ -396,6 +400,208 @@ def test_zero_length_handshape_plan_is_bound_to_the_preserved_chord(repair):
         repair.apply_json_member(raw, tampered)
 
     assert caught.value.code == "source_changed"
+
+
+def test_removes_only_reversed_handshapes_redundant_with_playable_chords(repair):
+    chord = {
+        "t": 10.0,
+        "id": 0,
+        "notes": [{"s": 0, "f": 3}, {"s": 1, "f": 5}],
+    }
+    handshape = {
+        "chord_id": 0,
+        "start_time": 10.0,
+        "end_time": 9.75,
+        "arp": False,
+    }
+    document = {
+        "chords": [chord],
+        "handshapes": [handshape],
+        "templates": [{"name": "C", "frets": [3, 5], "fingers": [1, 3]}],
+        "phrases": [{
+            "levels": [{
+                "chords": [copy.deepcopy(chord)],
+                "handshapes": [copy.deepcopy(handshape)],
+            }],
+        }],
+    }
+
+    plan = _plan(
+        repair,
+        document,
+        rule_code="chart.invalid-handshape-span",
+    )
+    action = plan["actions"][0]
+
+    assert action["change_kind"] == "remove_redundant"
+    assert action["removed_count"] == 2
+    assert action["arrays_affected"] == 2
+    assert action["musical_positions"] == 1
+    assert {
+        operation["span_kind"] for operation in action["operations"]
+    } == {"reversed"}
+
+    repaired = json.loads(
+        repair.apply_json_member(_raw(document), plan).decode("utf-8")
+    )
+    assert repaired["handshapes"] == []
+    assert repaired["phrases"][0]["levels"][0]["handshapes"] == []
+    assert repaired["chords"] == [chord]
+    assert repaired["phrases"][0]["levels"][0]["chords"] == [chord]
+
+
+@pytest.mark.parametrize(
+    ("handshape", "chords", "templates"),
+    [
+        ({"chord_id": 0, "start_time": 10.0}, [], [{}]),
+        (
+            {"chord_id": 0, "start_time": -1.0, "end_time": -2.0},
+            [{"t": -1.0, "id": 0, "notes": [{"s": 0, "f": 3}]}],
+            [{}],
+        ),
+        (
+            {"chord_id": 0, "start_time": 10.0, "end_time": 9.0},
+            [],
+            [{}],
+        ),
+        (
+            {"chord_id": 0, "start_time": 10.0, "end_time": 9.0},
+            [
+                {"t": 10.0, "id": 0, "notes": [{"s": 0, "f": 3}]},
+                {"t": 10.0, "id": 0, "notes": [{"s": 0, "f": 3}]},
+            ],
+            [{}],
+        ),
+        (
+            {
+                "chord_id": 0,
+                "start_time": 10.0,
+                "end_time": 9.0,
+                "arp": True,
+            },
+            [{"t": 10.0, "id": 0, "notes": [{"s": 0, "f": 3}]}],
+            [{}],
+        ),
+        (
+            {
+                "chord_id": 0,
+                "start_time": 10.0,
+                "end_time": 9.0,
+                "future": {"meaning": "unknown"},
+            },
+            [{"t": 10.0, "id": 0, "notes": [{"s": 0, "f": 3}]}],
+            [{}],
+        ),
+        (
+            {"chord_id": 0, "start_time": 10.0, "end_time": 9.0},
+            [{"t": 10.0, "id": 0, "notes": []}],
+            [{}],
+        ),
+        (
+            {"chord_id": 0, "start_time": 10.0, "end_time": 9.0},
+            [{"t": 10.0, "id": 0, "notes": [{"s": 0, "f": 3}]}],
+            [{"name": "C arpeggio"}],
+        ),
+        (
+            {"chord_id": 0, "start_time": 10.0, "end_time": 9.0},
+            [{"t": 10.0, "id": 0, "notes": [{"s": 0, "f": 3}]}],
+            [],
+        ),
+    ],
+)
+def test_reversed_handshape_repair_blocks_any_shape_with_possible_meaning(
+    repair, handshape, chords, templates,
+):
+    with pytest.raises(repair.RepairPlanningError) as caught:
+        _plan(
+            repair,
+            {
+                "chords": chords,
+                "handshapes": [handshape],
+                "templates": templates,
+            },
+            rule_code="chart.invalid-handshape-span",
+        )
+
+    assert caught.value.code == "reversed_handshape_requires_review"
+
+
+@pytest.mark.parametrize(
+    "template",
+    [
+        {"arp": True},
+        {"arpeggio": "true"},
+        {"displayName": "C-arp"},
+        {"name": "C (arp)"},
+    ],
+)
+def test_reversed_handshape_repair_blocks_all_template_arpeggio_markers(
+    repair, template,
+):
+    with pytest.raises(repair.RepairPlanningError) as caught:
+        _plan(
+            repair,
+            {
+                "chords": [{
+                    "t": 10.0,
+                    "id": 0,
+                    "notes": [{"s": 0, "f": 3}],
+                }],
+                "handshapes": [{
+                    "chord_id": 0,
+                    "start_time": 10.0,
+                    "end_time": 9.0,
+                }],
+                "templates": [template],
+            },
+            rule_code="chart.invalid-handshape-span",
+        )
+
+    assert caught.value.code == "reversed_handshape_requires_review"
+
+
+def test_one_unsafe_invalid_handshape_blocks_eligible_siblings(repair):
+    chord = {"t": 10.0, "id": 0, "notes": [{"s": 0, "f": 3}]}
+    document = {
+        "chords": [chord],
+        "handshapes": [
+            {"chord_id": 0, "start_time": 10.0, "end_time": 9.0},
+            {"chord_id": 1, "start_time": 11.0, "end_time": 10.0},
+        ],
+        "templates": [{}, {}],
+    }
+
+    with pytest.raises(repair.RepairPlanningError) as caught:
+        _plan(
+            repair,
+            document,
+            rule_code="chart.invalid-handshape-span",
+        )
+
+    assert caught.value.code == "reversed_handshape_requires_review"
+    assert document["handshapes"] == [
+        {"chord_id": 0, "start_time": 10.0, "end_time": 9.0},
+        {"chord_id": 1, "start_time": 11.0, "end_time": 10.0},
+    ]
+
+
+def test_invalid_handshape_repair_ignores_valid_and_zero_length_spans(repair):
+    document = {
+        "chords": [{"t": 10.0, "id": 0, "notes": [{"s": 0, "f": 3}]}],
+        "handshapes": [
+            {"chord_id": 0, "start_time": 10.0, "end_time": 10.0},
+            {"chord_id": 0, "start_time": 10.0, "end_time": 11.0},
+        ],
+        "templates": [{}],
+    }
+
+    plan = _plan(
+        repair,
+        document,
+        rule_code="chart.invalid-handshape-span",
+    )
+
+    assert plan["actions"] == []
 
 
 def test_plans_exact_standalone_notes_that_duplicate_explicit_chord_members(repair):

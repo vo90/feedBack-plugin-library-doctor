@@ -101,8 +101,9 @@ absent.
 The repair allowlist removes exact duplicate standalone notes, members inside
 one chord, complete chord events, anchors, handshapes, beat markers, section
 markers, and drum hits. It can also remove a standalone note that exactly
-repeats one explicit member of a chord and put out-of-order bend points and
-lyric cues, beat markers, and section markers into chronological order without
+repeats one explicit member of a chord, remove strictly redundant zero-length
+or reversed-duration handshapes, and put out-of-order bend points and lyric
+cues, beat markers, and section markers into chronological order without
 removing any stored entry.
 Ordinary duplicates keep the first entry and delete only later copies whose
 complete JSON properties and values match within the same event array or chord.
@@ -139,6 +140,17 @@ the same template ID already exists at the identical time in the same event
 list. The chord and all playable notes remain unchanged. An unmatched handshape,
 an ambiguous chord match, an arpeggio marker, or future authoring data blocks the
 repair for that arrangement file instead of being guessed at.
+
+Reversed-duration handshapes use an even narrower form of the same safeguard.
+Library Doctor removes one only when its start is valid and non-negative, its
+end is strictly earlier, it contains no additional authoring data, its template
+does not declare arpeggio intent, and exactly one chord with at least one
+playable note has the same template ID and exact onset in the same event list.
+The matching chord remains unchanged. Missing or negative timing, an unmatched
+or ambiguous chord, a missing or arpeggiated template, an unplayable chord, or
+future handshape properties block the repair for that arrangement file. The
+plugin never invents a replacement end time or swaps the two times because the
+author's intended duration cannot be proved from a reversed span.
 
 A preview is bound to the exact current source bytes and validator version. If
 the package changes before confirmation, Library Doctor refuses the stale plan.
