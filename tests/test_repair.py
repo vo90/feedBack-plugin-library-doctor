@@ -65,7 +65,9 @@ def test_catalog_is_an_explicit_allowlist(repair):
         "chart.bend-points-out-of-order",
         "lyrics.out-of-order",
         "timeline.duplicate-beat",
+        "timeline.beats-out-of-order",
         "timeline.duplicate-section",
+        "timeline.sections-out-of-order",
         "drums.duplicate-hit",
     ]
     assert {item["safety"] for item in catalog} == {"safe_automatic"}
@@ -98,9 +100,17 @@ def test_catalog_is_an_explicit_allowlist(repair):
     beat_repair = repair.repair_for_rule("timeline.duplicate-beat")
     assert beat_repair["source_kind"] == "timeline"
     assert beat_repair["item_name"] == "beat marker"
+    beat_order_repair = repair.repair_for_rule("timeline.beats-out-of-order")
+    assert beat_order_repair["item_name"] == "beat timeline"
+    assert beat_order_repair["change_kind"] == "reorder"
     section_repair = repair.repair_for_rule("timeline.duplicate-section")
     assert section_repair["source_kind"] == "timeline"
     assert section_repair["item_name"] == "section marker"
+    section_order_repair = repair.repair_for_rule(
+        "timeline.sections-out-of-order"
+    )
+    assert section_order_repair["item_name"] == "section timeline"
+    assert section_order_repair["change_kind"] == "reorder"
     assert repair.repair_for_rule("drums.duplicate-hit")["item_name"] == "drum hit"
     assert repair.repair_for_rule("chart.string-conflict") is None
 
@@ -683,6 +693,132 @@ def test_lyric_repair_rejects_tampered_ordering_instructions(repair):
         cues,
         source_kind="lyrics",
         rule_code="lyrics.out-of-order",
+    )
+    tampered = copy.deepcopy(plan)
+    tampered["actions"][0]["operations"][0]["sorted_indices"] = [0, 1]
+    unsigned = {key: value for key, value in tampered.items() if key != "plan_id"}
+    tampered["plan_id"] = repair._digest_json(unsigned)
+
+    with pytest.raises(repair.RepairPlanningError) as caught:
+        repair.apply_json_member(raw, tampered)
+    assert caught.value.code == "invalid_plan"
+
+
+@pytest.mark.parametrize(
+    ("field", "rule_code", "markers"),
+    [
+        (
+            "beats",
+            "timeline.beats-out-of-order",
+            [
+                {"time": 5.0, "measure": 2, "future": {"id": "last"}},
+                {"time": 1.0, "measure": 1, "future": {"id": "equal-first"}},
+                {"time": 1.0, "measure": -1, "future": {"id": "equal-second"}},
+                {"time": 3.0, "measure": -1, "future": {"id": "middle"}},
+            ],
+        ),
+        (
+            "sections",
+            "timeline.sections-out-of-order",
+            [
+                {"time": 5.0, "name": "Outro", "number": 1, "future": "last"},
+                {"time": 1.0, "name": "Intro", "number": 1, "future": "equal-first"},
+                {"time": 1.0, "name": "Count-in", "number": 2, "future": "equal-second"},
+                {"time": 3.0, "name": "Verse", "number": 1, "future": "middle"},
+            ],
+        ),
+    ],
+)
+def test_timeline_repair_stably_orders_markers_without_changing_data(
+    repair, field, rule_code, markers,
+):
+    document = {"version": 1, "beats": [], "sections": [], field: markers}
+    plan = _plan(
+        repair,
+        document,
+        source_kind="timeline",
+        rule_code=rule_code,
+    )
+    action = plan["actions"][0]
+
+    assert action["change_kind"] == "reorder"
+    assert action["change_count"] == 1
+    assert action["removed_count"] == 0
+    assert action["arrays_affected"] == 1
+    assert action["musical_positions"] == 3
+    assert action["operations"] == [{
+        "operation": "stable_sort_timeline_markers",
+        "array_path": [field],
+        "field": field,
+        "expected_length": 4,
+        "original_sha256": action["operations"][0]["original_sha256"],
+        "sorted_sha256": action["operations"][0]["sorted_sha256"],
+        "sorted_indices": [1, 2, 3, 0],
+        "moved_count": 4,
+    }]
+
+    repaired = json.loads(
+        repair.apply_json_member(_raw(document), plan).decode("utf-8")
+    )
+    assert repaired[field] == [markers[1], markers[2], markers[3], markers[0]]
+    assert sorted(
+        repaired[field], key=lambda marker: json.dumps(marker, sort_keys=True)
+    ) == sorted(markers, key=lambda marker: json.dumps(marker, sort_keys=True))
+
+
+@pytest.mark.parametrize(
+    ("field", "rule_code", "invalid_marker", "error_code"),
+    [
+        (
+            "beats",
+            "timeline.beats-out-of-order",
+            {"time": 2.0, "measure": "unknown"},
+            "invalid_beat_timeline",
+        ),
+        (
+            "sections",
+            "timeline.sections-out-of-order",
+            {"time": 2.0, "name": 42},
+            "invalid_section_timeline",
+        ),
+    ],
+)
+def test_timeline_repair_refuses_invalid_mixed_marker_lists(
+    repair, field, rule_code, invalid_marker, error_code,
+):
+    document = {
+        "beats": [],
+        "sections": [],
+        field: [
+            {"time": 3.0, **({"measure": 1} if field == "beats" else {"name": "Later"})},
+            invalid_marker,
+            {"time": 1.0, **({"measure": 0} if field == "beats" else {"name": "Earlier"})},
+        ],
+    }
+    with pytest.raises(repair.RepairPlanningError) as caught:
+        _plan(
+            repair,
+            document,
+            source_kind="timeline",
+            rule_code=rule_code,
+        )
+    assert caught.value.code == error_code
+
+
+def test_timeline_repair_rejects_tampered_ordering_instructions(repair):
+    document = {
+        "beats": [
+            {"time": 2.0, "measure": 2},
+            {"time": 1.0, "measure": 1},
+        ],
+        "sections": [],
+    }
+    raw = _raw(document)
+    plan = _plan(
+        repair,
+        document,
+        source_kind="timeline",
+        rule_code="timeline.beats-out-of-order",
     )
     tampered = copy.deepcopy(plan)
     tampered["actions"][0]["operations"][0]["sorted_indices"] = [0, 1]

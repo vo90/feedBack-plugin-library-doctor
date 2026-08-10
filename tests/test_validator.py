@@ -1104,6 +1104,14 @@ def test_song_timeline_order_and_duration_are_checked(tmp_path, validator):
     assert beat_order["severity"] == "error"
     assert beat_order["time"] == -1.0
     assert beat_order["location"] == "song_timeline.json:beats[1]"
+    assert beat_order["rule"]["repairability"] == "safe_candidate"
+    assert "Preserve every marker" in beat_order["rule"]["guidance"]
+    section_order = next(
+        item for item in report["findings"]
+        if item["code"] == "timeline.sections-out-of-order"
+    )
+    assert section_order["rule"]["repairability"] == "safe_candidate"
+    assert "equal-time markers" in section_order["rule"]["guidance"]
 
 
 def test_legacy_embedded_timeline_is_checked_per_arrangement(tmp_path, validator):

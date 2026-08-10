@@ -26,7 +26,7 @@ from typing import Iterator
 import yaml
 
 
-REPAIR_CATALOG_VERSION = "repairs-9"
+REPAIR_CATALOG_VERSION = "repairs-10"
 REPAIR_PLAN_SCHEMA = "library_doctor.repair_plan.v1"
 MAX_REPAIR_TEXT_BYTES = 64 * 1024 * 1024
 MAX_REPAIR_STRUCTURE_ITEMS = 2_000_000
@@ -286,6 +286,32 @@ class StableSortLyricCues:
         }
 
 
+@dataclass(frozen=True)
+class StableSortTimelineMarkers:
+    field: str
+    expected_length: int
+    original_sha256: str
+    sorted_sha256: str
+    sorted_indices: tuple[int, ...]
+    moved_count: int
+
+    @property
+    def remove_indices(self) -> tuple[int, ...]:
+        return ()
+
+    def to_dict(self) -> dict:
+        return {
+            "operation": "stable_sort_timeline_markers",
+            "array_path": [self.field],
+            "field": self.field,
+            "expected_length": self.expected_length,
+            "original_sha256": self.original_sha256,
+            "sorted_sha256": self.sorted_sha256,
+            "sorted_indices": list(self.sorted_indices),
+            "moved_count": self.moved_count,
+        }
+
+
 _REPAIR_DEFINITIONS = (
     RepairDefinition(
         rule_code="chart.duplicate-note",
@@ -498,6 +524,29 @@ _REPAIR_DEFINITIONS = (
         ),
     ),
     RepairDefinition(
+        rule_code="timeline.beats-out-of-order",
+        action_kind="reorder_beat_markers",
+        source_kind="timeline",
+        item_name="beat timeline",
+        safety="safe_automatic",
+        title="Put beat markers in chronological order",
+        description=(
+            "Stable-sort the active song timeline's existing beat markers by "
+            "their stored times. Every marker and property is preserved, and "
+            "markers with equal times keep their authored relative order."
+        ),
+        player_result=(
+            "FeedBack receives the same beat and measure instructions in "
+            "chronological order, so rhythm-grid searches and measure tracking "
+            "no longer jump backward."
+        ),
+        user_value=(
+            "The highway gets a predictable rhythm grid without deleting, "
+            "retiming, or inventing any beat marker."
+        ),
+        change_kind="reorder",
+    ),
+    RepairDefinition(
         rule_code="timeline.duplicate-section",
         action_kind="remove_exact_duplicate_section_markers",
         source_kind="timeline",
@@ -518,6 +567,29 @@ _REPAIR_DEFINITIONS = (
             "FeedBack receives clean section and navigation data without changing "
             "any authored label or time and without guessing between conflicting data."
         ),
+    ),
+    RepairDefinition(
+        rule_code="timeline.sections-out-of-order",
+        action_kind="reorder_section_markers",
+        source_kind="timeline",
+        item_name="section timeline",
+        safety="safe_automatic",
+        title="Put section markers in chronological order",
+        description=(
+            "Stable-sort the active song timeline's existing section markers "
+            "by their stored times. Every name, number, time, and additional "
+            "property is preserved, and equal-time markers keep their authored "
+            "relative order."
+        ),
+        player_result=(
+            "FeedBack receives the same section boundaries in playback order, "
+            "so section labels and navigation no longer jump backward."
+        ),
+        user_value=(
+            "Song navigation and structure follow playback without deleting, "
+            "renaming, or retiming any section marker."
+        ),
+        change_kind="reorder",
     ),
     RepairDefinition(
         rule_code="drums.duplicate-hit",
@@ -566,7 +638,9 @@ _ALL_SAFE_RULE_ORDER = (
     "chart.zero-length-handshape",
     "lyrics.out-of-order",
     "timeline.duplicate-beat",
+    "timeline.beats-out-of-order",
     "timeline.duplicate-section",
+    "timeline.sections-out-of-order",
     "drums.duplicate-hit",
 )
 
@@ -1271,7 +1345,9 @@ class RepairService:
 
         timeline_field = {
             "timeline.duplicate-beat": "beats",
+            "timeline.beats-out-of-order": "beats",
             "timeline.duplicate-section": "sections",
+            "timeline.sections-out-of-order": "sections",
         }.get(rule_code, "beats")
 
         declared = manifest.get("song_timeline")
@@ -2147,8 +2223,12 @@ def plan_json_member(
         operations = _plan_lyric_cue_order(document)
     elif definition.rule_code == "timeline.duplicate-beat":
         operations = _plan_exact_beat_duplicates(document)
+    elif definition.rule_code == "timeline.beats-out-of-order":
+        operations = _plan_timeline_marker_order(document, "beats")
     elif definition.rule_code == "timeline.duplicate-section":
         operations = _plan_exact_section_duplicates(document)
+    elif definition.rule_code == "timeline.sections-out-of-order":
+        operations = _plan_timeline_marker_order(document, "sections")
     elif definition.rule_code == "drums.duplicate-hit":
         operations = _plan_exact_drum_duplicates(document)
     else:  # The explicit catalog dispatch above should make this unreachable.
@@ -2531,6 +2611,58 @@ def _plan_lyric_cue_order(document: list) -> list[StableSortLyricCues]:
     )]
 
 
+def _plan_timeline_marker_order(
+    document: dict,
+    field: str,
+) -> list[StableSortTimelineMarkers]:
+    if field not in {"beats", "sections"}:
+        raise ValueError("field must be beats or sections")
+    markers = document.get(field)
+    if not isinstance(markers, list):
+        return []
+
+    parsed_times = [
+        marker.get("time")
+        for marker in markers
+        if isinstance(marker, dict) and _finite_number(marker.get("time"))
+    ]
+    if not any(
+        current < previous
+        for previous, current in zip(parsed_times, parsed_times[1:])
+    ):
+        return []
+
+    identity_factory = (
+        _valid_beat_identity if field == "beats" else _valid_section_identity
+    )
+    if not all(identity_factory(marker) is not None for marker in markers):
+        marker_name = "beat" if field == "beats" else "section"
+        raise RepairPlanningError(
+            f"invalid_{marker_name}_timeline",
+            f"The out-of-order {marker_name} timeline also contains an invalid "
+            "marker, so Library Doctor will not guess how to reorder it.",
+        )
+
+    sorted_indices = tuple(sorted(
+        range(len(markers)), key=lambda index: markers[index]["time"]
+    ))
+    moved_count = sum(
+        index != original_index
+        for index, original_index in enumerate(sorted_indices)
+    )
+    if not moved_count:
+        return []
+    sorted_markers = [markers[index] for index in sorted_indices]
+    return [StableSortTimelineMarkers(
+        field=field,
+        expected_length=len(markers),
+        original_sha256=hashlib.sha256(_canonical_json(markers)).hexdigest(),
+        sorted_sha256=hashlib.sha256(_canonical_json(sorted_markers)).hexdigest(),
+        sorted_indices=sorted_indices,
+        moved_count=moved_count,
+    )]
+
+
 def _note_arrays(document: dict) -> Iterator[tuple[tuple[str | int, ...], list]]:
     yield from _arrangement_arrays(document, "notes")
 
@@ -2824,6 +2956,9 @@ def _apply_operation(
     if operation.get("operation") == "stable_sort_bend_points":
         _apply_bend_point_sort_operation(document, operation, reordered)
         return
+    if operation.get("operation") == "stable_sort_timeline_markers":
+        _apply_timeline_marker_sort_operation(document, operation, reordered)
+        return
     if operation.get("operation") == "delete_notes_matching_chords":
         _apply_note_chord_delete_operation(document, operation, removed)
         return
@@ -3000,6 +3135,72 @@ def _apply_lyric_cue_sort_operation(
         raise RepairPlanningError("invalid_plan", "The repair preview is invalid.")
     document[:] = sorted_cues
     reordered.add(())
+
+
+def _apply_timeline_marker_sort_operation(
+    document: dict,
+    operation: dict,
+    reordered: set[tuple[str | int, ...]],
+) -> None:
+    field = operation.get("field")
+    if (
+        field not in {"beats", "sections"}
+        or operation.get("array_path") != [field]
+    ):
+        raise RepairPlanningError("invalid_plan", "The repair preview is invalid.")
+    path = (field,)
+    if path in reordered:
+        raise RepairPlanningError("invalid_plan", "The repair preview is invalid.")
+    markers = _value_at_path(document, path)
+    if (
+        not isinstance(markers, list)
+        or operation.get("expected_length") != len(markers)
+        or len(markers) < 2
+    ):
+        raise RepairPlanningError(
+            "source_changed",
+            "The song timeline changed after this preview. Review the safe fix "
+            "again before applying it.",
+        )
+    identity_factory = (
+        _valid_beat_identity if field == "beats" else _valid_section_identity
+    )
+    if not all(identity_factory(marker) is not None for marker in markers):
+        raise RepairPlanningError(
+            "source_changed",
+            "The song timeline changed after this preview. Review the safe fix "
+            "again before applying it.",
+        )
+    original_digest = hashlib.sha256(_canonical_json(markers)).hexdigest()
+    if operation.get("original_sha256") != original_digest:
+        raise RepairPlanningError(
+            "source_changed",
+            "The song timeline changed after this preview. Review the safe fix "
+            "again before applying it.",
+        )
+    sorted_indices = list(sorted(
+        range(len(markers)), key=lambda index: markers[index]["time"]
+    ))
+    declared_indices = operation.get("sorted_indices")
+    moved_count = sum(
+        index != original_index
+        for index, original_index in enumerate(sorted_indices)
+    )
+    if (
+        not moved_count
+        or not isinstance(declared_indices, list)
+        or any(not _integer(index) for index in declared_indices)
+        or declared_indices != sorted_indices
+        or not _integer(operation.get("moved_count"))
+        or operation["moved_count"] != moved_count
+    ):
+        raise RepairPlanningError("invalid_plan", "The repair preview is invalid.")
+    sorted_markers = [markers[index] for index in sorted_indices]
+    sorted_digest = hashlib.sha256(_canonical_json(sorted_markers)).hexdigest()
+    if operation.get("sorted_sha256") != sorted_digest:
+        raise RepairPlanningError("invalid_plan", "The repair preview is invalid.")
+    markers[:] = sorted_markers
+    reordered.add(path)
 
 
 def _apply_note_chord_delete_operation(
@@ -3195,7 +3396,8 @@ def _musical_position_count(
     document,
     operations: list[
         DeleteArrayItems | DeleteNotesMatchingChords | StableSortBendPoints
-        | StableSortLyricCues | DeleteRedundantZeroLengthHandshapes
+        | StableSortLyricCues | StableSortTimelineMarkers
+        | DeleteRedundantZeroLengthHandshapes
     ],
     rule_code: str,
 ) -> int:
@@ -3209,6 +3411,17 @@ def _musical_position_count(
                 "t": operation.note_time,
                 "s": operation.string,
             }))
+        elif isinstance(operation, StableSortTimelineMarkers):
+            markers = _value_at_path(document, (operation.field,))
+            for destination_index, source_index in enumerate(
+                operation.sorted_indices
+            ):
+                if destination_index == source_index:
+                    continue
+                positions.add(_canonical_json({
+                    "timeline": operation.field,
+                    "time": markers[source_index]["time"],
+                }))
         elif isinstance(operation, DeleteArrayItems):
             values = _value_at_path(document, operation.array_path)
             for group in operation.duplicate_groups:
@@ -3356,8 +3569,8 @@ def _summary(
     list_label = "list" if arrays_affected == 1 else "lists"
     if change_kind == "reorder":
         return (
-            f"Put {change_count} {item_label} into chronological point order "
-            f"across {arrays_affected} {list_label}; preserve every bend point."
+            f"Put {change_count} {item_label} into chronological order across "
+            f"{arrays_affected} {list_label}; preserve every stored entry and property."
         )
     if change_kind == "remove_redundant":
         return (

@@ -25,7 +25,7 @@ from jsonschema import Draft202012Validator
 
 
 SPEC_REVISION = "52548b742f64c2a35052a141976ea1b7889f4b1a"
-VALIDATOR_VERSION = f"rules-17:feedpak-{SPEC_REVISION}"
+VALIDATOR_VERSION = f"rules-18:feedpak-{SPEC_REVISION}"
 SUPPORTED_MAJOR = 1
 SCHEMA_DIR = Path(__file__).resolve().parent / "schemas"
 MAX_TEXT_BYTES = 64 * 1024 * 1024
@@ -145,7 +145,9 @@ _SAFE_REPAIR_CANDIDATES = {
     "chart.bend-points-out-of-order",
     "lyrics.out-of-order",
     "timeline.duplicate-beat",
+    "timeline.beats-out-of-order",
     "timeline.duplicate-section",
+    "timeline.sections-out-of-order",
     "drums.duplicate-hit",
 }
 
@@ -435,10 +437,11 @@ def rule_metadata(code: str, severity: str = "warning", category: str = "validat
     elif code in {
         "timeline.beats-out-of-order", "timeline.sections-out-of-order"
     }:
-        repairability = "conditional"
+        repairability = "safe_candidate"
         guidance = (
-            "Review the first backward jump together with duplicate or conflicting "
-            "timestamp findings. Reorder only when every marker is otherwise valid."
+            "Put the existing markers in chronological order only when every marker "
+            "is otherwise valid. Preserve every marker and property, and keep "
+            "equal-time markers in their authored relative order."
         )
     elif code == "timeline.duplicate-beat":
         repairability = "safe_candidate"

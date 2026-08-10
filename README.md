@@ -102,7 +102,8 @@ The repair allowlist removes exact duplicate standalone notes, members inside
 one chord, complete chord events, anchors, handshapes, beat markers, section
 markers, and drum hits. It can also remove a standalone note that exactly
 repeats one explicit member of a chord and put out-of-order bend points and
-lyric cues into chronological order without removing any bend point or lyric cue.
+lyric cues, beat markers, and section markers into chronological order without
+removing any stored entry.
 Ordinary duplicates keep the first entry and delete only later copies whose
 complete JSON properties and values match within the same event array or chord.
 For a note that repeats a chord member, the complete chord is preserved and the
@@ -122,11 +123,14 @@ declared by the manifest use the same safeguards.
 For beats and sections, the complete song-wide timeline sidecar is repaired when
 it is the active FeedBack source. Otherwise, Library Doctor follows FeedBack's
 legacy fallback independently for each timeline type and repairs only the first
-active arrangement-embedded beat or section grid. It keeps the first marker and
-removes only later copies whose complete stored properties match. For beats this
-includes time and measure; for sections it includes name, time, optional number,
-and any future properties. Markers at the same time with different data remain
-unchanged and visible for manual review.
+active arrangement-embedded beat or section grid. Exact-duplicate repairs keep
+the first marker and remove only later copies whose complete stored properties
+match. Ordering repairs stable-sort every otherwise-valid marker by its existing
+time without changing any value; equal-time markers retain their authored
+relative order. For beats, validity includes time and measure; for sections it
+includes name, time, optional number, and any future properties. Markers at the
+same time with different data remain present and are never chosen between or
+deleted by the ordering repair.
 
 Zero-length handshapes use a narrower safety rule because FeedBack can synthesize
 a chord from an unmatched handshape onset. Library Doctor removes one only when

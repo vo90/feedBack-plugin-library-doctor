@@ -7,6 +7,7 @@ import time
 import zipfile
 from pathlib import Path
 
+import pytest
 import yaml
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -1027,6 +1028,210 @@ def test_duplicate_section_repair_uses_active_sidecar_and_leaves_conflicts_for_r
     assert restored.status_code == 200
     assert timeline_path.read_bytes() == timeline_original
     assert arrangement_path.read_bytes() == dormant_original
+    client.close()
+
+
+@pytest.mark.parametrize(
+    ("field", "rule_code", "markers"),
+    [
+        (
+            "beats",
+            "timeline.beats-out-of-order",
+            [
+                {"time": 5.0, "measure": 2},
+                {"time": 1.0, "measure": 1},
+                {"time": 1.0, "measure": -1},
+                {"time": 3.0, "measure": -1},
+            ],
+        ),
+        (
+            "sections",
+            "timeline.sections-out-of-order",
+            [
+                {"time": 5.0, "name": "Outro", "number": 1},
+                {"time": 1.0, "name": "Intro", "number": 1},
+                {"time": 1.0, "name": "Count-in", "number": 2},
+                {"time": 3.0, "name": "Verse", "number": 1},
+            ],
+        ),
+    ],
+)
+def test_timeline_order_repair_is_lossless_validated_and_reversible(
+    tmp_path, field, rule_code, markers,
+):
+    client, library = _client(tmp_path)
+    package = _valid_package(library)
+    manifest_path = package / "manifest.yaml"
+    manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    manifest["song_timeline"] = "song_timeline.json"
+    manifest_path.write_text(
+        yaml.safe_dump(manifest, sort_keys=False), encoding="utf-8"
+    )
+    timeline = {"version": 1, "beats": [], "sections": [], field: markers}
+    timeline_path = package / "song_timeline.json"
+    original = json.dumps(timeline).encode("utf-8")
+    timeline_path.write_bytes(original)
+
+    client.post("/api/plugins/library_doctor/scan")
+    _wait_for_scan(client)
+    report = client.get("/api/plugins/library_doctor/results").json()["items"][0]
+    finding = next(item for item in report["findings"] if item["code"] == rule_code)
+    assert finding["rule"]["repairability"] == "safe_candidate"
+
+    preview = client.post(
+        "/api/plugins/library_doctor/repair/preview",
+        json={"package": "Artist/Song.feedpak", "rule_code": rule_code},
+    )
+    plan = preview.json()
+
+    assert preview.status_code == 200
+    assert plan["available"] is True
+    assert plan["change_kind"] == "reorder"
+    assert plan["change_count"] == 1
+    assert plan["removed_count"] == 0
+    assert plan["arrays_affected"] == 1
+    assert plan["musical_positions"] == 3
+
+    applied = client.post(
+        "/api/plugins/library_doctor/repair/apply",
+        json={
+            "package": "Artist/Song.feedpak",
+            "rule_code": rule_code,
+            "plan_id": plan["plan_id"],
+        },
+    )
+
+    assert applied.status_code == 200
+    result = applied.json()
+    repaired = json.loads(timeline_path.read_text(encoding="utf-8"))
+    assert repaired[field] == [markers[1], markers[2], markers[3], markers[0]]
+    assert not any(
+        item["code"] == rule_code for item in result["report"]["findings"]
+    )
+    backups = list(
+        (tmp_path / "config" / "library_doctor" / "repair_backups").glob("*.zip")
+    )
+    assert len(backups) == 1
+    with zipfile.ZipFile(backups[0]) as backup:
+        metadata = json.loads(backup.read("repair.json"))
+    assert metadata["summary"]["change_count"] == 1
+    assert metadata["summary"]["removed_count"] == 0
+
+    restored = client.post(
+        "/api/plugins/library_doctor/repair/restore",
+        json={
+            "package": "Artist/Song.feedpak",
+            "backup_id": result["backup_id"],
+        },
+    )
+    assert restored.status_code == 200
+    assert timeline_path.read_bytes() == original
+    assert any(
+        item["code"] == rule_code
+        for item in restored.json()["report"]["findings"]
+    )
+    client.close()
+
+
+def test_timeline_order_repair_blocks_an_invalid_marker_without_a_backup(tmp_path):
+    client, library = _client(tmp_path)
+    package = _valid_package(library)
+    manifest_path = package / "manifest.yaml"
+    manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    manifest["song_timeline"] = "song_timeline.json"
+    manifest_path.write_text(
+        yaml.safe_dump(manifest, sort_keys=False), encoding="utf-8"
+    )
+    timeline_path = package / "song_timeline.json"
+    original = json.dumps({
+        "version": 1,
+        "beats": [
+            {"time": 3.0, "measure": 1},
+            {"time": 2.0, "measure": "invalid"},
+            {"time": 1.0, "measure": 0},
+        ],
+        "sections": [],
+    }).encode("utf-8")
+    timeline_path.write_bytes(original)
+    client.post("/api/plugins/library_doctor/scan")
+    _wait_for_scan(client)
+
+    preview = client.post(
+        "/api/plugins/library_doctor/repair/preview",
+        json={
+            "package": "Artist/Song.feedpak",
+            "rule_code": "timeline.beats-out-of-order",
+        },
+    )
+    plan = preview.json()
+
+    assert preview.status_code == 200
+    assert plan["available"] is False
+    assert plan["blockers"][0]["code"] == "invalid_beat_timeline"
+    assert timeline_path.read_bytes() == original
+    assert not (tmp_path / "config" / "library_doctor" / "repair_backups").exists()
+    client.close()
+
+
+def test_fix_all_removes_timeline_duplicates_before_reordering(tmp_path):
+    client, library = _client(tmp_path)
+    package = _valid_package(library)
+    manifest_path = package / "manifest.yaml"
+    manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    manifest["song_timeline"] = "song_timeline.json"
+    manifest_path.write_text(
+        yaml.safe_dump(manifest, sort_keys=False), encoding="utf-8"
+    )
+    later = {"time": 2.0, "measure": 2}
+    earlier = {"time": 0.0, "measure": 1}
+    timeline_path = package / "song_timeline.json"
+    original = json.dumps({
+        "version": 1,
+        "beats": [later, earlier, dict(later)],
+        "sections": [],
+    }).encode("utf-8")
+    timeline_path.write_bytes(original)
+    client.post("/api/plugins/library_doctor/scan")
+    _wait_for_scan(client)
+
+    preview = client.post(
+        "/api/plugins/library_doctor/repair/all/preview",
+        json={"package": "Artist/Song.feedpak"},
+    )
+    plan = preview.json()
+
+    assert preview.status_code == 200
+    assert plan["available"] is True
+    assert plan["rule_codes"] == [
+        "timeline.duplicate-beat",
+        "timeline.beats-out-of-order",
+    ]
+    assert plan["change_count"] == 2
+    assert plan["removed_count"] == 1
+
+    applied = client.post(
+        "/api/plugins/library_doctor/repair/all/apply",
+        json={"package": "Artist/Song.feedpak", "plan_id": plan["plan_id"]},
+    )
+    assert applied.status_code == 200
+    assert json.loads(timeline_path.read_text(encoding="utf-8"))["beats"] == [
+        earlier,
+        later,
+    ]
+    assert not ({
+        "timeline.duplicate-beat",
+        "timeline.beats-out-of-order",
+    } & {item["code"] for item in applied.json()["report"]["findings"]})
+
+    restored = client.post(
+        "/api/plugins/library_doctor/repair/restore",
+        json={
+            "package": "Artist/Song.feedpak",
+            "backup_id": applied.json()["backup_id"],
+        },
+    )
+    assert restored.status_code == 200
+    assert timeline_path.read_bytes() == original
     client.close()
 
 

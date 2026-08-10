@@ -35,7 +35,7 @@ def test_manifest_uses_stable_plugin_namespace_and_existing_files():
     assert manifest["id"] == "library_doctor"
     assert re.fullmatch(r"[a-z][a-z0-9_]*", manifest["id"])
     assert manifest["name"] == "Library Doctor"
-    assert manifest["version"] == "0.20.0"
+    assert manifest["version"] == "0.21.0"
     assert manifest["private"] is False
     assert manifest["nav"] == {
         "label": "Library Doctor",
@@ -121,8 +121,8 @@ def test_screen_requires_a_preview_before_applying_supported_repairs():
     assert "request('/repair/history" in script
     assert "request('/repair/restore'" in script
     assert "function repairChangeCount" in script
-    assert "without removing any bend points" in script
-    assert "Every point and stored property is kept" in script
+    assert "without deleting or altering any authored entries" in script
+    assert "Every entry and stored property is kept" in script
 
 
 def test_screen_groups_cascading_duration_and_matching_muted_findings():
