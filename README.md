@@ -242,9 +242,11 @@ package report. The backup remains available afterward.
   references, missing realization assets, optional SHA-256 mismatches, invalid
   automation timing, and tone changes that reference undeclared rigs.
 - Guitar/bass notes outside the current 3D highway's 24-fret and eight-string
-  limits, strings without tuning entries, negative sustains, and sustains that
-  run beyond the song duration. Compatibility limits are warnings when the
-  Feedpak format itself permits the value.
+  limits, strings without tuning entries, unsupported negative frets, negative
+  sustains, and sustains that run beyond the song duration. FeedBack's `f: -1`
+  fret-hand-mute sentinel is accepted only with a real `mt: true` or `fhm: true`
+  marker; other negative frets remain errors. Compatibility limits are warnings
+  when the Feedpak format itself permits the value.
 - Guitar/bass capo and tuning declarations beyond the current highway's fret or
   string capacity.
 - Slides that are ambiguous, invalid, cannot animate, target the starting fret,

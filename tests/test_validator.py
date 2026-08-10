@@ -407,6 +407,31 @@ def test_tab_bounds_order_sustain_and_technique_types_are_checked(tmp_path, vali
     assert finding["category"] == "feedback_compatibility"
 
 
+def test_only_boolean_fret_hand_mutes_support_the_negative_one_fret_sentinel(
+    tmp_path, validator,
+):
+    arrangement = {
+        "notes": [
+            {"t": 1.0, "s": 0, "f": -1, "mt": True},
+            {"t": 2.0, "s": 1, "f": -1, "fhm": True},
+            {"t": 3.0, "s": 2, "f": -1, "pm": True},
+            {"t": 4.0, "s": 3, "f": -2, "mt": True},
+            {"t": 5.0, "s": 4, "f": -1, "mt": "true"},
+        ],
+        "chords": [],
+    }
+
+    report = validator.validate_feedpak(_package(tmp_path, arrangement=arrangement))
+    negative = next(
+        item for item in report["findings"]
+        if item["code"] == "chart.negative-fret"
+    )
+
+    assert negative["affected_count"] == 3
+    assert "-1 fret-hand-mute marker" in negative["message"]
+    assert "chart.technique-not-boolean" in _codes(report)
+
+
 def test_slide_and_bend_curves_are_checked_against_highway_behavior(tmp_path, validator):
     arrangement = {
         "notes": [
@@ -713,7 +738,7 @@ def test_anchor_and_handshape_geometry_is_checked(tmp_path, validator):
 def test_root_and_mastery_copies_do_not_inflate_chart_event_counts(
     tmp_path, validator
 ):
-    note = {"t": 1.0, "s": 0, "f": -1, "mt": True}
+    note = {"t": 1.0, "s": 0, "f": -2, "mt": True}
     chord = {"t": 1.0, "id": 0, "notes": []}
     handshape = {"chord_id": 0, "start_time": 2.0, "end_time": 1.5}
     level = {
@@ -738,7 +763,7 @@ def test_root_and_mastery_copies_do_not_inflate_chart_event_counts(
     report = validator.validate_feedpak(_package(tmp_path, arrangement=arrangement))
     messages = {item["code"]: item["message"] for item in report["findings"]}
 
-    assert "1 fretted note(s)" in messages["chart.negative-fret"]
+    assert "1 note(s)" in messages["chart.negative-fret"]
     assert "1 chord event(s)" in messages["chart.invisible-chord"]
     assert "1 handshape(s)" in messages["chart.invalid-handshape-span"]
 
