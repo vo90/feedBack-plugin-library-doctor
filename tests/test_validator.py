@@ -459,7 +459,7 @@ def test_slide_and_bend_curves_are_checked_against_highway_behavior(tmp_path, va
         "chart.slide-beyond-highway",
         "chart.slide-without-sustain",
         "chart.open-string-slide",
-        "chart.no-op-slide",
+        "review.same-fret-slide",
         "chart.bend-points-out-of-order",
         "chart.bend-point-outside-sustain",
         "chart.bend-exceeds-peak",
@@ -477,6 +477,89 @@ def test_slide_and_bend_curves_are_checked_against_highway_behavior(tmp_path, va
     assert "without deleting or inventing any points" in (
         bend_finding["rule"]["fix_benefit"]
     )
+
+
+def test_isolated_same_fret_slide_requests_authoring_review(tmp_path, validator):
+    arrangement = {
+        "notes": [{"t": 1.0, "s": 1, "f": 7, "sus": 0.5, "sl": 7}],
+        "chords": [],
+    }
+
+    report = validator.validate_feedpak(_package(tmp_path, arrangement=arrangement))
+
+    finding = next(
+        item for item in report["findings"]
+        if item["code"] == "review.same-fret-slide"
+    )
+    assert "chart.no-op-slide" not in _codes(report)
+    assert finding["severity"] == "info"
+    assert finding["category"] == "authoring_review"
+    assert finding["rule"]["repairability"] == "manual"
+    assert finding["rule"]["confidence"] == "medium"
+    assert "without a linked slide or partial chord-slide context" in finding["message"]
+
+
+@pytest.mark.parametrize(
+    "notes",
+    [
+        # A held leg flowing into a real outgoing slide, as used by the B'z
+        # chart that motivated the contextual rule.
+        [
+            {"t": 1.0, "s": 0, "f": 14, "sus": 0.2, "sl": 14},
+            {"t": 1.2, "s": 0, "f": 14, "sus": 0.3, "sl": 12},
+        ],
+        # A stationary leg immediately after a real incoming slide.
+        [
+            {"t": 1.0, "s": 0, "f": 12, "sus": 0.5, "sl": 14},
+            {"t": 1.5, "s": 0, "f": 14, "sus": 0.25, "sl": 14},
+        ],
+        # An explicitly linked same-fret continuation.
+        [
+            {"t": 1.0, "s": 0, "f": 14, "sus": 0.2, "sl": 14, "ln": True},
+            {"t": 1.2, "s": 0, "f": 14, "sus": 0.3},
+        ],
+    ],
+)
+def test_linked_same_fret_slide_legs_are_not_reported(tmp_path, validator, notes):
+    report = validator.validate_feedpak(_package(
+        tmp_path,
+        arrangement={"notes": notes, "chords": []},
+    ))
+
+    assert "review.same-fret-slide" not in _codes(report)
+
+
+def test_stationary_member_of_partial_chord_slide_is_not_reported(
+    tmp_path, validator,
+):
+    arrangement = {
+        "notes": [],
+        "chords": [{
+            "t": 1.0,
+            "notes": [
+                {"s": 1, "f": 5, "sus": 0.5, "sl": 7},
+                {"s": 2, "f": 7, "sus": 0.5, "sl": 7},
+            ],
+        }],
+    }
+
+    report = validator.validate_feedpak(_package(tmp_path, arrangement=arrangement))
+
+    assert "review.same-fret-slide" not in _codes(report)
+
+
+def test_slide_away_and_back_uses_two_real_legs_without_review(tmp_path, validator):
+    arrangement = {
+        "notes": [
+            {"t": 1.0, "s": 0, "f": 14, "sus": 0.5, "sl": 12},
+            {"t": 1.5, "s": 0, "f": 12, "sus": 0.5, "sl": 14},
+        ],
+        "chords": [],
+    }
+
+    report = validator.validate_feedpak(_package(tmp_path, arrangement=arrangement))
+
+    assert "review.same-fret-slide" not in _codes(report)
 
 
 def test_invalid_slide_and_negative_bend_values_are_errors(tmp_path, validator):

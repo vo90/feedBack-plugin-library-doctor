@@ -251,9 +251,12 @@ package report. The backup remains available afterward.
   value.
 - Guitar/bass capo and tuning declarations beyond the current highway's fret or
   string capacity.
-- Slides that are ambiguous, invalid, cannot animate, target the starting fret,
-  start open, or leave the current highway; negative, malformed, or inconsistent
-  bend data; non-boolean technique flags; and mutually exclusive technique pairs.
+- Slides that are ambiguous, invalid, cannot animate, start open, or leave the
+  current highway; negative, malformed, or inconsistent bend data; non-boolean
+  technique flags; and mutually exclusive technique pairs. An isolated slide
+  marker that targets its starting fret is an authoring-review suggestion, not
+  a definite fault. Same-fret markers participating in a linked slide passage
+  or a partial chord slide are recognized and left unreported.
 - Missing chord-template references, invisible chords, template/chord fret
   disagreements, invalid template fret/finger data, and templates that exceed
   the current highway's eight-string display limit.

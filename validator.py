@@ -14,6 +14,7 @@ import math
 import os
 import re
 import zipfile
+from bisect import bisect_left, bisect_right
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from fractions import Fraction
@@ -25,7 +26,7 @@ from jsonschema import Draft202012Validator
 
 
 SPEC_REVISION = "52548b742f64c2a35052a141976ea1b7889f4b1a"
-VALIDATOR_VERSION = f"rules-21:feedpak-{SPEC_REVISION}"
+VALIDATOR_VERSION = f"rules-22:feedpak-{SPEC_REVISION}"
 SUPPORTED_MAJOR = 1
 SCHEMA_DIR = Path(__file__).resolve().parent / "schemas"
 MAX_TEXT_BYTES = 64 * 1024 * 1024
@@ -50,6 +51,10 @@ TIMELINE_SIGNIFICANT_OVERRUN_SECONDS = 5.0
 BEND_CURVE_TOLERANCE_SECONDS = 0.005
 NEAR_SIMULTANEOUS_NOTE_SECONDS = 0.010
 SUSTAIN_OVERLAP_TOLERANCE_SECONDS = 0.05
+# Match the 3D highway's NEXT_ON_STRING_T_EPS. The renderer uses this window
+# when it decides whether one sustained note links into the next note on the
+# same string, including hold-to-slide and multi-leg slide passages.
+SLIDE_LINK_TOLERANCE_SECONDS = 0.06
 EXTREME_CHORD_SPAN_FRETS = 8
 HIGHWAY_MAX_FRET = 24
 HIGHWAY_MAX_STRINGS = 8
@@ -88,6 +93,7 @@ _RULE_TITLES = {
     "chart.string-conflict": "Overlapping notes on one string",
     "chart.coincident-chords": "Chords start at the same time",
     "chart.chord-string-duplicate": "Chord repeats a string",
+    "review.same-fret-slide": "Same-fret slide needs review",
     "review.impossible-chord-fingering": "Impossible chord fingering",
     "lyrics.too-few-line-breaks": "Lyrics may be missing line breaks",
     "lyrics.empty-text": "Lyric entry has no visible text",
@@ -286,6 +292,10 @@ _RULE_EXPERIENCE = {
     "review.near-simultaneous-string-notes": (
         "Notes that are only milliseconds apart may look like a chord but require an unintended rapid stagger when played.",
         "Confirming or aligning them makes the intended chord or picking pattern clearer to the player.",
+    ),
+    "review.same-fret-slide": (
+        "This slide marker does not move by itself. It may be intentional authoring data, but an isolated marker can show no visible slide in FeedBack.",
+        "Reviewing the surrounding passage confirms whether the stationary marker should remain or whether the intended destination fret needs correction.",
     ),
     "review.impossible-chord-fingering": (
         "The authored fingering asks one finger to occupy incompatible positions, so the chord cannot be held as instructed.",
@@ -1094,6 +1104,19 @@ class _LaneEvent:
 
 
 @dataclass(frozen=True)
+class _SlideEvent:
+    location: str
+    time: float
+    string: int
+    fret: int
+    sustain: float
+    slide_to: int | None
+    link_next: bool
+    standalone: bool
+    chord_index: int | None = None
+
+
+@dataclass(frozen=True)
 class _ChartIssue:
     location: str
     time: float | None = None
@@ -1474,11 +1497,6 @@ class _TabValidator:
                     "chart.open-string-slide", location, time=note_time, string=string,
                     occurrence=note_occurrence,
                 )
-            if fret is not None and fret == slide_target:
-                self._record(
-                    "chart.no-op-slide", location, time=note_time, string=string,
-                    occurrence=note_occurrence,
-                )
 
         for field in NOTE_BOOLEAN_FIELDS:
             if field in raw and not isinstance(raw[field], bool):
@@ -1541,6 +1559,194 @@ class _TabValidator:
             self._record(
                 "chart.bend-exceeds-peak", location, time=note_time, string=string,
                 occurrence=note_occurrence,
+            )
+
+    @staticmethod
+    def _slide_event(raw, location: str, event_time, *, standalone, chord_index=None):
+        if not isinstance(raw, dict):
+            return None
+        note_time = _number(event_time)
+        string = _integer(raw.get("s"))
+        fret = _integer(raw.get("f"))
+        if note_time is None or string is None or fret is None:
+            return None
+        pitched = _integer(raw.get("sl"))
+        unpitched = _integer(raw.get("slu"))
+        slide_to = (
+            pitched if pitched is not None and pitched >= 0
+            else unpitched if unpitched is not None and unpitched >= 0
+            else None
+        )
+        sustain = _number(raw.get("sus", 0))
+        return _SlideEvent(
+            location=location,
+            time=note_time,
+            string=string,
+            fret=fret,
+            sustain=max(0.0, sustain or 0.0),
+            slide_to=slide_to,
+            link_next=raw.get("ln") is True,
+            standalone=standalone,
+            chord_index=chord_index,
+        )
+
+    def _inspect_same_fret_slides(
+        self,
+        *,
+        notes: list,
+        chords: list,
+        notes_path: str,
+        chords_path: str,
+    ) -> None:
+        """Request review only for same-fret slides without known context.
+
+        A same-fret target is not automatically bad data. FeedBack links
+        consecutive sustained notes into multi-leg slides, and chord exporters
+        can mark a stationary string as part of a chord slide while another
+        string moves. This check deliberately recognizes only those concrete
+        contexts; anything else remains a non-repairable authoring question.
+        """
+        if not self.check_fretted:
+            return
+
+        standalone: list[_SlideEvent] = []
+        all_events: list[_SlideEvent] = []
+        chord_events: dict[int, list[_SlideEvent]] = {}
+        for index, raw in enumerate(notes):
+            event = self._slide_event(
+                raw,
+                f"{notes_path}[{index}]",
+                raw.get("t") if isinstance(raw, dict) else None,
+                standalone=True,
+            )
+            if event is not None:
+                standalone.append(event)
+                all_events.append(event)
+
+        for chord_index, chord in enumerate(chords):
+            if not isinstance(chord, dict):
+                continue
+            chord_time = chord.get("t")
+            chord_notes = chord.get("notes")
+            if not isinstance(chord_notes, list):
+                continue
+            for note_index, raw in enumerate(chord_notes):
+                event = self._slide_event(
+                    raw,
+                    f"{chords_path}[{chord_index}].notes[{note_index}]",
+                    chord_time,
+                    standalone=False,
+                    chord_index=chord_index,
+                )
+                if event is not None:
+                    chord_events.setdefault(chord_index, []).append(event)
+                    all_events.append(event)
+
+        candidates = [
+            event for event in all_events
+            if event.slide_to is not None and event.slide_to == event.fret
+        ]
+        if not candidates:
+            return
+
+        standalone_by_string: dict[int, list[_SlideEvent]] = {}
+        for event in standalone:
+            standalone_by_string.setdefault(event.string, []).append(event)
+        for events in standalone_by_string.values():
+            events.sort(key=lambda event: (event.time, event.location))
+        standalone_times = {
+            string: [event.time for event in events]
+            for string, events in standalone_by_string.items()
+        }
+
+        source_ends_by_string: dict[int, list[tuple[float, str, _SlideEvent]]] = {}
+        for event in all_events:
+            if event.sustain <= 0:
+                continue
+            source_ends_by_string.setdefault(event.string, []).append((
+                event.time + event.sustain,
+                event.location,
+                event,
+            ))
+        for events in source_ends_by_string.values():
+            events.sort(key=lambda item: (item[0], item[1]))
+        source_end_times = {
+            string: [item[0] for item in events]
+            for string, events in source_ends_by_string.items()
+        }
+
+        tolerance = SLIDE_LINK_TOLERANCE_SECONDS
+        for candidate in candidates:
+            contextual = False
+
+            # A stationary chord member can intentionally remain involved in
+            # a partial chord slide when another member moves to its fret.
+            if candidate.chord_index is not None:
+                contextual = any(
+                    sibling.location != candidate.location
+                    and sibling.slide_to == candidate.fret
+                    and sibling.slide_to != sibling.fret
+                    for sibling in chord_events.get(candidate.chord_index, [])
+                )
+
+            # As a sustained source, a same-fret marker can be the held leg
+            # immediately before a real outgoing slide (or an explicit linked
+            # continuation) on the same string.
+            if not contextual and candidate.sustain > 0:
+                destinations = standalone_by_string.get(candidate.string, [])
+                times = standalone_times.get(candidate.string, [])
+                end_time = candidate.time + candidate.sustain
+                lo = bisect_left(times, end_time - tolerance)
+                hi = bisect_right(times, end_time + tolerance)
+                contextual = any(
+                    destination.location != candidate.location
+                    and destination.time > candidate.time
+                    and abs(destination.time - end_time) < tolerance
+                    and destination.fret == candidate.fret
+                    and (
+                        candidate.link_next
+                        or (
+                            destination.slide_to is not None
+                            and destination.slide_to != destination.fret
+                        )
+                    )
+                    for destination in destinations[lo:hi]
+                )
+
+            # As a standalone destination, it can be the held leg immediately
+            # after a real incoming slide or an explicit same-fret link.
+            if not contextual and candidate.standalone:
+                source_ends = source_ends_by_string.get(candidate.string, [])
+                end_times = source_end_times.get(candidate.string, [])
+                lo = bisect_left(end_times, candidate.time - tolerance)
+                hi = bisect_right(end_times, candidate.time + tolerance)
+                contextual = any(
+                    source.location != candidate.location
+                    and source.time < candidate.time
+                    and abs(source_end - candidate.time) < tolerance
+                    and (
+                        (
+                            source.slide_to == candidate.fret
+                            and source.slide_to != source.fret
+                        )
+                        or (source.link_next and source.fret == candidate.fret)
+                    )
+                    for source_end, _location, source in source_ends[lo:hi]
+                )
+
+            if contextual:
+                continue
+            self._record(
+                "review.same-fret-slide",
+                candidate.location,
+                time=candidate.time,
+                string=candidate.string,
+                occurrence=(
+                    "same-fret-slide",
+                    _time_key(candidate.time),
+                    candidate.string,
+                    candidate.fret,
+                ),
             )
 
 
@@ -1915,6 +2121,12 @@ class _TabValidator:
                     previous_difficulty = difficulty
 
                 arrays = self._phrase_level_arrays(level, level_location, start, end)
+                self._inspect_same_fret_slides(
+                    notes=arrays["notes"],
+                    chords=arrays["chords"],
+                    notes_path=f"{level_location}.notes",
+                    chords_path=f"{level_location}.chords",
+                )
                 self._inspect_exact_stream_duplicates(
                     chords=arrays["chords"],
                     anchors=arrays["anchors"],
@@ -2100,6 +2312,12 @@ class _TabValidator:
         if self.check_fretted and self.tuning and len(self.tuning) > HIGHWAY_MAX_STRINGS:
             self._record("chart.tuning-beyond-highway", f"{self.relpath}:tuning")
 
+        self._inspect_same_fret_slides(
+            notes=self.notes,
+            chords=self.chords,
+            notes_path=f"{self.relpath}:notes",
+            chords_path=f"{self.relpath}:chords",
+        )
         for index, note in enumerate(self.notes):
             self._inspect_note(note, f"{self.relpath}:notes[{index}]")
         for index, chord in enumerate(self.chords):
@@ -2231,7 +2449,6 @@ class _TabValidator:
                 "chart.open-string-slide", "warning",
                 lambda count: f"{count} slide(s) start at fret 0; the current 3D highway does not animate lateral movement from an open string.",
             ),
-            ("chart.no-op-slide", "warning", lambda count: f"{count} slide(s) target their starting fret and show no movement."),
             (
                 "chart.technique-not-boolean", "error",
                 lambda count: f"{count} technique value(s) are not true/false; FeedBack can interpret strings such as 'false' as enabled.",
@@ -2362,6 +2579,14 @@ class _TabValidator:
                 ),
             )
         review_rules = (
+            (
+                "review.same-fret-slide",
+                lambda count: (
+                    f"{count} isolated slide marker(s) target their starting fret "
+                    "without a linked slide or partial chord-slide context; review "
+                    "whether the marker or its destination fret is intended."
+                ),
+            ),
             (
                 "review.impossible-chord-fingering",
                 lambda count: f"{count} chord template(s) assign one finger to different positive frets at the same time; review the fingering.",
