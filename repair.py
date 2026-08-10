@@ -26,7 +26,7 @@ from typing import Iterator
 import yaml
 
 
-REPAIR_CATALOG_VERSION = "repairs-8"
+REPAIR_CATALOG_VERSION = "repairs-9"
 REPAIR_PLAN_SCHEMA = "library_doctor.repair_plan.v1"
 MAX_REPAIR_TEXT_BYTES = 64 * 1024 * 1024
 MAX_REPAIR_STRUCTURE_ITEMS = 2_000_000
@@ -196,6 +196,44 @@ class DeleteNotesMatchingChords:
 
 
 @dataclass(frozen=True)
+class RedundantHandshapeMatch:
+    handshape_index: int
+    chord_index: int
+    handshape_sha256: str
+    chord_sha256: str
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class DeleteRedundantZeroLengthHandshapes:
+    handshape_array_path: tuple[str | int, ...]
+    chord_array_path: tuple[str | int, ...]
+    expected_handshape_length: int
+    expected_chord_length: int
+    match_groups: tuple[RedundantHandshapeMatch, ...]
+
+    @property
+    def remove_indices(self) -> tuple[int, ...]:
+        return tuple(sorted(
+            (group.handshape_index for group in self.match_groups),
+            reverse=True,
+        ))
+
+    def to_dict(self) -> dict:
+        return {
+            "operation": "delete_redundant_zero_length_handshapes",
+            "handshape_array_path": list(self.handshape_array_path),
+            "chord_array_path": list(self.chord_array_path),
+            "expected_handshape_length": self.expected_handshape_length,
+            "expected_chord_length": self.expected_chord_length,
+            "remove_indices": list(self.remove_indices),
+            "match_groups": [group.to_dict() for group in self.match_groups],
+        }
+
+
+@dataclass(frozen=True)
 class StableSortBendPoints:
     array_path: tuple[str | int, ...]
     expected_length: int
@@ -345,6 +383,31 @@ _REPAIR_DEFINITIONS = (
         user_value=(
             "The highway has one clear shape guide instead of redundant overlay data."
         ),
+    ),
+    RepairDefinition(
+        rule_code="chart.zero-length-handshape",
+        action_kind="remove_redundant_zero_length_handshapes",
+        source_kind="arrangement",
+        item_name="zero-length handshape",
+        safety="safe_automatic",
+        title="Remove redundant zero-length handshapes",
+        description=(
+            "Remove a zero-duration, non-arpeggio handshape only when exactly one "
+            "chord with the same template ID already exists at the exact same time "
+            "in the same event list. Handshapes with unmatched chords, arpeggio "
+            "intent, or additional stored properties are left unchanged."
+        ),
+        player_result=(
+            "The matching authored chord remains at the same time with the same "
+            "shape and playable notes. Only a redundant shape guide that has no "
+            "duration is removed; any handshape that could supply a chord or other "
+            "meaning remains for manual review."
+        ),
+        user_value=(
+            "The chart no longer carries unusable zero-duration overlay records "
+            "where the real chord already provides the complete player instruction."
+        ),
+        change_kind="remove_redundant",
     ),
     RepairDefinition(
         rule_code="chart.note-duplicates-chord",
@@ -500,6 +563,7 @@ _ALL_SAFE_RULE_ORDER = (
     "chart.note-duplicates-chord",
     "chart.duplicate-anchor",
     "chart.duplicate-handshape",
+    "chart.zero-length-handshape",
     "lyrics.out-of-order",
     "timeline.duplicate-beat",
     "timeline.duplicate-section",
@@ -2073,6 +2137,8 @@ def plan_json_member(
         operations = _plan_exact_arrangement_array_duplicates(
             document, "handshapes", _valid_handshape_identity
         )
+    elif definition.rule_code == "chart.zero-length-handshape":
+        operations = _plan_redundant_zero_length_handshapes(document)
     elif definition.rule_code == "chart.note-duplicates-chord":
         operations = _plan_exact_note_chord_duplicates(document)
     elif definition.rule_code == "chart.bend-points-out-of-order":
@@ -2312,6 +2378,61 @@ def _plan_exact_note_chord_duplicates(
     return operations
 
 
+def _plan_redundant_zero_length_handshapes(
+    document: dict,
+) -> list[DeleteRedundantZeroLengthHandshapes]:
+    operations = []
+    unsafe_zero_length_found = False
+    for parent_path, container in _arrangement_containers(document):
+        handshapes = container.get("handshapes")
+        if not isinstance(handshapes, list):
+            continue
+        chords = container.get("chords")
+        match_groups = []
+        for handshape_index, handshape in enumerate(handshapes):
+            if not _reported_zero_length_handshape(handshape):
+                continue
+            handshape_identity = _redundant_zero_length_handshape_identity(handshape)
+            if handshape_identity is None or not isinstance(chords, list):
+                unsafe_zero_length_found = True
+                continue
+            matching_chords = [
+                (chord_index, chord)
+                for chord_index, chord in enumerate(chords)
+                if _chord_matches_zero_length_handshape(chord, handshape)
+            ]
+            if len(matching_chords) != 1:
+                unsafe_zero_length_found = True
+                continue
+            chord_index, chord = matching_chords[0]
+            match_groups.append(RedundantHandshapeMatch(
+                handshape_index=handshape_index,
+                chord_index=chord_index,
+                handshape_sha256=hashlib.sha256(
+                    handshape_identity
+                ).hexdigest(),
+                chord_sha256=hashlib.sha256(
+                    _canonical_json(chord)
+                ).hexdigest(),
+            ))
+        if match_groups:
+            operations.append(DeleteRedundantZeroLengthHandshapes(
+                handshape_array_path=parent_path + ("handshapes",),
+                chord_array_path=parent_path + ("chords",),
+                expected_handshape_length=len(handshapes),
+                expected_chord_length=len(chords),
+                match_groups=tuple(match_groups),
+            ))
+    if unsafe_zero_length_found:
+        raise RepairPlanningError(
+            "zero_length_handshape_requires_review",
+            "At least one zero-length handshape could supply a chord, arpeggio "
+            "intent, or additional authoring data. No zero-length handshapes in "
+            "this arrangement file will be changed automatically.",
+        )
+    return operations
+
+
 def _plan_bend_point_order(document: dict) -> list[StableSortBendPoints]:
     operations = []
     for path, bend_points, note_time, string in _bend_point_arrays(document):
@@ -2472,6 +2593,24 @@ def _arrangement_arrays(
                 ), level_values
 
 
+def _arrangement_containers(
+    document: dict,
+) -> Iterator[tuple[tuple[str | int, ...], dict]]:
+    yield (), document
+    phrases = document.get("phrases")
+    if not isinstance(phrases, list):
+        return
+    for phrase_index, phrase in enumerate(phrases):
+        if not isinstance(phrase, dict):
+            continue
+        levels = phrase.get("levels")
+        if not isinstance(levels, list):
+            continue
+        for level_index, level in enumerate(levels):
+            if isinstance(level, dict):
+                yield ("phrases", phrase_index, "levels", level_index), level
+
+
 def _note_chord_arrays(
     document: dict,
 ) -> Iterator[tuple[tuple[str | int, ...], list, tuple[str | int, ...], list]]:
@@ -2597,6 +2736,38 @@ def _valid_handshape_identity(value) -> bytes | None:
     return _valid_timed_identity(value, "start_time")
 
 
+def _reported_zero_length_handshape(value) -> bool:
+    return (
+        isinstance(value, dict)
+        and _finite_number(value.get("start_time"))
+        and value["start_time"] >= 0
+        and _finite_number(value.get("end_time"))
+        and value["end_time"] == value["start_time"]
+    )
+
+
+def _redundant_zero_length_handshape_identity(value) -> bytes | None:
+    if (
+        not _reported_zero_length_handshape(value)
+        or not _integer(value.get("chord_id"))
+        or value["chord_id"] < 0
+        or value.get("arp", False) is not False
+        or not set(value).issubset({"chord_id", "start_time", "end_time", "arp"})
+    ):
+        return None
+    return _canonical_json(value)
+
+
+def _chord_matches_zero_length_handshape(chord, handshape) -> bool:
+    return (
+        isinstance(chord, dict)
+        and _finite_number(chord.get("t"))
+        and chord["t"] == handshape["start_time"]
+        and _integer(chord.get("id"))
+        and chord["id"] == handshape["chord_id"]
+    )
+
+
 def _explicit_chord_note_identity(chord, chord_note) -> bytes | None:
     if (
         not isinstance(chord, dict)
@@ -2655,6 +2826,9 @@ def _apply_operation(
         return
     if operation.get("operation") == "delete_notes_matching_chords":
         _apply_note_chord_delete_operation(document, operation, removed)
+        return
+    if operation.get("operation") == "delete_redundant_zero_length_handshapes":
+        _apply_zero_length_handshape_delete_operation(document, operation, removed)
         return
     if operation.get("operation") != "delete_array_items":
         raise RepairPlanningError("invalid_plan", "The repair preview is invalid.")
@@ -2926,11 +3100,102 @@ def _apply_note_chord_delete_operation(
         del notes[index]
 
 
+def _apply_zero_length_handshape_delete_operation(
+    document: dict,
+    operation: dict,
+    removed: set[tuple[tuple[str | int, ...], int]],
+) -> None:
+    raw_handshape_path = operation.get("handshape_array_path")
+    raw_chord_path = operation.get("chord_array_path")
+    if (
+        not isinstance(raw_handshape_path, list)
+        or not raw_handshape_path
+        or not isinstance(raw_chord_path, list)
+        or not raw_chord_path
+    ):
+        raise RepairPlanningError("invalid_plan", "The repair preview is invalid.")
+    handshape_path = tuple(raw_handshape_path)
+    chord_path = tuple(raw_chord_path)
+    if (
+        handshape_path[-1] != "handshapes"
+        or chord_path != handshape_path[:-1] + ("chords",)
+    ):
+        raise RepairPlanningError("invalid_plan", "The repair preview is invalid.")
+    handshapes = _value_at_path(document, handshape_path)
+    chords = _value_at_path(document, chord_path)
+    if (
+        not isinstance(handshapes, list)
+        or not isinstance(chords, list)
+        or operation.get("expected_handshape_length") != len(handshapes)
+        or operation.get("expected_chord_length") != len(chords)
+    ):
+        raise RepairPlanningError(
+            "source_changed",
+            "The song changed after this preview. Review the safe fix again before applying it.",
+        )
+
+    indexes = []
+    match_groups = operation.get("match_groups")
+    if not isinstance(match_groups, list) or not match_groups:
+        raise RepairPlanningError("invalid_plan", "The repair preview is invalid.")
+    for group in match_groups:
+        if not isinstance(group, dict):
+            raise RepairPlanningError("invalid_plan", "The repair preview is invalid.")
+        handshape_index = group.get("handshape_index")
+        chord_index = group.get("chord_index")
+        handshape_digest = group.get("handshape_sha256")
+        chord_digest = group.get("chord_sha256")
+        if (
+            not _integer(handshape_index)
+            or not _integer(chord_index)
+            or not isinstance(handshape_digest, str)
+            or not isinstance(chord_digest, str)
+        ):
+            raise RepairPlanningError("invalid_plan", "The repair preview is invalid.")
+        if (
+            handshape_index < 0
+            or handshape_index >= len(handshapes)
+            or chord_index < 0
+            or chord_index >= len(chords)
+        ):
+            raise RepairPlanningError("source_changed", "The song changed after this preview.")
+        handshape = handshapes[handshape_index]
+        chord = chords[chord_index]
+        handshape_identity = _redundant_zero_length_handshape_identity(handshape)
+        matching_chord_indexes = [
+            index
+            for index, candidate in enumerate(chords)
+            if _chord_matches_zero_length_handshape(candidate, handshape)
+        ]
+        if (
+            handshape_identity is None
+            or hashlib.sha256(handshape_identity).hexdigest() != handshape_digest
+            or matching_chord_indexes != [chord_index]
+            or hashlib.sha256(_canonical_json(chord)).hexdigest() != chord_digest
+        ):
+            raise RepairPlanningError("source_changed", "The song changed after this preview.")
+        marker = (handshape_path, handshape_index)
+        if marker in removed:
+            raise RepairPlanningError("invalid_plan", "The repair preview is invalid.")
+        removed.add(marker)
+        indexes.append(handshape_index)
+
+    declared_indexes = operation.get("remove_indices")
+    if (
+        not isinstance(declared_indexes, list)
+        or declared_indexes != sorted(indexes, reverse=True)
+        or len(declared_indexes) != len(set(declared_indexes))
+    ):
+        raise RepairPlanningError("invalid_plan", "The repair preview is invalid.")
+    for index in declared_indexes:
+        del handshapes[index]
+
+
 def _musical_position_count(
     document,
     operations: list[
         DeleteArrayItems | DeleteNotesMatchingChords | StableSortBendPoints
-        | StableSortLyricCues
+        | StableSortLyricCues | DeleteRedundantZeroLengthHandshapes
     ],
     rule_code: str,
 ) -> int:
@@ -2976,6 +3241,14 @@ def _musical_position_count(
                 else:
                     position = {"t": value["t"], "s": value["s"]}
                 positions.add(_canonical_json(position))
+        elif isinstance(operation, DeleteRedundantZeroLengthHandshapes):
+            handshapes = _value_at_path(document, operation.handshape_array_path)
+            for group in operation.match_groups:
+                handshape = handshapes[group.handshape_index]
+                positions.add(_canonical_json({
+                    "time": handshape["start_time"],
+                    "chord_id": handshape["chord_id"],
+                }))
         else:
             values = _value_at_path(document, operation.note_array_path)
             for group in operation.match_groups:
@@ -3085,6 +3358,11 @@ def _summary(
         return (
             f"Put {change_count} {item_label} into chronological point order "
             f"across {arrays_affected} {list_label}; preserve every bend point."
+        )
+    if change_kind == "remove_redundant":
+        return (
+            f"Remove {change_count} redundant {item_label} from "
+            f"{arrays_affected} {list_label}; preserve every matching chord."
         )
     return (
         f"Remove {change_count} exact duplicate {item_label} from "

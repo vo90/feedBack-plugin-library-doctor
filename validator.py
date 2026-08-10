@@ -25,7 +25,7 @@ from jsonschema import Draft202012Validator
 
 
 SPEC_REVISION = "52548b742f64c2a35052a141976ea1b7889f4b1a"
-VALIDATOR_VERSION = f"rules-16:feedpak-{SPEC_REVISION}"
+VALIDATOR_VERSION = f"rules-17:feedpak-{SPEC_REVISION}"
 SUPPORTED_MAJOR = 1
 SCHEMA_DIR = Path(__file__).resolve().parent / "schemas"
 MAX_TEXT_BYTES = 64 * 1024 * 1024
@@ -79,6 +79,7 @@ _RULE_TITLES = {
     "chart.duplicate-chord": "Identical duplicate chord",
     "chart.duplicate-anchor": "Identical duplicate anchor",
     "chart.duplicate-handshape": "Identical duplicate handshape",
+    "chart.zero-length-handshape": "Zero-length handshape",
     "chart.note-duplicates-chord": "Standalone note duplicates a chord",
     "chart.bend-points-out-of-order": "Bend points out of order",
     "chart.phrases-out-of-order": "Phrase windows out of order",
@@ -139,6 +140,7 @@ _SAFE_REPAIR_CANDIDATES = {
     "chart.duplicate-chord",
     "chart.duplicate-anchor",
     "chart.duplicate-handshape",
+    "chart.zero-length-handshape",
     "chart.note-duplicates-chord",
     "chart.bend-points-out-of-order",
     "lyrics.out-of-order",
@@ -203,6 +205,10 @@ _RULE_EXPERIENCE = {
     "chart.invalid-handshape-span": (
         "The chord-shape guide may end before it begins, disappear, or cover the wrong part of the highway.",
         "A valid span lets the highway show the intended hand position for the correct length of time.",
+    ),
+    "chart.zero-length-handshape": (
+        "The shape has no duration, so it cannot appear as a sustained hand-position guide; it may still contribute a chord at its start.",
+        "When the matching chord already supplies that exact onset, removing only the redundant zero-length guide cleans the chart without changing the playable chord.",
     ),
     "timeline.beats-out-of-order": (
         "Beat and measure tracking can jump or become unreliable, affecting the visual rhythm grid and timing context.",
@@ -400,6 +406,13 @@ def rule_metadata(code: str, severity: str = "warning", category: str = "validat
         guidance = (
             "The standalone note exactly repeats a member of the chord. Keep the "
             "complete chord and remove only the matching standalone copy."
+        )
+    elif code == "chart.zero-length-handshape":
+        repairability = "safe_candidate"
+        guidance = (
+            "Remove it automatically only when one non-arpeggio handshape has no "
+            "additional properties and exactly one matching chord already exists at "
+            "the same time. Otherwise review it because the handshape may supply a chord."
         )
     elif code == "chart.bend-points-out-of-order":
         repairability = "safe_candidate"

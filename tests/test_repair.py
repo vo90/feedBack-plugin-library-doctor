@@ -60,6 +60,7 @@ def test_catalog_is_an_explicit_allowlist(repair):
         "chart.duplicate-chord",
         "chart.duplicate-anchor",
         "chart.duplicate-handshape",
+        "chart.zero-length-handshape",
         "chart.note-duplicates-chord",
         "chart.bend-points-out-of-order",
         "lyrics.out-of-order",
@@ -80,6 +81,9 @@ def test_catalog_is_an_explicit_allowlist(repair):
         repair.repair_for_rule("chart.duplicate-handshape")["item_name"]
         == "handshape"
     )
+    zero_length_repair = repair.repair_for_rule("chart.zero-length-handshape")
+    assert zero_length_repair["item_name"] == "zero-length handshape"
+    assert zero_length_repair["change_kind"] == "remove_redundant"
     assert (
         repair.repair_for_rule("chart.note-duplicates-chord")["item_name"]
         == "standalone note"
@@ -266,6 +270,122 @@ def test_removes_only_exact_duplicate_arrangement_events(
     )
     assert repaired[field] == [duplicate, different]
     assert repaired["phrases"][0]["levels"][0][field] == [duplicate]
+
+
+def test_removes_only_zero_length_handshapes_redundant_with_exact_chords(repair):
+    chord = {"t": 10.0, "id": 2, "notes": [{"s": 0, "f": 3}]}
+    handshape = {
+        "chord_id": 2,
+        "start_time": 10.0,
+        "end_time": 10.0,
+        "arp": False,
+    }
+    document = {
+        "chords": [chord],
+        "handshapes": [handshape, dict(handshape)],
+        "phrases": [{
+            "levels": [{
+                "chords": [copy.deepcopy(chord)],
+                "handshapes": [copy.deepcopy(handshape)],
+            }],
+        }],
+    }
+
+    plan = _plan(
+        repair,
+        document,
+        rule_code="chart.zero-length-handshape",
+    )
+    action = plan["actions"][0]
+
+    assert action["change_kind"] == "remove_redundant"
+    assert action["removed_count"] == 3
+    assert action["arrays_affected"] == 2
+    assert action["musical_positions"] == 1
+    assert [operation["remove_indices"] for operation in action["operations"]] == [
+        [1, 0],
+        [0],
+    ]
+    assert action["operations"][0]["chord_array_path"] == ["chords"]
+    assert action["operations"][1]["handshape_array_path"] == [
+        "phrases", 0, "levels", 0, "handshapes",
+    ]
+
+    repaired = json.loads(
+        repair.apply_json_member(_raw(document), plan).decode("utf-8")
+    )
+    assert repaired["handshapes"] == []
+    assert repaired["phrases"][0]["levels"][0]["handshapes"] == []
+    assert repaired["chords"] == [chord]
+    assert repaired["phrases"][0]["levels"][0]["chords"] == [chord]
+
+
+@pytest.mark.parametrize(
+    ("handshape", "chords"),
+    [
+        ({"chord_id": 2, "start_time": 10.0, "end_time": 10.0}, []),
+        (
+            {"chord_id": 2, "start_time": 10.0, "end_time": 10.0},
+            [{"t": 10.0, "id": 2}, {"t": 10.0, "id": 2}],
+        ),
+        (
+            {"chord_id": 2, "start_time": 10.0, "end_time": 10.0, "arp": True},
+            [{"t": 10.0, "id": 2}],
+        ),
+        (
+            {
+                "chord_id": 2,
+                "start_time": 10.0,
+                "end_time": 10.0,
+                "future": {"meaning": "unknown"},
+            },
+            [{"t": 10.0, "id": 2}],
+        ),
+        (
+            {"chord_id": 2, "start_time": 10.0, "end_time": 10.0},
+            [{"t": 10.000001, "id": 2}],
+        ),
+        (
+            {"chord_id": 2, "start_time": 10.0, "end_time": 10.0},
+            [{"t": 10.0, "id": 3}],
+        ),
+    ],
+)
+def test_zero_length_handshape_repair_blocks_any_shape_with_possible_meaning(
+    repair, handshape, chords,
+):
+    with pytest.raises(repair.RepairPlanningError) as caught:
+        _plan(
+            repair,
+            {"chords": chords, "handshapes": [handshape]},
+            rule_code="chart.zero-length-handshape",
+        )
+
+    assert caught.value.code == "zero_length_handshape_requires_review"
+
+
+def test_zero_length_handshape_plan_is_bound_to_the_preserved_chord(repair):
+    document = {
+        "chords": [{"t": 10.0, "id": 2, "notes": [{"s": 0, "f": 3}]}],
+        "handshapes": [{"chord_id": 2, "start_time": 10.0, "end_time": 10.0}],
+    }
+    raw = _raw(document)
+    plan = _plan(
+        repair,
+        document,
+        rule_code="chart.zero-length-handshape",
+    )
+    tampered = copy.deepcopy(plan)
+    tampered["actions"][0]["operations"][0]["match_groups"][0][
+        "chord_sha256"
+    ] = "0" * 64
+    unsigned = {key: value for key, value in tampered.items() if key != "plan_id"}
+    tampered["plan_id"] = repair._digest_json(unsigned)
+
+    with pytest.raises(repair.RepairPlanningError) as caught:
+        repair.apply_json_member(raw, tampered)
+
+    assert caught.value.code == "source_changed"
 
 
 def test_plans_exact_standalone_notes_that_duplicate_explicit_chord_members(repair):

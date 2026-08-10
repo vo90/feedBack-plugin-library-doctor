@@ -128,6 +128,14 @@ includes time and measure; for sections it includes name, time, optional number,
 and any future properties. Markers at the same time with different data remain
 unchanged and visible for manual review.
 
+Zero-length handshapes use a narrower safety rule because FeedBack can synthesize
+a chord from an unmatched handshape onset. Library Doctor removes one only when
+it is non-arpeggiated, contains no unknown properties, and exactly one chord with
+the same template ID already exists at the identical time in the same event
+list. The chord and all playable notes remain unchanged. An unmatched handshape,
+an ambiguous chord match, an arpeggio marker, or future authoring data blocks the
+repair for that arrangement file instead of being guessed at.
+
 A preview is bound to the exact current source bytes and validator version. If
 the package changes before confirmation, Library Doctor refuses the stale plan.
 JSONC arrangement files are left unchanged until a comment-preserving writer is

@@ -696,6 +696,12 @@ def test_anchor_and_handshape_geometry_is_checked(tmp_path, validator):
     severities = {item["code"]: item["severity"] for item in report["findings"]}
     assert severities["chart.zero-length-handshape"] == "warning"
     assert severities["chart.invalid-handshape-span"] == "error"
+    zero_length = next(
+        item for item in report["findings"]
+        if item["code"] == "chart.zero-length-handshape"
+    )
+    assert zero_length["rule"]["repairability"] == "safe_candidate"
+    assert "may supply a chord" in zero_length["rule"]["guidance"]
 
 
 def test_root_and_mastery_copies_do_not_inflate_chart_event_counts(

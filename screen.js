@@ -233,6 +233,9 @@
     if (value?.change_kind === 'reorder') {
       return `put ${number(count)} ${itemName}${count === 1 ? '' : 's'} into chronological point order`;
     }
+    if (value?.change_kind === 'remove_redundant') {
+      return `remove ${number(count)} redundant ${itemName} ${count === 1 ? 'record' : 'records'} while preserving the matching chords`;
+    }
     return `remove ${number(count)} redundant ${itemName} ${count === 1 ? 'copy' : 'copies'}`;
   }
 
@@ -241,6 +244,9 @@
     const itemName = value?.item_name || 'item';
     if (value?.change_kind === 'reorder') {
       return `Reordered ${number(count)} ${itemName}${count === 1 ? '' : 's'} into chronological point order without removing any bend points`;
+    }
+    if (value?.change_kind === 'remove_redundant') {
+      return `Removed ${number(count)} redundant ${itemName} ${count === 1 ? 'record' : 'records'} while preserving every matching chord`;
     }
     if (value?.change_kind === 'combined') {
       const summaries = Array.isArray(value?.repair_summaries)
@@ -1215,11 +1221,14 @@
     item.dataset.severity = representative.severity || 'warning';
     item.dataset.category = representative.category || 'validation';
     item.appendChild(make('strong', 'lh-finding-title', rule.title || definition.title || 'Safe repair available'));
+    const technicalSummary = definition.change_kind === 'reorder'
+      ? `${number(affected)} bend ${affected === 1 ? 'curve has' : 'curves have'} points stored outside chronological order across ${scope}. Every point can be preserved while these arrangement-level findings share one package-wide repair.`
+      : definition.change_kind === 'remove_redundant'
+        ? `${number(affected)} musical ${affected === 1 ? 'position has' : 'positions have'} a zero-duration shape guide across ${scope}. Library Doctor removes only records whose exact matching chord already preserves the complete playable instruction.`
+        : `${number(affected)} musical ${affected === 1 ? 'position contains' : 'positions contain'} redundant ${pluralItem} with identical stored values across ${scope}. These arrangement-level findings share one package-wide repair.`;
     appendFindingExplanation(
       item,
-      definition.change_kind === 'reorder'
-        ? `${number(affected)} bend ${affected === 1 ? 'curve has' : 'curves have'} points stored outside chronological order across ${scope}. Every point can be preserved while these arrangement-level findings share one package-wide repair.`
-        : `${number(affected)} musical ${affected === 1 ? 'position contains' : 'positions contain'} redundant ${pluralItem} with identical stored values across ${scope}. These arrangement-level findings share one package-wide repair.`,
+      technicalSummary,
       rule.player_impact,
       rule.fix_benefit,
       'Review the single package-wide fix below. Its preview recalculates every declared source file and shows the complete change before anything is saved.',
@@ -1348,6 +1357,9 @@
     }
     if (receipt.change_kind === 'reorder') {
       return `${completedRepairChange(receipt)}${positions ? ` at ${number(positions)} musical ${positions === 1 ? 'position' : 'positions'}` : ''}. Every authored bend point and property was preserved.`;
+    }
+    if (receipt.change_kind === 'remove_redundant') {
+      return `${completedRepairChange(receipt)}${positions ? ` at ${number(positions)} musical ${positions === 1 ? 'position' : 'positions'}` : ''}.`;
     }
     return `Removed ${number(count)} redundant ${itemName} ${count === 1 ? 'copy' : 'copies'}${positions ? ` at ${number(positions)} musical ${positions === 1 ? 'position' : 'positions'}` : ''}. The first identical authored entry was kept.`;
   }
@@ -1724,7 +1736,9 @@
           '',
           plan.change_kind === 'reorder'
             ? `Put the points in ${number(repairChangeCount(plan))} ${itemName}${repairChangeCount(plan) === 1 ? '' : 's'} into chronological order at ${number(plan.musical_positions)} musical ${plan.musical_positions === 1 ? 'position' : 'positions'}. Every point and stored property is kept.`
-            : `Remove ${number(plan.removed_count)} redundant stored ${itemName} ${plan.removed_count === 1 ? 'copy' : 'copies'} at ${number(plan.musical_positions)} musical ${plan.musical_positions === 1 ? 'position' : 'positions'}, across ${number(plan.arrays_affected)} ${itemName} ${plan.arrays_affected === 1 ? 'list' : 'lists'}. The first authored copy is kept.`,
+            : plan.change_kind === 'remove_redundant'
+              ? `Remove ${number(plan.removed_count)} redundant stored ${itemName} ${plan.removed_count === 1 ? 'record' : 'records'} at ${number(plan.musical_positions)} musical ${plan.musical_positions === 1 ? 'position' : 'positions'}, across ${number(plan.arrays_affected)} ${itemName} ${plan.arrays_affected === 1 ? 'list' : 'lists'}. Every matching authored chord is kept unchanged.`
+              : `Remove ${number(plan.removed_count)} redundant stored ${itemName} ${plan.removed_count === 1 ? 'copy' : 'copies'} at ${number(plan.musical_positions)} musical ${plan.musical_positions === 1 ? 'position' : 'positions'}, across ${number(plan.arrays_affected)} ${itemName} ${plan.arrays_affected === 1 ? 'list' : 'lists'}. The first authored copy is kept.`,
         ));
         card.appendChild(make(
           'p',
