@@ -171,9 +171,35 @@ def test_worker_policy_honors_memory_and_feedback_caps(scanner_module):
 
 
 def test_parallel_scanner_keeps_cache_writes_in_parent_and_reports_workers(
-    scanner_module, tmp_path,
+    scanner_module, tmp_path, monkeypatch,
 ):
     calls = []
+
+    choose_worker_policy = scanner_module.choose_worker_policy
+
+    def deterministic_worker_policy(
+        pending_packages,
+        *,
+        deep_audio,
+        requested_max,
+        worker_backend_available,
+    ):
+        return choose_worker_policy(
+            pending_packages,
+            deep_audio=deep_audio,
+            requested_max=requested_max,
+            worker_backend_available=worker_backend_available,
+            logical_cpus=8,
+            physical_cpus=4,
+            total_memory=16 * 1024**3,
+            available_memory=12 * 1024**3,
+            platform="linux",
+            environment={},
+        )
+
+    monkeypatch.setattr(
+        scanner_module, "choose_worker_policy", deterministic_worker_policy
+    )
 
     def validate(_path, package, **_options):
         calls.append((package, threading.get_ident()))
