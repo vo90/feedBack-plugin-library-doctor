@@ -42,9 +42,9 @@
     },
     {
       "id": "remote-ci",
-      "status": "pending",
+      "status": "passed",
       "required": true,
-      "evidence": null,
+      "evidence": "docs/release-signoff-0.44.0.md#recorded-remote-ci-evidence",
       "instructions": "docs/release-signoff-0.44.0.md#remote-ci-and-release-hygiene"
     },
     {

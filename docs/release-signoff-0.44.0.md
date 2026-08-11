@@ -101,6 +101,14 @@ reviewed commit, `git status --short` is empty, the version agrees across
 no ignored test artifacts are packaged. Record the commit in the
 `clean-release-worktree` ledger item.
 
+### Recorded remote-CI evidence
+
+- Plugin commit: `ea62670e943fb21da039da84930d4e31b009f650`.
+- GitHub Actions run: [CI 31546723845](https://github.com/vo90/feedBack-plugin-library-doctor/actions/runs/31546723845).
+- Result: passed on 2026-08-12. Windows and Linux normal jobs, constrained
+  Linux scan, dependency audit, minimum-module-capable host contract, and
+  latest-main host contract all completed successfully.
+
 ## Release decision
 
 Library Doctor may be described as an engineering-complete release candidate
