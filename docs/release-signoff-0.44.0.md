@@ -55,6 +55,22 @@ The semantic host version `0.3.0-alpha.1` predates and postdates several nightly
 capability changes. The authoritative capability floor is therefore commit
 `950e3483573e458cc2aa7bc255d9590808947faa`, not the version string alone.
 
+### Recorded minimum-host evidence
+
+- Date: 2026-08-12.
+- FeedBack commit: `950e3483573e458cc2aa7bc255d9590808947faa`.
+- Plugin commit tested: `e102b6237266ad1502c625a5246867bb316b9054`.
+- Profile and library: separate disposable configuration with an empty synthetic
+  library; no real song library was used.
+- `python tools/verify_host_contract.py <checkout> --json`: compatible; all
+  three declared capabilities passed.
+- Runtime `/api/plugins` result: Library Doctor 0.44.0 reported `ready`, with
+  `script_type` `module` and no load error.
+- `FEEDBACK_NIGHTLY_URL=<minimum-host> npm run test:browser`: 6 of 6 journeys
+  passed, including module and `src/app.js` loading, first-run activation,
+  reversible keyboard/repair confirmation, repair/Undo, accessibility, forced
+  colors, and 400%-equivalent reflow.
+
 ## Novice usability
 
 Run the tasks with at least three people who have not worked on Library Doctor.

@@ -28,9 +28,9 @@
     },
     {
       "id": "minimum-host-runtime",
-      "status": "pending",
+      "status": "passed",
       "required": true,
-      "evidence": null,
+      "evidence": "docs/release-signoff-0.44.0.md#recorded-minimum-host-evidence",
       "instructions": "docs/release-signoff-0.44.0.md#minimum-host-runtime"
     },
     {

@@ -28,7 +28,10 @@ test('the manifest and thin entry use the FeedBack native-module contract', asyn
 
   assert.equal(manifest.scriptType, 'module');
   assert.equal(manifest.minHost, '0.3.0-alpha.1');
-  assert.equal(entry.trim(), "import { bootLibraryDoctor } from './src/app.js';\n\nbootLibraryDoctor(window);");
+  assert.equal(
+    entry.replace(/\r\n/g, '\n').trim(),
+    "import { bootLibraryDoctor } from './src/app.js';\n\nbootLibraryDoctor(window);",
+  );
   assert.match(screen, /If this message remains, update FeedBack/);
 });
 
