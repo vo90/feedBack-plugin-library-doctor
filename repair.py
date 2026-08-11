@@ -63,6 +63,7 @@ MAX_REPAIR_MEMBER_BYTES = 128 * 1024 * 1024
 MAX_REPAIR_STRUCTURE_ITEMS = 2_000_000
 MAX_REPAIR_MANIFEST_BYTES = 4 * 1024 * 1024
 MAX_DECLARED_REPAIR_MEMBERS = 1_000
+MAX_DIRECTORY_CANDIDATE_ENTRIES = 50_000
 MAX_RECOVERY_BACKUP_BYTES = 512 * 1024 * 1024
 PACKAGE_SUFFIXES = (".feedpak", ".sloppak")
 PACKAGE_REPAIR_SCHEMA = "library_doctor.package_repair.v1"
@@ -3030,6 +3031,12 @@ class RepairService:
                     else:
                         target.parent.mkdir(parents=True, exist_ok=True)
                         self._atomic_write(target, raw)
+                self._verify_directory_candidate(
+                    package_path, candidate, replacements
+                )
+            except RepairPlanningError:
+                shutil.rmtree(temporary_root, ignore_errors=True)
+                raise
             except (OSError, shutil.Error) as exc:
                 shutil.rmtree(temporary_root, ignore_errors=True)
                 raise RepairPlanningError(
@@ -3080,6 +3087,145 @@ class RepairService:
             shutil.rmtree(temporary_root, ignore_errors=True)
 
         return candidate, cleanup
+
+    @staticmethod
+    def _verify_directory_candidate(
+        source_path: Path,
+        candidate_path: Path,
+        replacements: dict[str, bytes | None],
+    ) -> None:
+        """Verify the complete directory candidate without following links.
+
+        Same-volume hard links are exact by construction. If candidate creation
+        had to copy a file instead, both byte streams are hashed. This keeps the
+        common repair path inexpensive while still proving that every unrelated
+        member presented to the validator survived candidate creation.
+        """
+
+        def entries(root: Path) -> dict[str, tuple[str, Path]]:
+            found: dict[str, tuple[str, Path]] = {}
+            pending = [root]
+            while pending:
+                parent = pending.pop()
+                with os.scandir(parent) as stream:
+                    for item in stream:
+                        path = Path(item.path)
+                        relative = path.relative_to(root).as_posix()
+                        is_junction = bool(
+                            hasattr(os.path, "isjunction")
+                            and os.path.isjunction(path)
+                        )
+                        if item.is_symlink() or is_junction:
+                            kind = "link"
+                        elif item.is_dir(follow_symlinks=False):
+                            kind = "directory"
+                            pending.append(path)
+                        elif item.is_file(follow_symlinks=False):
+                            kind = "file"
+                        else:
+                            kind = "unsupported"
+                        found[relative] = (kind, path)
+                        if len(found) > MAX_DIRECTORY_CANDIDATE_ENTRIES:
+                            raise RepairPlanningError(
+                                "candidate_integrity_failed",
+                                "The repaired directory candidate contains too many members to verify safely.",
+                            )
+            return found
+
+        def file_hash(path: Path) -> str:
+            digest = hashlib.sha256()
+            with path.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(chunk)
+            return digest.hexdigest()
+
+        def fail(message: str) -> None:
+            raise RepairPlanningError("candidate_integrity_failed", message)
+
+        try:
+            source = entries(source_path)
+            candidate = entries(candidate_path)
+            expected_kinds = {name: value[0] for name, value in source.items()}
+            for member_path, raw in replacements.items():
+                safe_path = _validate_member_path(member_path)
+                if raw is None:
+                    expected_kinds.pop(safe_path, None)
+                    continue
+                parent = PurePosixPath(safe_path).parent
+                while parent != PurePosixPath("."):
+                    parent_name = parent.as_posix()
+                    existing = expected_kinds.get(parent_name)
+                    if existing not in {None, "directory"}:
+                        fail(
+                            "A repaired member conflicts with the directory candidate structure."
+                        )
+                    expected_kinds[parent_name] = "directory"
+                    parent = parent.parent
+                expected_kinds[safe_path] = "file"
+
+            candidate_kinds = {
+                name: value[0] for name, value in candidate.items()
+            }
+            if expected_kinds != candidate_kinds:
+                fail(
+                    "The repaired directory candidate did not preserve the expected package members."
+                )
+
+            for name, expected_kind in expected_kinds.items():
+                if expected_kind == "unsupported":
+                    fail(
+                        "The directory package contains a member type that cannot be verified safely."
+                    )
+                candidate_kind, candidate_member = candidate[name]
+                if candidate_kind != expected_kind or expected_kind == "directory":
+                    continue
+                replacement = replacements.get(name, ...)
+                if replacement is not ...:
+                    if replacement is None:
+                        fail("A deleted repair member remained in the directory candidate.")
+                    if (
+                        candidate_member.stat().st_size != len(replacement)
+                        or file_hash(candidate_member)
+                        != hashlib.sha256(replacement).hexdigest()
+                    ):
+                        fail(
+                            "A changed repair member did not match its planned candidate bytes."
+                        )
+                    continue
+
+                source_kind, source_member = source[name]
+                if source_kind == "link":
+                    if os.readlink(source_member) != os.readlink(candidate_member):
+                        fail(
+                            "An unchanged linked member did not survive directory candidate creation."
+                        )
+                    continue
+                source_stat = source_member.stat()
+                candidate_stat = candidate_member.stat()
+                if source_stat.st_size != candidate_stat.st_size:
+                    fail(
+                        "An unchanged package member changed size during directory candidate creation."
+                    )
+                same_file = (
+                    source_stat.st_dev,
+                    source_stat.st_ino,
+                ) == (
+                    candidate_stat.st_dev,
+                    candidate_stat.st_ino,
+                )
+                if not same_file and file_hash(source_member) != file_hash(
+                    candidate_member
+                ):
+                    fail(
+                        "An unchanged package member did not survive directory candidate creation."
+                    )
+        except RepairPlanningError:
+            raise
+        except (OSError, ValueError) as exc:
+            raise RepairPlanningError(
+                "candidate_integrity_failed",
+                "The repaired directory candidate could not be verified safely.",
+            ) from exc
 
     @staticmethod
     def _verify_archive_candidate(

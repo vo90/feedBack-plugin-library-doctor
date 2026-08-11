@@ -15,6 +15,7 @@ import threading
 import time
 import zipfile
 from collections import deque
+from functools import lru_cache
 from pathlib import Path, PurePosixPath
 
 
@@ -26,6 +27,7 @@ RESULT_FILTERS = {
 }
 SIGNATURE_SAMPLE_BYTES = 8 * 1024
 SIGNATURE_FULL_FILE_BYTES = 1024 * 1024
+SIGNATURE_SAMPLE_WINDOWS = 9
 MAX_SIGNATURE_MEMBERS = 50_000
 MAX_DISCOVERY_ERRORS = 20
 MAX_BATCH_SCOPE_PACKAGES = 10_000
@@ -56,6 +58,110 @@ def _positive_int(value) -> int | None:
     except (TypeError, ValueError):
         return None
     return parsed if parsed > 0 else None
+
+
+def _signature_sample_offsets(size: int) -> tuple[int, ...]:
+    """Spread bounded signature windows across one large file."""
+    last = max(0, size - SIGNATURE_SAMPLE_BYTES)
+    if last == 0:
+        return (0,)
+    return tuple(sorted({
+        round(last * index / (SIGNATURE_SAMPLE_WINDOWS - 1))
+        for index in range(SIGNATURE_SAMPLE_WINDOWS)
+    }))
+
+
+@lru_cache(maxsize=1)
+def _windows_change_time_api():
+    """Initialize the small Win32 metadata binding once per scanner process."""
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class FileBasicInfo(ctypes.Structure):
+            _fields_ = [
+                ("CreationTime", ctypes.c_longlong),
+                ("LastAccessTime", ctypes.c_longlong),
+                ("LastWriteTime", ctypes.c_longlong),
+                ("ChangeTime", ctypes.c_longlong),
+                ("FileAttributes", wintypes.DWORD),
+            ]
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create_file = kernel32.CreateFileW
+        create_file.argtypes = [
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.HANDLE,
+        ]
+        create_file.restype = wintypes.HANDLE
+        get_information = kernel32.GetFileInformationByHandleEx
+        get_information.argtypes = [
+            wintypes.HANDLE,
+            ctypes.c_int,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+        ]
+        get_information.restype = wintypes.BOOL
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = [wintypes.HANDLE]
+        close_handle.restype = wintypes.BOOL
+        return (
+            ctypes,
+            FileBasicInfo,
+            create_file,
+            get_information,
+            close_handle,
+        )
+    except (AttributeError, OSError, TypeError, ValueError):
+        return None
+
+
+def _windows_change_time_ns(path: Path) -> int | None:
+    """Read the NTFS change timestamp that Python's Windows stat omits."""
+    api = _windows_change_time_api()
+    if api is None:
+        return None
+    ctypes, FileBasicInfo, create_file, get_information, close_handle = api
+    try:
+
+        handle = create_file(
+            str(path),
+            0x0080,  # FILE_READ_ATTRIBUTES
+            0x00000001 | 0x00000002 | 0x00000004,
+            None,
+            3,  # OPEN_EXISTING
+            0x02000000,  # FILE_FLAG_BACKUP_SEMANTICS
+            None,
+        )
+        invalid_handle = ctypes.c_void_p(-1).value
+        if handle == invalid_handle:
+            return None
+        try:
+            information = FileBasicInfo()
+            if not get_information(
+                handle, 0, ctypes.byref(information), ctypes.sizeof(information)
+            ):
+                return None
+            return int(information.ChangeTime) * 100
+        finally:
+            close_handle(handle)
+    except (OSError, TypeError, ValueError):
+        return None
+
+
+def _filesystem_change_token(path: Path, stat_result) -> int:
+    """Return the strongest portable-ish token for ordinary in-place edits."""
+    windows_change = _windows_change_time_ns(path)
+    if windows_change is not None:
+        return windows_change
+    return int(getattr(stat_result, "st_ctime_ns", 0))
 
 
 def choose_worker_policy(
@@ -1831,9 +1937,18 @@ class LibraryScanner:
                     if size <= SIGNATURE_FULL_FILE_BYTES:
                         digest.update(stream.read())
                     else:
-                        digest.update(stream.read(SIGNATURE_SAMPLE_BYTES))
-                        stream.seek(max(0, size - SIGNATURE_SAMPLE_BYTES))
-                        digest.update(stream.read(SIGNATURE_SAMPLE_BYTES))
+                        stat = member.stat()
+                        digest.update(
+                            f"change:{_filesystem_change_token(member, stat)}:".encode(
+                                "ascii"
+                            )
+                        )
+                        for offset in _signature_sample_offsets(size):
+                            if scan_checkpoint is not None:
+                                scan_checkpoint()
+                            digest.update(f"{offset}:".encode("ascii"))
+                            stream.seek(offset)
+                            digest.update(stream.read(SIGNATURE_SAMPLE_BYTES))
             except OSError:
                 # The validation pass will produce the user-facing read error.
                 digest.update(b"<unreadable>")

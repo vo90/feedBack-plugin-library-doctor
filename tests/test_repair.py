@@ -2185,6 +2185,66 @@ def test_repair_reopens_and_rejects_a_corrupted_durable_backup(
     )
 
 
+def test_directory_candidate_verifies_every_unchanged_member(
+    repair, tmp_path, monkeypatch
+):
+    service, package, _original, _validate = _phase0_directory_service(
+        repair, tmp_path
+    )
+    untouched = b"cover bytes that validation does not normally read"
+    cover = package / "cover.bin"
+    cover.write_bytes(untouched)
+    real_copytree = repair.shutil.copytree
+
+    def corrupt_unrelated_member(source, destination, *args, **kwargs):
+        result = real_copytree(source, destination, *args, **kwargs)
+        if Path(source) != package:
+            return result
+        candidate_cover = Path(destination) / "cover.bin"
+        replacement = candidate_cover.with_suffix(".corrupted")
+        replacement.write_bytes(b"same-size corruption".ljust(len(untouched), b"!"))
+        os.replace(replacement, candidate_cover)
+        return result
+
+    monkeypatch.setattr(repair.shutil, "copytree", corrupt_unrelated_member)
+
+    with pytest.raises(repair.RepairPlanningError) as raised:
+        service._candidate(
+            package,
+            {"arrangements/lead.json": b'{"notes":[],"chords":[],"anchors":[]}'},
+        )
+
+    assert raised.value.code == "candidate_integrity_failed"
+    assert cover.read_bytes() == untouched
+    assert not list(package.parent.glob(".library-doctor-repair-*"))
+
+
+def test_directory_candidate_integrity_allows_planned_add_change_and_delete(
+    repair, tmp_path
+):
+    service, package, _original, _validate = _phase0_directory_service(
+        repair, tmp_path
+    )
+    deleted = package / "obsolete.bin"
+    deleted.write_bytes(b"remove me")
+    replacements = {
+        "arrangements/lead.json": b'{"notes":[],"chords":[],"anchors":[]}',
+        "generated/new.bin": b"new member",
+        "obsolete.bin": None,
+    }
+
+    candidate, cleanup = service._candidate(package, replacements)
+    try:
+        assert (candidate / "arrangements" / "lead.json").read_bytes() == replacements[
+            "arrangements/lead.json"
+        ]
+        assert (candidate / "generated" / "new.bin").read_bytes() == b"new member"
+        assert not (candidate / "obsolete.bin").exists()
+        assert (package / "obsolete.bin").read_bytes() == b"remove me"
+    finally:
+        cleanup()
+
+
 def test_archive_final_source_guard_binds_the_complete_package_bytes(
     repair, tmp_path,
 ):

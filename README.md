@@ -9,8 +9,10 @@ optional, user-requested changes for any indexed local song without requiring a
 scan finding.
 
 The first scan validates every package. Later scans reuse cached reports only
-when package identity, file metadata, and sampled content still match. This
-helps catch changes even when a tool preserves a file's size and timestamp.
+when package identity, file metadata, filesystem change time, and content
+windows spread across large files still match. Small files are hashed in full,
+and archive member CRC/size metadata is included. This catches ordinary in-place
+changes even when an editor preserves file size and modification time.
 Validation runs in a background coordinator and, when enough uncached packages
 need checking, a bounded pool of read-only worker processes. Automatic worker
 selection considers physical CPU cores, available memory, FeedBack's global
@@ -111,6 +113,14 @@ FeedBack URL to reopen the temporary high-density layout for rollback testing.
    target again. Only changed packages are revalidated. **Recheck without
    cache** is available when timestamps cannot be trusted or a fresh
    confirmation is wanted.
+
+Cache signatures are invalidation hints, not a hostile-filesystem security
+boundary. A privileged process that can rewrite bytes and also forge native
+filesystem change records could evade a cached scan; **Recheck without cache**
+is the explicit response to that threat. Repair Apply and Undo do not trust the
+cache as their commit guard: affected directory members are SHA-256 checked,
+and archived packages are bound to the complete archive SHA-256 immediately
+before replacement.
 
 Saved reports from an older Library Doctor rule version remain readable after
 an update, but are clearly marked as needing a new scan and do not expose repair
@@ -574,7 +584,7 @@ adversarial-corpus limits are defined in
 cache in ignored repository-local `.test-artifacts/` and `.test-cache/`
 directories, so a clean checkout does not depend on the system temp directory.
 The versioned release-candidate ledger and remaining human procedures are in
-`release-signoff.json` and `docs/release-signoff-0.43.0.md`.
+`release-signoff.json` and `docs/release-signoff-0.44.0.md`.
 
 `library_doctor` is the plugin ID and API namespace from version 0.15 onward.
 Upgrading from an earlier release moves the previous local cache and recovery

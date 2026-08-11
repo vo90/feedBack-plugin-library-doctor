@@ -1,0 +1,45 @@
+{
+  "schema": "library_doctor.v0_34_state_fixture.v1",
+  "pluginVersion": "0.34.0",
+  "package": "Artist/Song.feedpak",
+  "backupId": "20260809-120000-abcdef123456",
+  "createdAt": 1723204800.0,
+  "memberPath": "arrangements/lead.json",
+  "originalDocument": {
+    "notes": [],
+    "chords": [],
+    "anchors": [
+      {"time": 0.0, "fret": 1, "width": 4},
+      {"time": 0.0, "fret": 1, "width": 4}
+    ]
+  },
+  "repairedDocument": {
+    "notes": [],
+    "chords": [],
+    "anchors": [
+      {"time": 0.0, "fret": 1, "width": 4}
+    ]
+  },
+  "historyReceipt": {
+    "id": "0034-repair-receipt",
+    "action": "repair",
+    "outcome": "success",
+    "completed_at": 1723204800.0,
+    "package": "Artist/Song.feedpak",
+    "title": "Song",
+    "artist": "Artist",
+    "rule_code": "chart.duplicate-anchor",
+    "rule_codes": ["chart.duplicate-anchor"],
+    "backup_id": "20260809-120000-abcdef123456",
+    "change_kind": "remove_duplicates",
+    "change_count": 1,
+    "removed_count": 1,
+    "musical_positions": 1,
+    "item_name": "anchor",
+    "player_result": "One identical anchor remains.",
+    "user_value": "The duplicate anchor is removed.",
+    "file_handling": {
+      "backup_retained": true
+    }
+  }
+}

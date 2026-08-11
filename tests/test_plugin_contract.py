@@ -44,7 +44,7 @@ def test_manifest_uses_stable_plugin_namespace_and_existing_files():
     assert manifest["id"] == "library_doctor"
     assert re.fullmatch(r"[a-z][a-z0-9_]*", manifest["id"])
     assert manifest["name"] == "Library Doctor"
-    assert manifest["version"] == "0.43.0"
+    assert manifest["version"] == "0.44.0"
     assert manifest["private"] is False
     assert manifest["scriptType"] == "module"
     assert manifest["minHost"] == "0.3.0-alpha.1"

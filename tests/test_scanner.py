@@ -3,6 +3,7 @@ import importlib.util
 import json
 import logging
 import os
+import random
 import shutil
 import sqlite3
 import sys
@@ -1153,6 +1154,54 @@ def test_cache_signature_detects_same_size_same_timestamp_content_change(
 
     assert status["scanned"] == 1
     assert calls == ["one.feedpak", "one.feedpak"]
+
+
+def test_large_file_signature_detects_random_middle_mutations_with_restored_metadata(
+    scanner_module, tmp_path
+):
+    package = tmp_path / "Song.feedpak"
+    package.mkdir()
+    member = package / "full.ogg"
+    size = scanner_module.SIGNATURE_FULL_FILE_BYTES * 3
+    member.write_bytes(b"a" * size)
+    original = member.stat()
+    sample_ranges = [
+        range(offset, offset + scanner_module.SIGNATURE_SAMPLE_BYTES)
+        for offset in scanner_module._signature_sample_offsets(size)
+    ]
+    mutation = b"phase-8-middle-mutation"
+    candidates = [
+        offset
+        for offset in range(
+            scanner_module.SIGNATURE_SAMPLE_BYTES,
+            size - scanner_module.SIGNATURE_SAMPLE_BYTES,
+            4096,
+        )
+        if not any(
+            offset < sampled.stop and offset + len(mutation) > sampled.start
+            for sampled in sample_ranges
+        )
+    ]
+    offsets = random.Random(20260812).sample(candidates, 12)
+
+    for offset in offsets:
+        before = scanner_module.LibraryScanner._signature(package)
+        with member.open("r+b") as stream:
+            stream.seek(offset)
+            stream.write(mutation)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.utime(member, ns=(original.st_atime_ns, original.st_mtime_ns))
+
+        after = scanner_module.LibraryScanner._signature(package)
+
+        assert after != before
+        with member.open("r+b") as stream:
+            stream.seek(offset)
+            stream.write(b"a" * len(mutation))
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.utime(member, ns=(original.st_atime_ns, original.st_mtime_ns))
 
 
 def test_cache_signature_is_scoped_to_the_configured_library(

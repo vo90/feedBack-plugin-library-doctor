@@ -57,6 +57,10 @@ MAX_METADATA_MEMBER_BYTES = 16 * 1024 * 1024
 PLAN_TTL_SECONDS = 30 * 60
 MAX_CACHED_PLANS = 4
 LOUDNESS_SAMPLE_RATE = 400
+MAX_LOUDNESS_ANALYSIS_SECONDS = 8 * 60 * 60
+MAX_LOUDNESS_PCM_BYTES = (
+    MAX_LOUDNESS_ANALYSIS_SECONDS * LOUDNESS_SAMPLE_RATE * 2
+)
 _DURATION_RE = re.compile(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)")
 _BORING_SECTION_NAMES = frozenset({
     "intro", "outro", "silence", "count", "countin", "noguitar",
@@ -264,27 +268,41 @@ def _loudest_start_with_ffmpeg(
     ffmpeg = _resolve_ffmpeg()
     if not ffmpeg or duration <= target_duration:
         return 0.0
+    if duration > MAX_LOUDNESS_ANALYSIS_SECONDS:
+        return None
     with tempfile.TemporaryDirectory(prefix="library-doctor-preview-analysis-") as raw_dir:
         source_path = Path(raw_dir) / "source.ogg"
+        pcm_path = Path(raw_dir) / "analysis.pcm"
         source_path.write_bytes(source)
         command = [
-            ffmpeg, "-hide_banner", "-nostdin", "-loglevel", "error",
-            "-i", str(source_path), "-vn", "-ac", "1", "-ar",
-            str(LOUDNESS_SAMPLE_RATE), "-f", "s16le", "-acodec", "pcm_s16le", "-",
+            ffmpeg, "-hide_banner", "-nostdin", "-loglevel", "error", "-y",
+            "-i", str(source_path), "-t", f"{duration:.3f}", "-vn", "-ac", "1",
+            "-ar", str(LOUDNESS_SAMPLE_RATE), "-fs", str(MAX_LOUDNESS_PCM_BYTES),
+            "-f", "s16le", "-acodec", "pcm_s16le", str(pcm_path),
         ]
         try:
             result = subprocess.run(
                 command,
-                capture_output=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
                 timeout=120,
                 **_hidden_subprocess_kwargs(),
             )
         except (OSError, subprocess.TimeoutExpired):
             return None
-    if result.returncode != 0 or len(result.stdout) < 2:
-        return None
+        try:
+            pcm_size = pcm_path.stat().st_size
+            if (
+                result.returncode != 0
+                or pcm_size < 2
+                or pcm_size > MAX_LOUDNESS_PCM_BYTES
+            ):
+                return None
+            pcm = pcm_path.read_bytes()
+        except OSError:
+            return None
     samples = array.array("h")
-    samples.frombytes(result.stdout[: len(result.stdout) - (len(result.stdout) % 2)])
+    samples.frombytes(pcm[: len(pcm) - (len(pcm) % 2)])
     if sys.byteorder != "little":
         samples.byteswap()
     window = max(1, round(target_duration * LOUDNESS_SAMPLE_RATE))

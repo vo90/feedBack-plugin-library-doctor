@@ -1,4 +1,4 @@
-# Library Doctor 0.43.0 release signoff
+# Library Doctor 0.44.0 release signoff
 
 Date opened: 2026-08-12
 Scope: standalone Library Doctor plugin only

@@ -153,7 +153,8 @@ def test_loudness_selector_chooses_the_stronger_contiguous_window(
     def run(command, **kwargs):
         observed["command"] = command
         observed["kwargs"] = kwargs
-        return SimpleNamespace(returncode=0, stdout=quiet + loud)
+        Path(command[-1]).write_bytes(quiet + loud)
+        return SimpleNamespace(returncode=0)
 
     monkeypatch.setattr(preview_repair, "_resolve_ffmpeg", lambda: "ffmpeg-test")
     monkeypatch.setattr(preview_repair.subprocess, "run", run)
@@ -165,6 +166,10 @@ def test_loudness_selector_chooses_the_stronger_contiguous_window(
     assert start == 1.0
     assert observed["command"][0] == "ffmpeg-test"
     assert str(preview_repair.LOUDNESS_SAMPLE_RATE) in observed["command"]
+    assert str(preview_repair.MAX_LOUDNESS_PCM_BYTES) in observed["command"]
+    assert observed["kwargs"]["stdout"] is preview_repair.subprocess.DEVNULL
+    assert observed["kwargs"]["stderr"] is preview_repair.subprocess.DEVNULL
+    assert "capture_output" not in observed["kwargs"]
     assert observed["kwargs"]["timeout"] == 120
 
 
@@ -253,21 +258,70 @@ def test_loudness_selection_handles_unavailable_or_insufficient_pcm(
     monkeypatch.setattr(
         preview_repair.subprocess,
         "run",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            returncode=1, stdout=b"", stderr=b"failed"
-        ),
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=1),
     )
     assert preview_repair._loudest_start_with_ffmpeg(b"source", 60.0, 30.0) is None
 
     short_pcm = (1).to_bytes(2, "little", signed=True) * 10
+
+    def short_run(command, **_kwargs):
+        Path(command[-1]).write_bytes(short_pcm)
+        return SimpleNamespace(returncode=0)
+
     monkeypatch.setattr(
         preview_repair.subprocess,
         "run",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            returncode=0, stdout=short_pcm, stderr=b""
-        ),
+        short_run,
     )
     assert preview_repair._loudest_start_with_ffmpeg(b"source", 60.0, 30.0) == 0.0
+
+
+def test_loudness_selection_rejects_oversized_pcm_and_cleans_timeout_files(
+    monkeypatch, preview_repair
+):
+    monkeypatch.setattr(preview_repair, "_resolve_ffmpeg", lambda: "ffmpeg-test")
+    observed_paths = []
+
+    def oversized_run(command, **_kwargs):
+        output = Path(command[-1])
+        observed_paths.append(output)
+        with output.open("wb") as stream:
+            stream.seek(preview_repair.MAX_LOUDNESS_PCM_BYTES)
+            stream.write(b"x")
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(preview_repair.subprocess, "run", oversized_run)
+    assert preview_repair._loudest_start_with_ffmpeg(b"source", 60.0, 30.0) is None
+    assert observed_paths and not observed_paths[-1].parent.exists()
+
+    def timeout_run(command, **_kwargs):
+        output = Path(command[-1])
+        observed_paths.append(output)
+        output.write_bytes(b"partial")
+        raise preview_repair.subprocess.TimeoutExpired(command, 120)
+
+    monkeypatch.setattr(preview_repair.subprocess, "run", timeout_run)
+    assert preview_repair._loudest_start_with_ffmpeg(b"source", 60.0, 30.0) is None
+    assert not observed_paths[-1].parent.exists()
+
+
+def test_loudness_selection_refuses_unbounded_duration(monkeypatch, preview_repair):
+    called = False
+
+    def run(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(preview_repair, "_resolve_ffmpeg", lambda: "ffmpeg-test")
+    monkeypatch.setattr(preview_repair.subprocess, "run", run)
+
+    assert preview_repair._loudest_start_with_ffmpeg(
+        b"source",
+        preview_repair.MAX_LOUDNESS_ANALYSIS_SECONDS + 1,
+        30.0,
+    ) is None
+    assert called is False
 
 
 def test_preview_candidate_uses_lyric_cue_and_is_source_bound(

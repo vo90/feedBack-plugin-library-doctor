@@ -38,7 +38,7 @@ def test_diagnostics_report_operational_counts_without_song_identity(tmp_path):
     encoded = json.dumps(report, sort_keys=True)
 
     assert report["schema"] == diagnostics.DIAGNOSTICS_SCHEMA
-    assert report["plugin_version"] == "0.43.0"
+    assert report["plugin_version"] == "0.44.0"
     assert report["state"] == "present"
     assert report["scan_database_present"] is True
     assert report["history"] == {"state": "readable", "record_count": 1}
