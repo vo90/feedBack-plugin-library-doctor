@@ -3,6 +3,9 @@
 
   const API = '/api/plugins/library_doctor';
   const PAGE_SIZE = 50;
+  const SONG_TOOL_PAGE_SIZE = 24;
+  const WORKER_MODE_KEY = 'library_doctor.scan.worker_mode';
+  const WORKER_LIMIT_KEY = 'library_doctor.scan.worker_limit';
   const state = {
     active: false,
     filter: 'problems',
@@ -14,6 +17,7 @@
     pollTimer: 0,
     searchTimer: 0,
     resultRequest: 0,
+    ruleMetadata: {},
     repairRules: {},
     allSafeRepair: null,
     batch: null,
@@ -22,6 +26,21 @@
     dismissedRepairId: null,
     targetKind: 'library',
     targetPaths: { folder: '', file: '' },
+    workerMode: 'automatic',
+    workerLimit: 1,
+    workspace: 'health',
+    songTools: {
+      query: '',
+      page: 0,
+      total: 0,
+      items: [],
+      requestId: 0,
+      loaded: false,
+      selected: null,
+      activeTool: '',
+      selectionRequest: 0,
+      searchTimer: 0,
+    },
   };
   let el = null;
   let playbackDesired = false;
@@ -40,9 +59,25 @@
     if (!root) return null;
     el = {
       root,
+      workspaceTabs: root.querySelector('#lh-workspace-tabs'),
+      healthWorkspace: root.querySelector('#lh-health-workspace'),
+      songToolsWorkspace: root.querySelector('#lh-song-tools-workspace'),
+      songToolSearch: root.querySelector('#lh-song-tool-search'),
+      songToolCount: root.querySelector('#lh-song-tool-count'),
+      songToolResults: root.querySelector('#lh-song-tool-results'),
+      songToolError: root.querySelector('#lh-song-tool-error'),
+      songToolPagination: root.querySelector('#lh-song-tool-pagination'),
+      songToolPrev: root.querySelector('#lh-song-tool-prev'),
+      songToolNext: root.querySelector('#lh-song-tool-next'),
+      songToolPage: root.querySelector('#lh-song-tool-page'),
+      songToolSelection: root.querySelector('#lh-song-tool-selection'),
       targets: root.querySelector('#lh-targets'),
       targetOptions: root.querySelectorAll('input[name="lh-target"]'),
       deepAudio: root.querySelector('#lh-deep-audio'),
+      workerMode: root.querySelector('#lh-worker-mode'),
+      workerLimit: root.querySelector('#lh-worker-limit'),
+      workerLimitWrap: root.querySelector('#lh-worker-limit-wrap'),
+      workerSummary: root.querySelector('#lh-worker-summary'),
       targetPath: root.querySelector('#lh-target-path'),
       pickerNote: root.querySelector('#lh-picker-note'),
       chooseTarget: root.querySelector('#lh-choose-target'),
@@ -56,11 +91,13 @@
       repairResult: root.querySelector('#lh-repair-result'),
       batchSection: root.querySelector('#lh-batch-section'),
       batchCopy: root.querySelector('#lh-batch-copy'),
+      batchPreviewMedia: root.querySelector('#lh-batch-preview-media'),
       batchReview: root.querySelector('#lh-batch-review'),
       batchCancel: root.querySelector('#lh-batch-cancel'),
       batchProgress: root.querySelector('#lh-batch-progress'),
       batchStatus: root.querySelector('#lh-batch-status'),
       batchCount: root.querySelector('#lh-batch-count'),
+      batchLiveCounts: root.querySelector('#lh-batch-live-counts'),
       batchProgressBar: root.querySelector('#lh-batch-progress-bar'),
       batchPreview: root.querySelector('#lh-batch-preview'),
       batchResult: root.querySelector('#lh-batch-result'),
@@ -86,8 +123,8 @@
     return el;
   }
 
-  async function request(path, options) {
-    const response = await fetch(API + path, options);
+  async function requestUrl(url, options) {
+    const response = await fetch(url, options);
     let body = null;
     try { body = await response.json(); } catch (_) { /* handled below */ }
     if (!response.ok) {
@@ -104,6 +141,24 @@
       throw error;
     }
     return body;
+  }
+
+  function request(path, options) {
+    return requestUrl(API + path, options);
+  }
+
+  function coreRequest(path, options) {
+    return requestUrl(path, options);
+  }
+
+  function currentPreviewUrl(packageName) {
+    return `${API}/repair/media/current?package=${encodeURIComponent(packageName)}&v=${Date.now()}`;
+  }
+
+  function mediaReviewLabel(finding) {
+    return finding?.code === 'media.preview-regenerate'
+      ? 'Create a different preview'
+      : 'Review preview manually';
   }
 
   function getPlaybackNotice() {
@@ -223,6 +278,20 @@
   function text(node, value) { if (node) node.textContent = value == null ? '' : String(value); }
   function number(value) { return Number(value || 0).toLocaleString(); }
 
+  function fileSize(value) {
+    const bytes = Math.max(0, Number(value || 0));
+    if (!Number.isFinite(bytes) || bytes === 0) return '0 bytes';
+    const units = ['bytes', 'KB', 'MB', 'GB'];
+    let amount = bytes;
+    let unit = 0;
+    while (amount >= 1024 && unit < units.length - 1) {
+      amount /= 1024;
+      unit += 1;
+    }
+    const digits = unit === 0 || amount >= 10 ? 0 : 1;
+    return `${amount.toFixed(digits)} ${units[unit]}`;
+  }
+
   function repairChangeCount(value) {
     return Number(value?.change_count ?? value?.removed_count ?? 0);
   }
@@ -239,6 +308,9 @@
     if (value?.change_kind === 'remove_redundant') {
       return `remove ${number(count)} redundant ${itemName} ${count === 1 ? 'record' : 'records'} while preserving the matching chords`;
     }
+    if (value?.change_kind === 'replace_media') {
+      return 'create one standard library preview from the full song mix';
+    }
     return `remove ${number(count)} redundant ${itemName} ${count === 1 ? 'copy' : 'copies'}`;
   }
 
@@ -254,11 +326,18 @@
     if (value?.change_kind === 'remove_redundant') {
       return `Removed ${number(count)} redundant ${itemName} ${count === 1 ? 'record' : 'records'} while preserving every matching chord`;
     }
+    if (value?.change_kind === 'replace_media') {
+      return 'Created a standard library preview from the full song mix';
+    }
     if (value?.change_kind === 'combined') {
       const summaries = Array.isArray(value?.repair_summaries)
         ? value.repair_summaries.filter((item) => repairChangeCount(item) > 0)
         : [];
       if (summaries.length === 1) return completedRepairChange(summaries[0]);
+      if (value?.preview_repaired) {
+        const songDataChanges = Math.max(0, count - 1);
+        return `Applied ${number(songDataChanges)} safe song-data ${songDataChanges === 1 ? 'change' : 'changes'} and created a standard library preview`;
+      }
       return `Applied ${number(count)} safe stored ${count === 1 ? 'change' : 'changes'}`;
     }
     return `Removed ${number(count)} redundant ${itemName} ${count === 1 ? 'copy' : 'copies'}`;
@@ -293,6 +372,48 @@
       : state.targetKind === 'file' && typeof desktop.pickFile === 'function';
   }
 
+  function loadWorkerSettings() {
+    try {
+      const savedMode = localStorage.getItem(WORKER_MODE_KEY);
+      state.workerMode = savedMode === 'custom' ? 'custom' : 'automatic';
+      const savedLimit = Number(localStorage.getItem(WORKER_LIMIT_KEY));
+      state.workerLimit = Number.isInteger(savedLimit) && savedLimit > 0 ? savedLimit : 1;
+    } catch (_) {
+      state.workerMode = 'automatic';
+      state.workerLimit = 1;
+    }
+    el.workerMode.value = state.workerMode;
+    el.workerLimit.value = String(state.workerLimit);
+  }
+
+  function saveWorkerSettings() {
+    try {
+      localStorage.setItem(WORKER_MODE_KEY, state.workerMode);
+      localStorage.setItem(WORKER_LIMIT_KEY, String(state.workerLimit));
+    } catch (_) { /* Scanning still works when browser storage is unavailable. */ }
+  }
+
+  function updateWorkerControls() {
+    const running = !!state.status?.running || !!state.status?.repairing;
+    const custom = state.workerMode === 'custom';
+    el.workerMode.value = state.workerMode;
+    el.workerMode.disabled = running;
+    el.workerLimit.value = String(state.workerLimit);
+    el.workerLimit.disabled = running;
+    setHidden(el.workerLimitWrap, !custom);
+
+    const policy = state.status?.worker_policy;
+    const selected = Number(policy?.selected_workers || 0);
+    if (policy && policy.reason !== 'not_started' && selected > 0) {
+      text(
+        el.workerSummary,
+        `${selected} worker${selected === 1 ? '' : 's'} (${policy.mode === 'custom' ? 'custom maximum' : 'automatic'})`,
+      );
+    } else {
+      text(el.workerSummary, custom ? `Custom maximum: ${number(state.workerLimit)}` : 'Automatic');
+    }
+  }
+
   function updateTargetControls() {
     const running = !!state.status?.running || !!state.status?.repairing;
     const path = selectedPath();
@@ -323,6 +444,7 @@
     el.scan.disabled = running || (state.targetKind !== 'library' && !path);
     el.scanAll.disabled = el.scan.disabled;
     el.deepAudio.disabled = running;
+    updateWorkerControls();
   }
 
   async function chooseTarget() {
@@ -417,14 +539,21 @@
         ? ''
         : ` | about ${duration(status.eta_seconds)} left`;
       const deep = status.deep_audio ? ' | deep audio' : '';
-      text(el.progressCount, total ? `${number(done)} of ${number(total)}${eta}${deep}` : deep.slice(3));
+      const workers = status.worker_policy?.reason === 'not_started'
+        ? 0 : Number(status.worker_policy?.selected_workers || 0);
+      const workerCopy = workers > 0 ? ` | ${number(workers)} worker${workers === 1 ? '' : 's'}` : '';
+      text(el.progressCount, total ? `${number(done)} of ${number(total)}${eta}${deep}${workerCopy}` : deep.slice(3));
       if (Array.isArray(status.discovery_errors) && status.discovery_errors.length) {
         text(el.scanWarning, 'Some folders could not be read. This scan cannot represent the full selected scope.');
         setHidden(el.scanWarning, false);
       }
     } else if (status.stage === 'complete') {
       text(el.status, `Scan complete for ${targetLabel}. ${number(summary.total)} package${summary.total === 1 ? '' : 's'} checked.`);
-      text(el.progressCount, status.reused ? `${number(status.reused)} unchanged` : '');
+      const workers = Number(status.worker_policy?.selected_workers || 0);
+      const details = [];
+      if (status.reused) details.push(`${number(status.reused)} unchanged`);
+      if (status.scanned && workers) details.push(`${number(workers)} worker${workers === 1 ? '' : 's'}`);
+      text(el.progressCount, details.join(' | '));
     } else if (status.stage === 'cancelled') {
       text(el.status, 'Scan cancelled. Completed package reports were kept.');
       text(el.progressCount, status.done ? `${number(status.done)} completed` : '');
@@ -458,10 +587,15 @@
       const coverage = expected == null ? `${number(completed)} packages` : `${number(completed)} of ${number(expected)} packages`;
       const profile = last.deep_audio ? 'deep audio' : 'normal checks';
       const outcome = last.complete ? 'complete' : `${last.outcome || 'incomplete'}`;
-      text(el.scanProvenance, `Last scan: ${outcome} | ${scope} | ${profile} | ${coverage}${when ? ` | ${when}` : ''}`);
+      const workers = Number(last.worker_policy?.selected_workers || 0);
+      const workerCopy = workers ? ` | ${number(workers)} worker${workers === 1 ? '' : 's'}` : '';
+      text(el.scanProvenance, `Last scan: ${outcome} | ${scope} | ${profile} | ${coverage}${workerCopy}${when ? ` | ${when}` : ''}`);
       setHidden(el.scanProvenance, false);
       if (!running && !last.complete && status.stage === 'idle') {
         text(el.scanWarning, `The last scan was ${last.outcome || 'interrupted'}. Cached results may be incomplete.`);
+        setHidden(el.scanWarning, false);
+      } else if (!running && status.scan_current === false) {
+        text(el.scanWarning, 'Library Doctor checks were updated after this scan. The saved results remain available for reference, but run this target again before reviewing or applying repairs.');
         setHidden(el.scanWarning, false);
       }
     } else {
@@ -485,7 +619,7 @@
     const grid = make('div', 'lh-batch-summary');
     items.forEach(([value, label]) => {
       const item = make('div');
-      item.appendChild(make('strong', '', number(value)));
+      item.appendChild(make('strong', '', typeof value === 'string' ? value : number(value)));
       item.appendChild(make('span', '', label));
       grid.appendChild(item);
     });
@@ -508,23 +642,25 @@
     text(
       el.batchCopy,
       completeScope
-        ? `Review every deterministic safe repair in ${target}. The preview is read-only and must finish before anything can be applied.`
+        ? `Review every deterministic safe repair in ${target}. You can also explicitly include automatic repairs for previews already flagged by the scan.`
         : 'Complete this scan scope before reviewing a batch repair. Incomplete results are never used for mass changes.',
     );
     setHidden(el.batchReview, running);
     setHidden(el.batchCancel, !running);
     el.batchReview.disabled = !completeScope || !!scannerStatus?.running || (!!scannerStatus?.repairing && !running);
+    el.batchPreviewMedia.disabled = running || !completeScope || !!scannerStatus?.running;
     text(
       el.batchReview,
       phase === 'ready' ? 'Refresh batch preview' : 'Review batch repair',
     );
     text(
       el.batchCancel,
-      ['apply', 'undo-apply'].includes(batch?.mode)
+      ['apply', 'undo-apply', 'finalize-apply'].includes(batch?.mode)
         ? 'Stop after current Feedpak' : 'Stop preview',
     );
 
     setHidden(el.batchProgress, !running);
+    setHidden(el.batchLiveCounts, true);
     if (running) {
       const total = Number(batch.total || 0);
       const done = Number(batch.done || 0);
@@ -539,13 +675,23 @@
         'aria-valuetext',
         `${number(done)} of ${number(total)} Feedpaks processed`,
       );
+      const live = batch?.live_outcomes;
+      if (batch?.mode === 'apply' && live && Number(live.completed || 0) > 0) {
+        text(
+          el.batchLiveCounts,
+          `${number(live.repaired)} repaired | ${number(live.partial)} partial | ${number(live.skipped)} skipped safely | ${number(live.failed)} failed${Number(live.previews_repaired || 0) ? ` | ${number(live.previews_repaired)} previews created` : ''}`,
+        );
+        setHidden(el.batchLiveCounts, false);
+      }
     }
 
     const undoPhase = phase.startsWith('undo')
       || (['paused', 'cancelling'].includes(phase) && String(batch?.mode || '').startsWith('undo'));
+    const finalizePhase = phase.startsWith('finalize')
+      || (['paused', 'cancelling'].includes(phase) && String(batch?.mode || '').startsWith('finalize'));
     const activeResult = batch?.result || (
-      phase === 'idle' || phase === 'stale' || undoPhase
-        || (phase === 'error' && String(batch?.mode || '').startsWith('undo'))
+      phase === 'idle' || phase === 'stale' || undoPhase || finalizePhase
+        || (phase === 'error' && ['undo', 'finalize'].some((mode) => String(batch?.mode || '').startsWith(mode)))
         ? batch?.last_result : null
     );
     const restoredCount = Array.isArray(activeResult?.outcomes)
@@ -559,6 +705,8 @@
       activeResult?.currently_repaired_count ?? '',
       batch?.undo_preview?.undo_plan_id || '',
       batch?.undo_result?.id || '',
+      batch?.finalize_preview?.finalize_plan_id || '',
+      batch?.finalize_result?.id || '',
       batch?.message || '',
     ].join(':');
     if (state.batchRenderKey === renderKey) return;
@@ -570,16 +718,25 @@
     if (phase === 'undo_ready' && batch.undo_preview) {
       renderBatchUndoPreview(batch.undo_preview);
     }
+    if (phase === 'finalize_ready' && batch.finalize_preview) {
+      renderBatchFinalizePreview(batch.finalize_preview);
+    }
     if (
       batch?.undo_result
       && ['undo_completed', 'undo_cancelled'].includes(phase)
     ) {
       renderBatchUndoResult(batch.undo_result);
     }
+    if (
+      batch?.finalize_result
+      && ['finalize_completed', 'finalize_cancelled'].includes(phase)
+    ) {
+      renderBatchFinalizeResult(batch.finalize_result);
+    }
     if (activeResult) renderBatchResult(activeResult, !batch?.result, batch);
     if (
       !activeResult
-      && ['stale', 'error', 'cancelled', 'undo_cancelled'].includes(phase)
+      && ['stale', 'error', 'cancelled', 'undo_cancelled', 'finalize_cancelled'].includes(phase)
     ) {
       const card = make('div', 'lh-batch-card');
       card.appendChild(make('h4', '', phase === 'error' ? 'Batch operation stopped' : 'Batch preview is not active'));
@@ -594,18 +751,18 @@
     card.appendChild(make(
       'p',
       '',
-      `${number(preview.eligible_count)} of ${number(preview.scope_package_count)} scanned Feedpaks have a safe repair that can be applied now.`,
+      `${number(preview.eligible_count)} of ${number(preview.scope_package_count)} scanned Feedpaks still match the completed scan and have a repair selected for this batch.`,
     ));
     card.appendChild(batchSummaryGrid([
       [preview.eligible_count, 'Eligible Feedpaks'],
-      [repairChangeCount(preview), 'Safe song-data changes'],
+      [preview.safe_repair_package_count, 'With safe song-data fixes'],
+      [preview.preview_repair_count, 'With preview repairs'],
       [preview.blocked_count, 'Blocked and excluded'],
-      [preview.no_longer_needed_count, 'No longer need repair'],
     ]));
 
     const rules = make('details', 'lh-batch-details');
     rules.open = true;
-    rules.appendChild(make('summary', '', `Changes by repair type (${number(preview.rule_summaries?.length || 0)})`));
+    rules.appendChild(make('summary', '', `Repair types found (${number(preview.rule_summaries?.length || 0)})`));
     const ruleList = make('ul', 'lh-batch-list');
     (preview.rule_summaries || []).forEach((rule) => {
       const item = make('li');
@@ -613,12 +770,17 @@
       item.appendChild(make(
         'span',
         '',
-        `${plannedRepairChange(rule)} across ${number(rule.package_count)} Feedpak${Number(rule.package_count) === 1 ? '' : 's'}.`,
+        `${number(rule.reported_affected_count)} affected ${Number(rule.reported_affected_count) === 1 ? 'location was' : 'locations were'} reported by the completed scan across ${number(rule.package_count)} Feedpak${Number(rule.package_count) === 1 ? '' : 's'}.`,
       ));
       ruleList.appendChild(item);
     });
     rules.appendChild(ruleList);
     card.appendChild(rules);
+    card.appendChild(make(
+      'p',
+      'lh-muted',
+      'These are scan findings, not promised edit totals. Library Doctor recalculates the selected repairs from the current song data and runs all safety checks when each Feedpak is reached. The completed result shows the exact changes made.',
+    ));
 
     const packages = make('details', 'lh-batch-details');
     packages.appendChild(make('summary', '', `Eligible Feedpaks (${number(preview.packages?.length || 0)})`));
@@ -630,7 +792,7 @@
       row.appendChild(make(
         'span',
         '',
-        `${number(repairChangeCount(item))} safe song-data ${repairChangeCount(item) === 1 ? 'change' : 'changes'} | ${number(item.rule_count)} repair ${Number(item.rule_count) === 1 ? 'type' : 'types'} | ${item.package}`,
+        `${number(item.safe_rule_count || 0)} safe song-data repair ${Number(item.safe_rule_count || 0) === 1 ? 'type' : 'types'}${item.preview_repair ? ' | automatic audio preview' : ''} | ${item.package}`,
       ));
       packageList.appendChild(row);
     });
@@ -670,10 +832,17 @@
     }
 
     card.appendChild(make('p', '', preview.file_handling));
+    if (Number(preview.preview_repair_count || 0) > 0) {
+      card.appendChild(make(
+        'p',
+        'lh-batch-warning',
+        `${number(preview.preview_repair_count)} flagged preview${Number(preview.preview_repair_count) === 1 ? '' : 's'} will be selected and created automatically. This review does not generate or play those excerpts. Successful preview repairs are finalized after validation and are not included in Undo; you can replace any result later in Song Tools.`,
+      ));
+    }
     card.appendChild(make(
       'p',
       'lh-muted',
-      `${preview.deep_audio ? 'This batch will repeat Deep Audio validation because the current scan used it. ' : ''}Gameplay pauses the batch between Feedpaks. Stopping also takes effect after the current Feedpak finishes safely.`,
+      `${preview.deep_audio ? 'For archived Feedpaks, song-data-only repairs reuse signature-bound Deep Audio findings after a full integrity check of unchanged audio. Unpacked packages and preview repairs still validate their audio deeply. ' : ''}Audio encoding can make preview repairs slower. Gameplay pauses the batch between Feedpaks. Stopping also takes effect after the current Feedpak finishes safely.`,
     ));
     if (Number(preview.eligible_count || 0) > 0) {
       const actions = make('div', 'lh-repair-buttons');
@@ -692,7 +861,7 @@
     confirmation.appendChild(make(
       'p',
       '',
-      `Apply safe repairs to ${number(preview.eligible_count)} Feedpak${Number(preview.eligible_count) === 1 ? '' : 's'}? Each package is validated, backed up, and saved separately. If a later package fails, earlier successful repairs remain in place with their own Undo backup.`,
+      `Apply the selected repairs to ${number(preview.eligible_count)} Feedpak${Number(preview.eligible_count) === 1 ? '' : 's'}? Each package is recalculated, safety-checked, validated, and saved separately. A package that no longer qualifies is skipped without being changed. Safe song-data repairs retain Undo backups.${Number(preview.preview_repair_count || 0) > 0 ? ' Automatic preview repairs are finalized after successful validation and do not retain Undo copies.' : ''} If a later package fails, earlier successful repairs remain in place.`,
     ));
     const apply = make('button', 'lh-button lh-button-primary', 'Apply batch repair');
     const cancel = make('button', 'lh-button', 'Go back');
@@ -713,7 +882,13 @@
     setHidden(el.batchPreview, false);
     el.batchPreview.replaceChildren(make('p', 'lh-muted', 'Preparing a read-only batch preview...'));
     try {
-      const batch = await request('/repair/batch/preview', { method: 'POST' });
+      const batch = await request('/repair/batch/preview', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          include_preview_repairs: !!el.batchPreviewMedia.checked,
+        }),
+      });
       const status = { ...(state.status || {}), repairing: true, batch };
       renderStatus(status);
       schedulePoll(200);
@@ -794,7 +969,7 @@
       row.appendChild(make(
         'span',
         '',
-        `${number(repairChangeCount(item))} safe song-data ${repairChangeCount(item) === 1 ? 'change will' : 'changes will'} return to the saved original state across ${number(item.member_count)} ${Number(item.member_count) === 1 ? 'file' : 'files'}. ${item.package}`,
+        `${number(repairChangeCount(item))} safe song-data ${repairChangeCount(item) === 1 ? 'change will' : 'changes will'} return to the saved original state across ${number(item.member_count)} ${Number(item.member_count) === 1 ? 'file' : 'files'}.${item.preview_repaired ? ' The finalized generated preview will remain.' : ''} ${item.package}`,
       ));
       packageList.appendChild(row);
     });
@@ -851,10 +1026,10 @@
     confirmation.appendChild(make(
       'p',
       '',
-      `Restore the saved original song data for ${number(preview.eligible_count)} Feedpak${Number(preview.eligible_count) === 1 ? '' : 's'}? ${number(preview.changes_to_restore ?? preview.entries_to_restore)} safe song-data ${Number(preview.changes_to_restore ?? preview.entries_to_restore) === 1 ? 'change will' : 'changes will'} return to the saved state, and the related findings are expected to return. Other package files are preserved.`,
+      `Restore the saved original song data for ${number(preview.eligible_count)} Feedpak${Number(preview.eligible_count) === 1 ? '' : 's'}? ${number(preview.changes_to_restore ?? preview.entries_to_restore)} safe song-data ${Number(preview.changes_to_restore ?? preview.entries_to_restore) === 1 ? 'change will' : 'changes will'} return to the saved state, and the related findings are expected to return. Finalized generated previews and other package files are preserved.`,
     ));
     const apply = make('button', 'lh-button lh-button-danger', `Undo repairs for ${number(preview.eligible_count)} Feedpaks`);
-    const cancel = make('button', 'lh-button', 'Keep repaired versions');
+    const cancel = make('button', 'lh-button', 'Cancel');
     apply.type = 'button';
     cancel.type = 'button';
     apply.addEventListener('click', () => applyBatchUndo(preview, apply, cancel));
@@ -918,14 +1093,9 @@
     details.open = Number(result.failed_count || 0) > 0 || Number(result.skipped_count || 0) > 0;
     const outcomes = Array.isArray(result.outcomes) ? result.outcomes : [];
     details.appendChild(make('summary', '', `Restore outcomes (${number(outcomes.length)})`));
-    const list = make('ul', 'lh-batch-list');
-    const pager = make('div', 'lh-batch-pager');
-    const pageSize = 25;
-    let page = 0;
-    function drawPage() {
-      list.replaceChildren();
-      const start = page * pageSize;
-      outcomes.slice(start, start + pageSize).forEach((outcome) => {
+    appendOutcomeExplorer(details, outcomes, {
+      filters: standardOutcomeFilters({ completedLabel: 'Originals restored' }),
+      renderRow: (outcome) => {
         const row = make('li');
         const heading = make('div', 'lh-batch-outcome-heading');
         heading.appendChild(make('strong', '', `${outcome.title || outcome.package}${outcome.artist ? ` - ${outcome.artist}` : ''}`));
@@ -939,28 +1109,355 @@
           'span',
           '',
           outcome.outcome === 'restored'
-            ? `${number(repairChangeCount(outcome))} safe song-data ${repairChangeCount(outcome) === 1 ? 'change was' : 'changes were'} restored to the original state. ${outcome.cache_updated === false ? 'Displayed scan result needs a manual refresh. ' : ''}${outcome.package}`
+            ? `${number(repairChangeCount(outcome))} safe song-data ${repairChangeCount(outcome) === 1 ? 'change was' : 'changes were'} restored to the original state.${outcome.preview_repaired ? ' The finalized generated preview remains.' : ''} ${outcome.cache_updated === false ? 'Displayed scan result needs a manual refresh. ' : ''}${outcome.package}`
             : `${outcome.message || 'No additional details.'} ${outcome.package}`,
         ));
-        list.appendChild(row);
-      });
-      const pages = Math.max(1, Math.ceil(outcomes.length / pageSize));
-      pager.replaceChildren();
-      const previous = make('button', 'lh-button', 'Previous');
-      const next = make('button', 'lh-button', 'Next');
-      previous.type = 'button';
-      next.type = 'button';
-      previous.disabled = page === 0;
-      next.disabled = page + 1 >= pages;
-      previous.addEventListener('click', () => { page -= 1; drawPage(); });
-      next.addEventListener('click', () => { page += 1; drawPage(); });
-      pager.appendChild(previous);
-      pager.appendChild(make('span', '', `Page ${number(page + 1)} of ${number(pages)}`));
-      pager.appendChild(next);
+        return row;
+      },
+    });
+    card.appendChild(details);
+    el.batchPreview.appendChild(card);
+  }
+
+  async function startBatchFinalizePreview(trigger) {
+    trigger.disabled = true;
+    text(trigger, 'Checking recovery copies...');
+    try {
+      const batch = await request('/repair/batch/finalize/preview', { method: 'POST' });
+      renderStatus({ ...(state.status || {}), repairing: true, batch });
+      schedulePoll(200);
+    } catch (error) {
+      trigger.disabled = false;
+      text(trigger, 'Review Finalize all remaining repairs');
+      trigger.parentNode.appendChild(make('p', 'lh-inline-error', error.message));
     }
-    drawPage();
-    details.appendChild(list);
-    if (outcomes.length > pageSize) details.appendChild(pager);
+  }
+
+  function outcomeSearchText(outcome) {
+    return [
+      outcome?.title,
+      outcome?.artist,
+      outcome?.package,
+      outcome?.message,
+      outcome?.code,
+    ].filter(Boolean).join(' ').toLocaleLowerCase();
+  }
+
+  function appendOutcomeExplorer(container, outcomes, options) {
+    const source = Array.isArray(outcomes) ? outcomes : [];
+    const filters = options.filters;
+    let activeFilter = (
+      filters.find((item) => item.preferred && source.some(item.test))
+      || filters.find((item) => item.id === 'all')
+      || filters[0]
+    ).id;
+    let query = '';
+    let sortMode = options.defaultSort || 'attention';
+    let rendered = 0;
+    let filtered = [];
+    const chunkSize = 100;
+
+    const controls = make('div', 'lh-outcome-controls');
+    const search = make('input');
+    search.type = 'search';
+    search.placeholder = 'Search title, artist, package, or reason...';
+    search.setAttribute('aria-label', 'Search batch outcomes');
+    const sort = make('select');
+    sort.setAttribute('aria-label', 'Sort batch outcomes');
+    [
+      ['attention', 'Needs attention first'],
+      ['changes', 'Largest change count'],
+      ['title', 'Song title'],
+      ['artist', 'Artist'],
+      ['path', 'Package path'],
+    ].forEach(([value, label]) => {
+      const option = make('option', '', label);
+      option.value = value;
+      sort.appendChild(option);
+    });
+    sort.value = sortMode;
+    controls.appendChild(search);
+    controls.appendChild(sort);
+    container.appendChild(controls);
+
+    const chips = make('div', 'lh-outcome-filters');
+    const chipButtons = new Map();
+    filters.forEach((filter) => {
+      const count = source.filter(filter.test).length;
+      const button = make('button', '', `${filter.label} (${number(count)})`);
+      button.type = 'button';
+      button.dataset.filter = filter.id;
+      button.setAttribute('aria-pressed', String(filter.id === activeFilter));
+      button.addEventListener('click', () => {
+        activeFilter = filter.id;
+        chipButtons.forEach((item, id) => item.setAttribute(
+          'aria-pressed', String(id === activeFilter),
+        ));
+        redraw();
+      });
+      chipButtons.set(filter.id, button);
+      chips.appendChild(button);
+    });
+    container.appendChild(chips);
+
+    const resultCount = make('p', 'lh-outcome-result-count');
+    const list = make('ul', 'lh-batch-list lh-batch-list-scroll');
+    list.tabIndex = 0;
+    const empty = make('p', 'lh-outcome-empty', 'No outcomes match these filters.');
+    empty.hidden = true;
+    container.appendChild(resultCount);
+    container.appendChild(list);
+    container.appendChild(empty);
+
+    function attentionRank(item) {
+      if (item.outcome === 'failed') return 0;
+      if (item.outcome === 'partial') return 1;
+      if (item.outcome === 'skipped') return 2;
+      if (item.cache_updated === false || item.preview_cleanup_required) return 3;
+      if (item.outcome === 'success') return 4;
+      if (item.outcome === 'restored') return 5;
+      return 6;
+    }
+
+    function compare(left, right) {
+      const textCompare = (a, b) => String(a || '').localeCompare(
+        String(b || ''), undefined, { sensitivity: 'base', numeric: true },
+      );
+      if (sortMode === 'changes') {
+        const delta = repairChangeCount(right) - repairChangeCount(left);
+        return delta || textCompare(left.title || left.package, right.title || right.package);
+      }
+      if (sortMode === 'title') return textCompare(left.title || left.package, right.title || right.package);
+      if (sortMode === 'artist') return textCompare(left.artist, right.artist) || textCompare(left.title, right.title);
+      if (sortMode === 'path') return textCompare(left.package, right.package);
+      return attentionRank(left) - attentionRank(right)
+        || textCompare(left.title || left.package, right.title || right.package);
+    }
+
+    function drawMore() {
+      const next = filtered.slice(rendered, rendered + chunkSize);
+      next.forEach((outcome) => list.appendChild(options.renderRow(outcome)));
+      rendered += next.length;
+      text(
+        resultCount,
+        `Showing ${number(rendered)} of ${number(filtered.length)} matching outcomes`,
+      );
+    }
+
+    function redraw() {
+      const selected = filters.find((item) => item.id === activeFilter) || filters[0];
+      filtered = source.filter((item) => (
+        selected.test(item)
+        && (!query || outcomeSearchText(item).includes(query))
+      )).sort(compare);
+      rendered = 0;
+      list.replaceChildren();
+      list.scrollTop = 0;
+      empty.hidden = filtered.length > 0;
+      list.hidden = filtered.length === 0;
+      if (filtered.length) drawMore();
+      else text(resultCount, '0 matching outcomes');
+    }
+
+    search.addEventListener('input', () => {
+      query = search.value.trim().toLocaleLowerCase();
+      redraw();
+    });
+    sort.addEventListener('change', () => {
+      sortMode = sort.value;
+      redraw();
+    });
+    list.addEventListener('scroll', () => {
+      if (
+        rendered < filtered.length
+        && list.scrollTop + list.clientHeight >= list.scrollHeight - 160
+      ) drawMore();
+    });
+    redraw();
+  }
+
+  function standardOutcomeFilters({ completedLabel = 'Completed' } = {}) {
+    return [
+      {
+        id: 'attention',
+        label: 'Needs attention',
+        preferred: true,
+        test: (item) => ['failed', 'partial', 'skipped'].includes(item.outcome)
+          || item.cache_updated === false || item.preview_cleanup_required,
+      },
+      { id: 'failed', label: 'Failed', test: (item) => item.outcome === 'failed' },
+      { id: 'skipped', label: 'Skipped safely', test: (item) => item.outcome === 'skipped' },
+      {
+        id: 'completed',
+        label: completedLabel,
+        test: (item) => ['success', 'finalized', 'restored'].includes(item.outcome),
+      },
+      { id: 'all', label: 'All', test: () => true },
+    ];
+  }
+
+  function renderBatchFinalizePreview(preview) {
+    const card = make('div', 'lh-batch-card');
+    card.appendChild(make('h4', '', 'Finalization review ready - nothing removed yet'));
+    card.appendChild(make(
+      'p',
+      '',
+      `${number(preview.eligible_count)} remaining recovery ${Number(preview.eligible_count) === 1 ? 'copy is' : 'copies are'} verified and ready to remove. Finalization keeps the current Feedpaks and permanently removes Library Doctor Undo for those repairs.`,
+    ));
+    card.appendChild(batchSummaryGrid([
+      [preview.eligible_count, 'Ready to finalize'],
+      [preview.blocked_count, 'Kept for safety'],
+      [preview.already_finalized_count, 'Already finalized'],
+      [fileSize(preview.recovery_bytes_to_free), 'Recovery storage to free'],
+    ]));
+
+    const packages = make('details', 'lh-batch-details');
+    packages.open = true;
+    packages.appendChild(make('summary', '', `Recovery copies ready to remove (${number(preview.eligible_count)})`));
+    const packageList = make('ul', 'lh-batch-list');
+    (preview.packages || []).slice(0, 250).forEach((item) => {
+      const row = make('li');
+      row.appendChild(make('strong', '', `${item.title || item.package}${item.artist ? ` - ${item.artist}` : ''}`));
+      row.appendChild(make(
+        'span',
+        '',
+        `${fileSize(item.recovery_bytes)} ${item.recovery_kind === 'preview' ? 'temporary preview' : 'song-data'} recovery copy | ${number(item.member_count)} verified ${Number(item.member_count) === 1 ? 'file' : 'files'} | ${item.package}`,
+      ));
+      packageList.appendChild(row);
+    });
+    if ((preview.packages || []).length > 250) {
+      packageList.appendChild(make(
+        'li',
+        '',
+        `${number(preview.packages.length - 250)} additional verified recovery copies are included in the totals above.`,
+      ));
+    }
+    packages.appendChild(packageList);
+    card.appendChild(packages);
+
+    if (Number(preview.blocked_count || 0) > 0) {
+      const blocked = make('details', 'lh-batch-details');
+      blocked.open = true;
+      blocked.appendChild(make('summary', '', `Recovery copies kept for safety (${number(preview.blocked_count)})`));
+      const blockedList = make('ul', 'lh-batch-list');
+      (preview.blocked || []).slice(0, 250).forEach((item) => {
+        const row = make('li');
+        row.appendChild(make('strong', '', item.title || item.package));
+        row.appendChild(make('span', '', `${item.message} (${item.package})`));
+        blockedList.appendChild(row);
+      });
+      blocked.appendChild(blockedList);
+      card.appendChild(blocked);
+      card.appendChild(make(
+        'p',
+        'lh-batch-warning',
+        'These copies will not be removed. A changed, missing, or uncertain Feedpak is excluded rather than losing its saved original data.',
+      ));
+    }
+
+    card.appendChild(make('p', '', preview.file_handling));
+    card.appendChild(make(
+      'p',
+      'lh-batch-warning',
+      'Finalization is permanent. It does not change the playable Feedpaks, but Library Doctor cannot restore their pre-repair song data after the recovery copies are removed.',
+    ));
+    if (Number(preview.eligible_count || 0) > 0) {
+      const actions = make('div', 'lh-repair-buttons');
+      const continueButton = make('button', 'lh-button lh-button-danger', 'Continue to finalization confirmation');
+      continueButton.type = 'button';
+      continueButton.addEventListener('click', () => showBatchFinalizeConfirmation(preview, continueButton, card));
+      actions.appendChild(continueButton);
+      card.appendChild(actions);
+    }
+    el.batchPreview.appendChild(card);
+  }
+
+  function showBatchFinalizeConfirmation(preview, trigger, card) {
+    trigger.disabled = true;
+    const confirmation = make('div', 'lh-batch-confirm lh-batch-undo-confirm');
+    confirmation.appendChild(make(
+      'p',
+      '',
+      `Keep ${number(preview.eligible_count)} current repaired Feedpak${Number(preview.eligible_count) === 1 ? '' : 's'} and permanently remove their recovery ${Number(preview.eligible_count) === 1 ? 'copy' : 'copies'}? This should free ${fileSize(preview.recovery_bytes_to_free)}. Every Feedpak is reverified immediately before its copy is removed; anything changed or uncertain is skipped. This cannot be undone.`,
+    ));
+    const apply = make('button', 'lh-button lh-button-danger', `Finalize ${number(preview.eligible_count)} repairs`);
+    const cancel = make('button', 'lh-button', 'Cancel');
+    apply.type = 'button';
+    cancel.type = 'button';
+    apply.addEventListener('click', () => applyBatchFinalization(preview, apply, cancel));
+    cancel.addEventListener('click', () => {
+      confirmation.remove();
+      trigger.disabled = false;
+    });
+    confirmation.appendChild(apply);
+    confirmation.appendChild(cancel);
+    card.appendChild(confirmation);
+  }
+
+  async function applyBatchFinalization(preview, apply, cancel) {
+    apply.disabled = true;
+    cancel.disabled = true;
+    text(apply, 'Starting finalization...');
+    try {
+      const batch = await request('/repair/batch/finalize/apply', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ finalize_plan_id: preview.finalize_plan_id }),
+      });
+      renderStatus({ ...(state.status || {}), repairing: true, batch });
+      schedulePoll(200);
+    } catch (error) {
+      apply.disabled = false;
+      cancel.disabled = false;
+      text(apply, `Finalize ${number(preview.eligible_count)} repairs`);
+      apply.parentNode.appendChild(make('p', 'lh-inline-error', error.message));
+    }
+  }
+
+  function renderBatchFinalizeResult(result) {
+    const card = make('div', 'lh-batch-card');
+    card.appendChild(make(
+      'h4',
+      '',
+      result.outcome === 'complete' ? 'Batch finalization complete' : 'Batch finalization stopped',
+    ));
+    card.appendChild(make(
+      'p',
+      '',
+      result.outcome === 'complete'
+        ? `${number(result.completed_count)} planned recovery-copy transactions finished. The playable Feedpaks were not changed.`
+        : `${number(result.completed_count)} recovery copies were processed; ${number(result.remaining_count)} were not started. Completed finalizations remain permanent.`,
+    ));
+    card.appendChild(batchSummaryGrid([
+      [result.finalized_count, 'Recovery copies removed'],
+      [result.skipped_count, 'Copies kept for safety'],
+      [result.failed_count, 'Failed'],
+      [fileSize(result.recovery_bytes_freed), 'Recovery storage freed'],
+    ]));
+
+    const outcomes = Array.isArray(result.outcomes) ? result.outcomes : [];
+    const details = make('details', 'lh-batch-details');
+    details.open = Number(result.failed_count || 0) > 0 || Number(result.skipped_count || 0) > 0;
+    details.appendChild(make('summary', '', `Finalization outcomes (${number(outcomes.length)})`));
+    appendOutcomeExplorer(details, outcomes, {
+      filters: standardOutcomeFilters({ completedLabel: 'Finalized' }),
+      renderRow: (outcome) => {
+      const row = make('li');
+      const heading = make('div', 'lh-batch-outcome-heading');
+      heading.appendChild(make('strong', '', `${outcome.title || outcome.package}${outcome.artist ? ` - ${outcome.artist}` : ''}`));
+      heading.appendChild(badge(
+        outcome.outcome === 'finalized' ? 'Finalized' : outcome.outcome === 'failed' ? 'Failed' : 'Kept for safety',
+        outcome.outcome === 'finalized' ? 'good' : outcome.outcome === 'failed' ? 'error' : 'warning',
+      ));
+      row.appendChild(heading);
+      row.appendChild(make(
+        'span',
+        '',
+        `${outcome.message || 'No additional details.'}${outcome.outcome === 'finalized' ? ` ${fileSize(outcome.recovery_bytes_freed)} freed.` : ''} ${outcome.package}`,
+      ));
+        return row;
+      },
+    });
     card.appendChild(details);
     el.batchPreview.appendChild(card);
   }
@@ -976,15 +1473,20 @@
     const restoredCount = Number(
       result.restored_count ?? outcomes.filter((item) => item.outcome === 'restored').length,
     );
+    const finalizedCount = Number(
+      result.finalized_count ?? outcomes.filter((item) => item.outcome === 'finalized').length,
+    );
     const currentlyRepaired = Number(
       result.currently_repaired_count
-        ?? outcomes.filter((item) => item.outcome === 'success').length,
+        ?? outcomes.filter((item) => ['success', 'finalized', 'partial'].includes(item.outcome)).length,
     );
-    const currentChanges = Number(
-      result.current_change_count
-        ?? outcomes
-          .filter((item) => item.outcome === 'success')
-          .reduce((total, item) => total + repairChangeCount(item), 0),
+    const previewSuccessful = Number(
+      result.preview_successful_count
+        ?? outcomes.filter((item) => item.preview_repaired).length,
+    );
+    const undoableCount = Number(
+      result.undoable_count
+        ?? outcomes.filter((item) => item.backup_id && ['success', 'partial'].includes(item.outcome)).length,
     );
     card.appendChild(make(
       'h4',
@@ -1003,10 +1505,18 @@
     card.appendChild(batchSummaryGrid([
       [currentlyRepaired, 'Currently repaired'],
       [restoredCount, 'Originals restored'],
+      [result.include_preview_repairs ? previewSuccessful : finalizedCount,
+        result.include_preview_repairs ? 'Previews repaired' : 'Recovery finalized'],
       [result.failed_count, 'Repair failures'],
-      [currentChanges, 'Current safe changes'],
     ]));
     card.appendChild(make('p', '', result.recovery_summary));
+    if (Number(result.preview_cleanup_required_count || 0) > 0) {
+      card.appendChild(make(
+        'p',
+        'lh-batch-warning',
+        `${number(result.preview_cleanup_required_count)} repaired preview${Number(result.preview_cleanup_required_count) === 1 ? '' : 's'} still ${Number(result.preview_cleanup_required_count) === 1 ? 'has' : 'have'} a temporary recovery copy. The repaired audio is active; remove the copy from the package outcome below to finish cleanup.`,
+      ));
+    }
     if (Number(result.cache_refresh_failed_count || 0) > 0) {
       card.appendChild(make(
         'p',
@@ -1025,76 +1535,109 @@
         'Package outcome details will return when the current operation finishes.',
       ));
     }
-    const list = make('ul', 'lh-batch-list');
-    const pager = make('div', 'lh-batch-pager');
-    const pageSize = 25;
-    let page = 0;
-
-    function drawPage() {
-      list.replaceChildren();
-      const start = page * pageSize;
-      outcomes.slice(start, start + pageSize).forEach((outcome) => {
+    const repairFilters = [
+      {
+        id: 'attention', label: 'Needs attention', preferred: true,
+        test: (item) => ['failed', 'partial', 'skipped'].includes(item.outcome)
+          || item.cache_updated === false || item.preview_cleanup_required,
+      },
+      { id: 'failed', label: 'Failed', test: (item) => item.outcome === 'failed' },
+      { id: 'skipped', label: 'Skipped safely', test: (item) => item.outcome === 'skipped' },
+      {
+        id: 'undoable', label: 'Repaired with Undo',
+        test: (item) => ['success', 'partial'].includes(item.outcome)
+          && !!item.backup_id && item.undo_available !== false,
+      },
+      {
+        id: 'previews', label: 'Preview finalized',
+        test: (item) => !!item.preview_repaired && item.preview_finalized !== false,
+      },
+      { id: 'all', label: 'All', test: () => true },
+    ];
+    appendOutcomeExplorer(details, outcomes, {
+      filters: repairFilters,
+      renderRow: (outcome) => {
         const row = make('li');
         const heading = make('div', 'lh-batch-outcome-heading');
         heading.appendChild(make('strong', '', `${outcome.title || outcome.package}${outcome.artist ? ` - ${outcome.artist}` : ''}`));
-        const tone = outcome.outcome === 'success' ? 'good'
+        const tone = ['success', 'finalized'].includes(outcome.outcome) ? 'good'
           : outcome.outcome === 'failed' ? 'error'
             : outcome.outcome === 'restored' ? 'review' : 'warning';
         const label = outcome.outcome === 'success' ? 'Repaired'
           : outcome.outcome === 'restored' ? 'Original restored'
+            : outcome.outcome === 'finalized' && outcome.preview_repaired ? 'Preview repaired'
+            : outcome.outcome === 'finalized' ? 'Recovery finalized'
+            : outcome.outcome === 'partial' ? 'Partially repaired'
             : outcome.outcome === 'failed' ? 'Failed' : 'Skipped';
         heading.appendChild(badge(label, tone));
         row.appendChild(heading);
         row.appendChild(make(
           'span',
           '',
-          outcome.outcome === 'success'
+          ['success', 'finalized'].includes(outcome.outcome)
             ? `${completedRepairChange(outcome)}. ${outcome.cache_updated === false ? 'Displayed scan result needs a manual refresh. ' : ''}${outcome.package}`
             : `${outcome.message || 'No additional details.'} ${outcome.package}`,
         ));
-        if (outcome.outcome === 'success' && outcome.backup_id) {
+        if (['success', 'partial'].includes(outcome.outcome) && outcome.backup_id && outcome.undo_available !== false) {
           const actions = make('div', 'lh-batch-outcome-actions');
           const undo = make('button', 'lh-button', 'Review Undo');
           undo.type = 'button';
           undo.addEventListener('click', () => reviewBatchUndo(outcome, undo, row));
           actions.appendChild(undo);
+          const finalize = make('button', 'lh-button', 'Finalize repair');
+          finalize.type = 'button';
+          finalize.addEventListener('click', () => confirmFinalizeRecovery(outcome, finalize, actions));
+          actions.appendChild(finalize);
           row.appendChild(actions);
         }
-        list.appendChild(row);
-      });
-      const pages = Math.max(1, Math.ceil(outcomes.length / pageSize));
-      pager.replaceChildren();
-      const previous = make('button', 'lh-button', 'Previous');
-      const next = make('button', 'lh-button', 'Next');
-      previous.type = 'button';
-      next.type = 'button';
-      previous.disabled = page === 0;
-      next.disabled = page + 1 >= pages;
-      previous.addEventListener('click', () => { page -= 1; drawPage(); });
-      next.addEventListener('click', () => { page += 1; drawPage(); });
-      pager.appendChild(previous);
-      pager.appendChild(make('span', '', `Page ${number(page + 1)} of ${number(pages)}`));
-      pager.appendChild(next);
-    }
-    drawPage();
-    details.appendChild(list);
-    if (outcomes.length > pageSize) details.appendChild(pager);
+        if (outcome.preview_cleanup_required && outcome.preview_cleanup_backup_id) {
+          const cleanupActions = make('div', 'lh-batch-outcome-actions');
+          const cleanup = make('button', 'lh-button', 'Remove preview recovery copy');
+          cleanup.type = 'button';
+          const cleanupReceipt = {
+            ...outcome,
+            backup_id: outcome.preview_cleanup_backup_id,
+            preview_cleanup: true,
+            file_handling: {
+              backup_size_bytes: Number(outcome.preview_cleanup_size_bytes || 0),
+            },
+          };
+          cleanup.addEventListener('click', () => confirmFinalizeRecovery(
+            cleanupReceipt, cleanup, cleanupActions,
+          ));
+          cleanupActions.appendChild(cleanup);
+          row.appendChild(cleanupActions);
+        }
+        return row;
+      },
+    });
     card.appendChild(details);
     const phase = batchState?.phase || 'idle';
     const undoActive = ['undo_previewing', 'undo_ready', 'undoing'].includes(phase)
       || (batchState?.running && ['paused', 'cancelling'].includes(phase)
         && String(batchState?.mode || '').startsWith('undo'));
-    if (currentlyRepaired > 0 && !batchState?.running && !undoActive) {
+    const finalizeActive = ['finalize_previewing', 'finalize_ready', 'finalizing'].includes(phase)
+      || (batchState?.running && ['paused', 'cancelling'].includes(phase)
+        && String(batchState?.mode || '').startsWith('finalize'));
+    if (undoableCount > 0 && !batchState?.running) {
       const actions = make('div', 'lh-repair-buttons');
-      const reviewUndo = make('button', 'lh-button lh-button-danger', 'Review Undo all remaining repairs');
-      reviewUndo.type = 'button';
-      reviewUndo.addEventListener('click', () => startBatchUndoPreview(reviewUndo));
-      actions.appendChild(reviewUndo);
+      if (!undoActive) {
+        const reviewUndo = make('button', 'lh-button lh-button-danger', 'Review Undo all remaining repairs');
+        reviewUndo.type = 'button';
+        reviewUndo.addEventListener('click', () => startBatchUndoPreview(reviewUndo));
+        actions.appendChild(reviewUndo);
+      }
+      if (!finalizeActive) {
+        const reviewFinalize = make('button', 'lh-button', 'Review Finalize all remaining repairs');
+        reviewFinalize.type = 'button';
+        reviewFinalize.addEventListener('click', () => startBatchFinalizePreview(reviewFinalize));
+        actions.appendChild(reviewFinalize);
+      }
       card.appendChild(actions);
       card.appendChild(make(
         'p',
         'lh-muted',
-        'Undo all still performs an independent safety check and restore for each Feedpak. Packages changed since repair will be excluded rather than overwritten.',
+        `Undo all restores saved original song data. Finalize all keeps the repaired Feedpaks and permanently removes their private recovery copies. Both choices independently verify every Feedpak. Packages changed since repair will be excluded rather than overwritten or finalized.${previewSuccessful ? ' Finalized automatic previews remain in place when song-data repairs are undone.' : ''}`,
       ));
     }
     el.batchResult.appendChild(card);
@@ -1106,10 +1649,10 @@
     confirmation.appendChild(make(
       'p',
       '',
-      'Undo restores the original song-data files saved for this Feedpak before its batch repair. Other successfully repaired Feedpaks are not affected.',
+      `Undo restores the original song-data files saved for this Feedpak before its batch repair. Other successfully repaired Feedpaks are not affected.${outcome.preview_repaired ? ' Its finalized generated preview remains in place.' : ''}`,
     ));
     const restore = make('button', 'lh-button lh-button-danger', 'Restore original song data');
-    const keep = make('button', 'lh-button', 'Keep repaired version');
+    const keep = make('button', 'lh-button', 'Cancel');
     restore.type = 'button';
     keep.type = 'button';
     restore.addEventListener('click', () => undoBatchOutcome(outcome, restore, keep, confirmation));
@@ -1135,7 +1678,9 @@
       result.id = `batch-restore-${outcome.backup_id}-${Date.now()}`;
       renderRepairResult(result);
       await refreshStatus();
-      await Promise.all([loadRules(), loadResults()]);
+      await Promise.all([
+        loadRules(), loadResults(), refreshSelectedSongTool(outcome.package),
+      ]);
     } catch (error) {
       restore.disabled = false;
       keep.disabled = false;
@@ -1149,7 +1694,7 @@
     technical.appendChild(make('summary', '', `Related checks (${number(findings.length)})`));
     const list = make('ul', 'lh-related-findings');
     findings.forEach((finding) => {
-      const rule = finding.rule || {};
+      const rule = currentRule(finding);
       const affected = Number(finding.affected_count || 1);
       list.appendChild(make(
         'li',
@@ -1159,6 +1704,12 @@
     });
     technical.appendChild(list);
     return technical;
+  }
+
+  function currentRule(finding) {
+    const saved = finding?.rule || {};
+    const current = state.ruleMetadata[finding?.code] || {};
+    return { ...current, ...saved };
   }
 
   function appendFindingExplanation(item, problem, playerImpact, fixBenefit, guidance) {
@@ -1205,7 +1756,7 @@
 
   function repairableFindingGroupNode(findings, report) {
     const representative = findings[0];
-    const rule = representative.rule || {};
+    const rule = currentRule(representative);
     const definition = state.repairRules[representative.code] || {};
     const itemName = definition.item_name || 'item';
     const pluralItem = itemName === 'drum hit' ? 'drum hits' : `${itemName}s`;
@@ -1272,7 +1823,30 @@
   }
 
   function displayFindingNodes(report) {
-    const findings = Array.isArray(report.findings) ? report.findings : [];
+    const findings = Array.isArray(report.findings) ? [...report.findings] : [];
+    if (!report.features?.preview_declared) {
+      const previewEligibility = report.features?.repair_eligibility?.['media.preview-missing'];
+      const canCreatePreview = previewEligibility?.status === 'automatic';
+      findings.unshift({
+        severity: 'info',
+        category: 'library_optimization',
+        code: 'media.preview-missing',
+        message: 'The Feedpak does not declare an embedded song preview. Previews are optional in the format, but FeedBack cannot play a quick library excerpt for this song.',
+        location: 'manifest.yaml',
+        affected_count: 1,
+        rule: {
+          title: 'Song preview is missing',
+          area: 'Audio and artwork',
+          confidence: 'high',
+          repairability: canCreatePreview ? 'review_required' : 'manual',
+          guidance: canCreatePreview
+            ? 'Library Doctor can create a representative preview automatically, or you can listen and choose another start before applying it.'
+            : previewEligibility?.message || 'This Feedpak does not provide an unambiguous Ogg full mix that Library Doctor can use to create a preview automatically.',
+          player_impact: 'Library browsing has no quick audio excerpt for this Feedpak.',
+          fix_benefit: 'A compact preview makes the song easier to recognize without changing gameplay audio.',
+        },
+      });
+    }
     const consumed = new Set();
     const nodes = [];
     const durationFindings = findings.filter((finding) => (
@@ -1351,6 +1925,12 @@
       : [];
     if (restored) {
       const restoredChange = summaries.length === 1 ? summaries[0] : receipt;
+      if (restoredChange.change_kind === 'replace_media') {
+        if (restoredChange.media?.creates_preview) {
+          return 'Removed the generated preview and restored the exact original manifest from recovery storage. The package has no embedded preview again.';
+        }
+        return 'Restored the exact original preview state from recovery storage. The repaired preview recommendation is expected to return.';
+      }
       if (restoredChange.change_kind === 'reorder') {
         const restoredItem = restoredChange.item_name || 'timeline';
         return `Restored the saved original order for ${number(repairChangeCount(restoredChange))} ${restoredItem}${repairChangeCount(restoredChange) === 1 ? '' : 's'}. The repaired ordering finding is expected to return.`;
@@ -1369,6 +1949,13 @@
     }
     if (receipt.change_kind === 'reorder') {
       return `${completedRepairChange(receipt)}${positions ? ` at ${number(positions)} musical ${positions === 1 ? 'position' : 'positions'}` : ''}. Every authored entry and property was preserved.`;
+    }
+    if (receipt.change_kind === 'replace_media') {
+      const media = receipt.media || {};
+      if (media.creates_preview) {
+        return `Created a ${duration(media.candidate_duration_seconds || 30)} preview from the full song mix. Gameplay audio and all existing song assets were preserved.`;
+      }
+      return `Replaced the ${duration(media.original_duration_seconds)} preview with a new ${duration(media.candidate_duration_seconds || 30)} excerpt selected from the full song mix. The full song mix and all other Feedpak files were preserved.`;
     }
     if (receipt.change_kind === 'normalize') {
       return `${completedRepairChange(receipt)}${positions ? ` at ${number(positions)} musical ${positions === 1 ? 'position' : 'positions'}` : ''}.`;
@@ -1415,18 +2002,35 @@
     state.latestRepair = receipt;
     const failed = receipt.outcome === 'failure';
     const restored = receipt.outcome === 'restored' || receipt.action === 'restore';
+    const finalized = receipt.outcome === 'finalized' || receipt.action === 'finalize';
+    const cleanupRequired = Boolean(receipt.file_handling?.backup_cleanup_required);
     const panel = el.repairResult;
     panel.replaceChildren();
-    panel.dataset.outcome = failed ? 'failure' : restored ? 'restored' : 'success';
+    panel.dataset.outcome = failed ? 'failure' : restored ? 'restored' : finalized ? 'finalized' : 'success';
     panel.setAttribute('role', failed ? 'alert' : 'status');
 
     const heading = make('div', 'lh-repair-result-heading');
     const copy = make('div');
-    copy.appendChild(badge(failed ? 'Not applied' : restored ? 'Original restored' : 'Repair successful', failed ? 'error' : 'good'));
+    copy.appendChild(badge(
+      failed ? 'Not applied' : restored ? 'Original restored' : finalized ? 'Recovery finalized' : cleanupRequired ? 'Repair applied · cleanup needed' : 'Repair successful',
+      failed ? 'error' : finalized || cleanupRequired ? 'review' : 'good',
+    ));
     copy.appendChild(make(
       'h3',
       '',
-      failed ? 'The repair was not completed' : restored ? 'The original song data was restored' : 'The repair completed successfully',
+      failed
+        ? 'The repair was not completed'
+        : restored
+          ? receipt.change_kind === 'replace_media'
+            ? receipt.media?.creates_preview
+              ? 'The generated preview was removed'
+              : 'The original preview was restored'
+            : 'The original song data was restored'
+          : finalized
+            ? 'The repaired version was finalized'
+          : cleanupRequired
+            ? 'The preview is repaired, but cleanup still needs attention'
+            : 'The repair completed successfully',
     ));
     copy.appendChild(make(
       'p',
@@ -1456,6 +2060,11 @@
       ['What to expect in game', receipt.player_result || 'The original song data is present again, so the repaired finding may return when the package is scanned.'],
       ['Why this is useful', receipt.user_value || 'This returns the song data to the state saved immediately before the repair.'],
       ['What happened to the Feedpak', receipt.file_handling?.summary || 'The original song data was restored at the same package path. No duplicate song was added.'],
+    ] : finalized ? [
+      ['What happened', `The recovery copy was removed and ${fileSize(receipt.file_handling?.recovery_bytes_freed)} was released.`],
+      ['What to expect in game', receipt.player_result || 'FeedBack continues using the repaired Feedpak exactly as before.'],
+      ['Undo availability', 'This repair can no longer be undone from Library Doctor because its saved original data was removed.'],
+      ['What happened to the Feedpak', receipt.file_handling?.summary || 'The Feedpak itself was not changed. Only its private recovery copy was removed.'],
     ] : [
       ['What changed', repairChangeSummary(receipt)],
       ['What to expect in game', receipt.player_result || 'FeedBack will load the repaired song data the next time the song is opened.'],
@@ -1470,13 +2079,57 @@
     });
     panel.appendChild(answers);
 
+    const completedPreview = (
+      !failed && !restored && !finalized && receipt.change_kind === 'replace_media'
+    );
+    if (completedPreview) {
+      const preview = make('section', 'lh-media-review lh-completed-preview');
+      preview.appendChild(make('strong', '', 'Your finished preview'));
+      preview.appendChild(make(
+        'p',
+        'lh-muted',
+        'This is the preview now stored in the Feedpak and used while browsing the song library.',
+      ));
+      const audio = document.createElement('audio');
+      audio.className = 'lh-media-preview-player';
+      audio.controls = true;
+      audio.preload = 'metadata';
+      audio.src = currentPreviewUrl(receipt.package);
+      preview.appendChild(audio);
+      panel.appendChild(preview);
+    }
+
     if (!failed) {
       panel.appendChild(make(
         'p',
         'lh-repair-verification',
         restored
-          ? `Recovery was validated before it was saved.${receipt.cache_updated === false ? ' Scan this package again to refresh the displayed result.' : ''}${receipt.receipt_saved === false ? ' The recovery succeeded, but this result could not be saved to repair history.' : ''}`
-          : `The complete repaired candidate passed validation before it replaced the existing package.${receipt.cache_updated === false ? ' The repair succeeded, but you should scan this package again to refresh its displayed result.' : ''}${receipt.receipt_saved === false ? ' The repair succeeded, but this result could not be saved to repair history; the recovery backup still exists.' : ''}`,
+          ? `The exact original state was restored and validated.${receipt.file_handling?.backup_removed ? ' The now-redundant recovery copy was removed.' : ' The recovery copy could not be removed automatically, but it is no longer needed for Undo.'}${receipt.cache_updated === false ? ' Scan this package again to refresh the displayed result.' : ''}${receipt.receipt_saved === false ? ' The recovery succeeded, but this result could not be saved to repair history.' : ''}`
+          : finalized
+            ? `The current package members were checked against the recovery record before it was removed.${receipt.receipt_saved === false ? ' The recovery copy was removed, but this result could not be saved to repair history.' : ''}`
+          : cleanupRequired
+            ? `The complete repaired candidate passed validation before it replaced the existing package. Its temporary recovery copy could not be removed automatically; use the cleanup option below to finish.${receipt.cache_updated === false ? ' Scan this package again to refresh its displayed result.' : ''}`
+            : `The complete repaired candidate passed validation before it replaced the existing package.${completedPreview ? ' Its temporary recovery copy was removed automatically, so this preview repair is fully complete.' : ''}${receipt.cache_updated === false ? ' The repair succeeded, but you should scan this package again to refresh its displayed result.' : ''}${receipt.receipt_saved === false ? completedPreview ? ' The repair succeeded and left no recovery copy, but this result could not be saved to repair history.' : ' The repair succeeded, but this result could not be saved to repair history; the recovery backup still exists.' : ''}`,
+      ));
+    }
+
+    const performance = receipt.performance;
+    const elapsedSeconds = Number(performance?.elapsed_seconds);
+    if (
+      !failed && !restored && !finalized
+      && Number.isFinite(elapsedSeconds) && elapsedSeconds >= 0
+    ) {
+      const validationCopy = performance.deep_audio_reused
+        ? 'Reused the completed Deep Audio scan for unchanged audio; changed song data and archive integrity were still validated.'
+        : performance.verified_scan_report_reused
+          ? 'Reused the completed Deep Audio scan for the original Feedpak, then deeply checked the newly generated preview.'
+          : performance.deep_audio_requested
+            ? 'Ran fresh Deep Audio validation.'
+            : 'Ran the normal package validation path.';
+      panel.appendChild(make(
+        'p',
+        'lh-repair-verification',
+        `Repair checks: ${duration(elapsedSeconds)}. ${validationCopy}`,
       ));
     }
 
@@ -1487,13 +2140,40 @@
       show.addEventListener('click', () => showRepairedPackage(receipt));
       actions.appendChild(show);
     }
-    if (!failed && !restored && receipt.backup_id) {
+    const previewRegion = make('div', 'lh-repair-preview');
+    previewRegion.setAttribute('aria-live', 'polite');
+    if (completedPreview) {
+      const replace = make('button', 'lh-button', 'Create a different preview');
+      replace.type = 'button';
+      replace.addEventListener('click', () => previewRepair(
+        receipt,
+        { code: 'media.preview-regenerate' },
+        replace,
+        previewRegion,
+      ));
+      actions.appendChild(replace);
+    }
+    if (!failed && !restored && !finalized && receipt.backup_id && receipt.undo_available !== false) {
       const undo = make('button', 'lh-button', 'Undo this repair');
       undo.type = 'button';
       undo.addEventListener('click', () => confirmRestore(receipt, undo, actions));
       actions.appendChild(undo);
+      const finalize = make(
+        'button',
+        'lh-button',
+        completedPreview ? 'Remove temporary recovery copy' : 'Finalize and remove recovery copy',
+      );
+      finalize.type = 'button';
+      finalize.addEventListener('click', () => confirmFinalizeRecovery(receipt, finalize, actions));
+      actions.appendChild(finalize);
+    } else if (restored && receipt.file_handling?.backup_retained && receipt.backup_id) {
+      const cleanup = make('button', 'lh-button', 'Remove redundant recovery copy');
+      cleanup.type = 'button';
+      cleanup.addEventListener('click', () => confirmFinalizeRecovery(receipt, cleanup, actions));
+      actions.appendChild(cleanup);
     }
     panel.appendChild(actions);
+    if (completedPreview) panel.appendChild(previewRegion);
     setHidden(panel, false);
     panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   }
@@ -1504,12 +2184,22 @@
     confirmation.appendChild(make(
       'p',
       '',
-      receipt.rule_code === 'package.all-safe'
+      receipt.change_kind === 'replace_media'
+        ? receipt.media?.creates_preview
+          ? 'Undo will restore the exact original manifest and remove the generated preview. The missing-preview recommendation is expected to return. Every other Feedpak file is preserved.'
+          : 'Undo will restore the exact original preview saved before conversion. The repaired preview recommendation is expected to return. Every other Feedpak file is preserved.'
+        : receipt.rule_code === 'package.all-safe'
         ? 'Undo will restore all original song-data files saved before this combined repair. The repaired safe findings are expected to return. Other package files are preserved.'
         : 'Undo will restore the original song-data files saved before this repair. The repaired finding is expected to return. Other package files are preserved.',
     ));
-    const confirm = make('button', 'lh-button lh-button-danger', 'Restore original song data');
-    const cancel = make('button', 'lh-button', 'Keep repaired version');
+    const confirm = make(
+      'button',
+      'lh-button lh-button-danger',
+      receipt.change_kind === 'replace_media'
+        ? 'Restore original preview'
+        : 'Restore original song data',
+    );
+    const cancel = make('button', 'lh-button', 'Cancel');
     confirm.type = 'button';
     cancel.type = 'button';
     confirm.addEventListener('click', () => restoreRepair(receipt, confirm, cancel));
@@ -1520,6 +2210,54 @@
     confirmation.appendChild(confirm);
     confirmation.appendChild(cancel);
     actions.parentNode.insertBefore(confirmation, actions.nextSibling);
+  }
+
+  function confirmFinalizeRecovery(receipt, trigger, actions) {
+    trigger.disabled = true;
+    const confirmation = make('div', 'lh-repair-confirm');
+    const retainedBytes = Number(receipt.file_handling?.backup_size_bytes || 0);
+    confirmation.appendChild(make(
+      'p',
+      '',
+      receipt.preview_cleanup
+        ? `Remove the temporary preview recovery copy${retainedBytes ? ` and release ${fileSize(retainedBytes)}` : ''}? The repaired preview is already active and the Feedpak will not change.`
+        : receipt.outcome === 'restored' || receipt.action === 'restore'
+        ? `Remove the redundant recovery copy${retainedBytes ? ` and release ${fileSize(retainedBytes)}` : ''}? The original data is already restored, so the Feedpak will not change.`
+        : `Keep the repaired Feedpak and remove its recovery copy${retainedBytes ? ` to release ${fileSize(retainedBytes)}` : ''}? The Feedpak will not change, but this repair can no longer be undone from Library Doctor.`,
+    ));
+    const confirm = make('button', 'lh-button lh-button-danger', 'Remove recovery copy');
+    const cancel = make('button', 'lh-button', 'Cancel');
+    confirm.type = 'button';
+    cancel.type = 'button';
+    confirm.addEventListener('click', () => finalizeRecovery(receipt, confirm, cancel));
+    cancel.addEventListener('click', () => {
+      confirmation.remove();
+      trigger.disabled = false;
+    });
+    confirmation.appendChild(confirm);
+    confirmation.appendChild(cancel);
+    actions.parentNode.insertBefore(confirmation, actions.nextSibling);
+  }
+
+  async function finalizeRecovery(receipt, confirm, cancel) {
+    confirm.disabled = true;
+    cancel.disabled = true;
+    text(confirm, 'Checking and removing...');
+    try {
+      const result = await request('/repair/recovery/finalize', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ package: receipt.package, backup_id: receipt.backup_id }),
+      });
+      result.id = `finalize-${receipt.backup_id}-${Date.now()}`;
+      renderRepairResult(result);
+      await refreshStatus();
+    } catch (error) {
+      confirm.disabled = false;
+      cancel.disabled = false;
+      text(confirm, 'Remove recovery copy');
+      confirm.parentNode.appendChild(make('p', 'lh-inline-error', error.message));
+    }
   }
 
   async function restoreRepair(receipt, confirm, cancel) {
@@ -1553,17 +2291,95 @@
   }
 
   function repairControls(report, finding) {
+    if (report.features?.repair_scan_current === false) return null;
     const definition = state.repairRules[finding.code];
-    if (!definition || definition.safety !== 'safe_automatic') return null;
+    if (!definition || !['safe_automatic', 'review_required'].includes(definition.safety)) return null;
+    const eligibility = report.features?.repair_eligibility?.[finding.code];
+    if (eligibility && eligibility.status !== 'automatic') return null;
     const wrapper = make('div', 'lh-repair-action');
-    const button = make('button', 'lh-button lh-button-safe', 'Review safe fix');
+    const mediaRepair = definition.change_kind === 'replace_media';
+    const button = make(
+      'button',
+      'lh-button lh-button-safe',
+      mediaRepair ? mediaReviewLabel(finding) : 'Review safe fix',
+    );
     button.type = 'button';
     const region = make('div', 'lh-repair-preview');
     region.setAttribute('aria-live', 'polite');
     button.addEventListener('click', () => previewRepair(report, finding, button, region));
     wrapper.appendChild(button);
+    if (mediaRepair) {
+      const automatic = make('button', 'lh-button lh-button-primary', 'Create automatically and finish');
+      automatic.type = 'button';
+      automatic.addEventListener('click', () => confirmAutomaticPreviewRepair(
+        report, finding, automatic, button, region,
+      ));
+      wrapper.appendChild(automatic);
+    }
     wrapper.appendChild(region);
     return wrapper;
+  }
+
+  function confirmAutomaticPreviewRepair(report, finding, trigger, manual, region) {
+    trigger.disabled = true;
+    manual.disabled = true;
+    region.replaceChildren();
+    const card = make('div', 'lh-repair-card');
+    card.appendChild(make('strong', '', 'Create the preview automatically?'));
+    card.appendChild(make(
+      'p',
+      '',
+      'Library Doctor will select a representative point from the full song mix, generate a new 30-second preview, and validate the complete Feedpak. A temporary recovery copy protects the write and is removed automatically after validation, so the repair is completely finished in one step. For a song shorter than 30 seconds, it uses the available song length.',
+    ));
+    card.appendChild(make(
+      'p',
+      'lh-muted',
+      'The existing preview starting point is not reused. Use manual review instead if you want to listen first or choose the start yourself.',
+    ));
+    const actions = make('div', 'lh-repair-buttons');
+    const apply = make('button', 'lh-button lh-button-primary', 'Create preview and finish');
+    const cancel = make('button', 'lh-button', 'Cancel');
+    apply.type = 'button';
+    cancel.type = 'button';
+    apply.addEventListener('click', () => applyAutomaticPreviewRepair(
+      report, finding, apply, cancel, region,
+    ));
+    cancel.addEventListener('click', () => {
+      region.replaceChildren();
+      trigger.disabled = false;
+      manual.disabled = false;
+    });
+    actions.appendChild(apply);
+    actions.appendChild(cancel);
+    card.appendChild(actions);
+    region.appendChild(card);
+  }
+
+  async function applyAutomaticPreviewRepair(report, finding, apply, cancel, region) {
+    apply.disabled = true;
+    cancel.disabled = true;
+    text(apply, 'Selecting, creating, validating, and finishing...');
+    try {
+      const result = await request('/repair/media/automatic', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ package: report.package, rule_code: finding.code }),
+      });
+      result.id = `repair-${result.backup_id || Date.now()}`;
+      result.title = result.report?.title || report.title || report.package;
+      result.artist = result.report?.artist || report.artist || '';
+      renderRepairResult(result);
+      await refreshStatus();
+      await Promise.all([
+        loadRules(), loadResults(), refreshSelectedSongTool(report.package),
+      ]);
+    } catch (error) {
+      apply.disabled = false;
+      cancel.disabled = false;
+      text(apply, 'Create preview and finish');
+      region.appendChild(make('p', 'lh-inline-error', error.message));
+      renderRepairFailure(report, error);
+    }
   }
 
   function appendRepairPreviewAnswers(card, plan) {
@@ -1587,15 +2403,22 @@
     card.appendChild(make(
       'p',
       'lh-muted',
-      'If candidate creation, backup, integrity checking, or validation fails, the existing Feedpak is not replaced. After a successful repair, Undo can restore the saved original song data.',
+      plan.change_kind === 'replace_media'
+        ? 'If audio generation, temporary recovery, integrity checking, or validation fails, the existing Feedpak is not replaced. After a successful repair, the temporary recovery copy is removed automatically and the new preview is ready to use.'
+        : 'If candidate creation, backup, integrity checking, or validation fails, the existing Feedpak is not replaced. After a successful repair, Undo can restore the saved original song data.',
     ));
   }
 
   function safeRepairCodes(report) {
+    if (report.features?.repair_scan_current === false) return new Set();
     return new Set(
       (Array.isArray(report.findings) ? report.findings : [])
         .map((finding) => finding.code)
-        .filter((code) => state.repairRules[code]?.safety === 'safe_automatic'),
+        .filter((code) => (
+          state.repairRules[code]?.safety === 'safe_automatic'
+          && (!report.features?.repair_eligibility?.[code]
+            || report.features.repair_eligibility[code].status === 'automatic')
+        )),
     );
   }
 
@@ -1721,7 +2544,9 @@
       result.artist = result.report?.artist || report.artist || '';
       renderRepairResult(result);
       await refreshStatus();
-      await Promise.all([loadRules(), loadResults()]);
+      await Promise.all([
+        loadRules(), loadResults(), refreshSelectedSongTool(report.package),
+      ]);
     } catch (error) {
       apply.disabled = false;
       cancel.disabled = false;
@@ -1731,37 +2556,101 @@
     }
   }
 
-  async function previewRepair(report, finding, trigger, region) {
+  async function previewRepair(report, finding, trigger, region, startSeconds = null) {
+    const mediaRepair = state.repairRules[finding.code]?.change_kind === 'replace_media';
+    if (!trigger.dataset.idleLabel) trigger.dataset.idleLabel = trigger.textContent;
     trigger.disabled = true;
-    text(trigger, 'Preparing preview...');
+    text(trigger, mediaRepair ? 'Generating audio preview...' : 'Preparing preview...');
     region.replaceChildren();
     try {
+      const body = { package: report.package, rule_code: finding.code };
+      if (startSeconds != null) body.start_seconds = startSeconds;
       const plan = await request('/repair/preview', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ package: report.package, rule_code: finding.code }),
+        body: JSON.stringify(body),
       });
       trigger.hidden = true;
       const card = make('div', 'lh-repair-card');
       card.appendChild(make('strong', '', plan.title || 'Safe repair'));
       if (plan.available) {
         const itemName = plan.item_name || 'item';
-        card.appendChild(make(
-          'p',
-          '',
-          plan.change_kind === 'normalize'
+        const changeDescription = plan.change_kind === 'replace_media'
+          ? plan.media?.creates_preview
+            ? `Add this ${duration(plan.media?.candidate_duration_seconds || 30)} preview selected from the full song mix. The proposed clip starts at ${duration(plan.media?.start_seconds)} and adds about ${plan.media?.candidate_size || 'a short clip'} to the Feedpak.`
+            : `Replace the existing ${duration(plan.media?.original_duration_seconds)} preview with this ${duration(plan.media?.candidate_duration_seconds || 30)} excerpt selected from the full song mix. The proposed clip starts at ${duration(plan.media?.start_seconds)} and is about ${plan.media?.candidate_size || 'a short clip'} instead of ${plan.media?.original_size || 'the current preview'}.`
+          : plan.change_kind === 'normalize'
             ? `Change ${number(repairChangeCount(plan))} negative ${itemName}${repairChangeCount(plan) === 1 ? '' : 's'} to fret 0 at ${number(plan.musical_positions)} musical ${plan.musical_positions === 1 ? 'position' : 'positions'}, across ${number(plan.arrays_affected)} stored ${plan.arrays_affected === 1 ? 'list' : 'lists'}. Every other property is kept unchanged.`
             : plan.change_kind === 'reorder'
             ? `Put ${number(repairChangeCount(plan))} ${itemName}${repairChangeCount(plan) === 1 ? '' : 's'} into chronological order across ${number(plan.arrays_affected)} stored ${plan.arrays_affected === 1 ? 'list' : 'lists'}, affecting ${number(plan.musical_positions)} musical ${plan.musical_positions === 1 ? 'position' : 'positions'}. Every entry and stored property is kept.`
             : plan.change_kind === 'remove_redundant'
               ? `Remove ${number(plan.removed_count)} redundant stored ${itemName} ${plan.removed_count === 1 ? 'record' : 'records'} at ${number(plan.musical_positions)} musical ${plan.musical_positions === 1 ? 'position' : 'positions'}, across ${number(plan.arrays_affected)} ${itemName} ${plan.arrays_affected === 1 ? 'list' : 'lists'}. Every matching authored chord is kept unchanged.`
-              : `Remove ${number(plan.removed_count)} redundant stored ${itemName} ${plan.removed_count === 1 ? 'copy' : 'copies'} at ${number(plan.musical_positions)} musical ${plan.musical_positions === 1 ? 'position' : 'positions'}, across ${number(plan.arrays_affected)} ${itemName} ${plan.arrays_affected === 1 ? 'list' : 'lists'}. The first authored copy is kept.`,
-        ));
+              : `Remove ${number(plan.removed_count)} redundant stored ${itemName} ${plan.removed_count === 1 ? 'copy' : 'copies'} at ${number(plan.musical_positions)} musical ${plan.musical_positions === 1 ? 'position' : 'positions'}, across ${number(plan.arrays_affected)} ${itemName} ${plan.arrays_affected === 1 ? 'list' : 'lists'}. The first authored copy is kept.`;
+        card.appendChild(make('p', '', changeDescription));
         card.appendChild(make(
           'p',
           '',
           plan.description || 'Only the safe stored issue shown in this preview will be changed.',
         ));
+        if (plan.change_kind === 'replace_media') {
+          const media = plan.media || {};
+          const review = make('section', 'lh-media-review');
+          review.appendChild(make('strong', '', 'Listen before applying'));
+          review.appendChild(make(
+            'p',
+            'lh-muted',
+            media.creates_preview
+              ? `Selected from ${media.selection_reason || 'the song audio'}. Expected Feedpak addition: about ${media.candidate_size || 'one short audio clip'}.`
+              : `Selected from ${media.selection_reason || 'the song audio'}. Expected Feedpak reduction: about ${media.estimated_package_savings || 'the removed preview data'}.`,
+          ));
+          const audio = document.createElement('audio');
+          audio.className = 'lh-media-preview-player';
+          audio.controls = true;
+          audio.preload = 'metadata';
+          audio.src = `${API}/repair/media/candidate/${encodeURIComponent(plan.plan_id)}`;
+          review.appendChild(audio);
+
+          const chooser = make('div', 'lh-media-start');
+          const label = document.createElement('label');
+          label.appendChild(make('span', '', 'Try another start time (seconds)'));
+          const input = document.createElement('input');
+          input.type = 'number';
+          input.min = '0';
+          input.max = String(Math.max(0, Number(media.max_start_seconds || 0)));
+          input.step = '1';
+          const displayedStart = Math.round(Number(media.start_seconds || 0));
+          input.value = String(displayedStart);
+          label.appendChild(input);
+          const regenerate = make('button', 'lh-button', 'Generate another excerpt');
+          regenerate.type = 'button';
+          const syncRegenerate = () => {
+            const nextStart = Number(input.value);
+            regenerate.disabled = (
+              input.value.trim() === ''
+              || !Number.isFinite(nextStart)
+              || !input.checkValidity()
+              || nextStart === displayedStart
+            );
+          };
+          input.addEventListener('input', syncRegenerate);
+          regenerate.addEventListener('click', () => {
+            const nextStart = Number(input.value);
+            if (!Number.isFinite(nextStart) || nextStart === displayedStart) return;
+            audio.pause();
+            regenerate.disabled = true;
+            previewRepair(report, finding, trigger, region, nextStart);
+          });
+          syncRegenerate();
+          chooser.appendChild(label);
+          chooser.appendChild(regenerate);
+          review.appendChild(chooser);
+          review.appendChild(make(
+            'p',
+            'lh-repair-warning',
+            'A temporary recovery copy protects this change while Library Doctor validates the complete Feedpak. It is removed automatically after a successful repair, so no preview backup is left behind.',
+          ));
+          card.appendChild(review);
+        }
         appendRepairPreviewAnswers(card, plan);
         if (Array.isArray(plan.blockers) && plan.blockers.length) {
           card.appendChild(make(
@@ -1771,16 +2660,28 @@
           ));
         }
         const actions = make('div', 'lh-repair-buttons');
-        const apply = make('button', 'lh-button lh-button-primary', 'Apply safe repair');
+        const apply = make(
+          'button',
+          'lh-button lh-button-primary',
+          plan.change_kind === 'replace_media' ? 'Keep this preview' : 'Apply safe repair',
+        );
         const cancel = make('button', 'lh-button', 'Cancel');
         apply.type = 'button';
         cancel.type = 'button';
-        apply.addEventListener('click', () => applyRepair(report, finding, plan, apply, cancel, region));
+        apply.addEventListener('click', () => {
+          if (plan.change_kind === 'replace_media') {
+            confirmReviewedPreviewRepair(
+              report, finding, plan, apply, cancel, actions, region,
+            );
+          } else {
+            applyRepair(report, finding, plan, apply, cancel, region);
+          }
+        });
         cancel.addEventListener('click', () => {
           region.replaceChildren();
           trigger.hidden = false;
           trigger.disabled = false;
-          text(trigger, 'Review safe fix');
+          text(trigger, trigger.dataset.idleLabel || (mediaRepair ? mediaReviewLabel(finding) : 'Review safe fix'));
         });
         actions.appendChild(apply);
         actions.appendChild(cancel);
@@ -1800,22 +2701,63 @@
           region.replaceChildren();
           trigger.hidden = false;
           trigger.disabled = false;
-          text(trigger, 'Review safe fix');
+          text(trigger, trigger.dataset.idleLabel || (mediaRepair ? mediaReviewLabel(finding) : 'Review safe fix'));
         });
         card.appendChild(close);
       }
       region.appendChild(card);
     } catch (error) {
+      trigger.hidden = false;
       trigger.disabled = false;
-      text(trigger, 'Review safe fix');
+      text(trigger, trigger.dataset.idleLabel || (mediaRepair ? mediaReviewLabel(finding) : 'Review safe fix'));
       region.appendChild(make('p', 'lh-inline-error', error.message));
     }
+  }
+
+  function confirmReviewedPreviewRepair(
+    report, finding, plan, reviewed, cancelReview, actions, region,
+  ) {
+    reviewed.disabled = true;
+    cancelReview.disabled = true;
+    const confirmation = make('div', 'lh-repair-confirm');
+    confirmation.appendChild(make('strong', '', 'Replace the Feedpak preview?'));
+    confirmation.appendChild(make(
+      'p',
+      '',
+      plan.media?.creates_preview
+        ? 'This adds the preview you reviewed to the existing Feedpak. The full song mix, chart, lyrics, and gameplay audio stay unchanged.'
+        : 'This replaces only the current preview with the excerpt you reviewed. The full song mix, chart, lyrics, and gameplay audio stay unchanged.',
+    ));
+    confirmation.appendChild(make(
+      'p',
+      'lh-muted',
+      'Library Doctor validates the complete Feedpak before saving it. Temporary recovery data is removed after success, so this preview change will not have Undo.',
+    ));
+    const confirm = make(
+      'button', 'lh-button lh-button-primary', 'Confirm replacement and finish',
+    );
+    const back = make('button', 'lh-button', 'Go back');
+    confirm.type = 'button';
+    back.type = 'button';
+    confirm.addEventListener('click', () => applyRepair(
+      report, finding, plan, confirm, back, region,
+    ));
+    back.addEventListener('click', () => {
+      confirmation.remove();
+      reviewed.disabled = false;
+      cancelReview.disabled = false;
+    });
+    confirmation.appendChild(confirm);
+    confirmation.appendChild(back);
+    actions.parentNode.insertBefore(confirmation, actions.nextSibling);
   }
 
   async function applyRepair(report, finding, plan, apply, cancel, region) {
     apply.disabled = true;
     cancel.disabled = true;
-    text(apply, 'Applying and verifying...');
+    text(apply, plan.change_kind === 'replace_media'
+      ? 'Applying, validating, and finishing...'
+      : 'Applying and verifying...');
     try {
       const result = await request('/repair/apply', {
         method: 'POST',
@@ -1831,11 +2773,13 @@
       result.artist = result.report?.artist || report.artist || '';
       renderRepairResult(result);
       await refreshStatus();
-      await Promise.all([loadRules(), loadResults()]);
+      await Promise.all([
+        loadRules(), loadResults(), refreshSelectedSongTool(report.package),
+      ]);
     } catch (error) {
       apply.disabled = false;
       cancel.disabled = false;
-      text(apply, 'Apply safe repair');
+      text(apply, plan.change_kind === 'replace_media' ? 'Confirm replacement and finish' : 'Apply safe repair');
       region.appendChild(make('p', 'lh-inline-error', error.message));
       renderRepairFailure(report, error);
     }
@@ -1845,7 +2789,7 @@
     const item = make('li', 'lh-finding');
     item.dataset.severity = finding.severity || 'info';
     item.dataset.category = finding.category || 'validation';
-    const rule = finding.rule || {};
+    const rule = currentRule(finding);
     item.appendChild(make('strong', 'lh-finding-title', rule.title || 'Validation issue'));
     appendFindingExplanation(
       item,
@@ -1874,13 +2818,307 @@
     return item;
   }
 
+  function setWorkspace(workspace) {
+    const next = workspace === 'tools' ? 'tools' : 'health';
+    state.workspace = next;
+    setHidden(el.healthWorkspace, next !== 'health');
+    setHidden(el.songToolsWorkspace, next !== 'tools');
+    el.workspaceTabs.querySelectorAll('[data-workspace]').forEach((button) => {
+      button.setAttribute('aria-selected', String(button.dataset.workspace === next));
+    });
+    if (next === 'tools') {
+      loadSongTools();
+    }
+  }
+
+  function songPackage(song) {
+    return typeof song?.filename === 'string'
+      ? song.filename.replaceAll('\\', '/')
+      : '';
+  }
+
+  function renderSongToolLibrary() {
+    const tools = state.songTools;
+    el.songToolResults.replaceChildren();
+    let selectionPlaced = false;
+    tools.items.forEach((song) => {
+      const packageName = songPackage(song);
+      if (!packageName) return;
+      const selected = songPackage(tools.selected) === packageName;
+      const row = make('div', 'lh-song-tool-row');
+      row.setAttribute('role', 'listitem');
+      const item = make('button', 'lh-song-tool-item');
+      item.type = 'button';
+      item.setAttribute('aria-current', String(selected));
+      item.setAttribute('aria-expanded', String(selected));
+      item.setAttribute('aria-controls', 'lh-song-tool-selection');
+      item.appendChild(make('strong', '', song.title || packageName));
+      item.appendChild(make(
+        'span', 'lh-song-tool-artist', song.artist || 'Unknown artist',
+      ));
+      item.appendChild(make(
+        'span',
+        'lh-song-tool-format',
+        packageName.toLowerCase().endsWith('.sloppak') ? 'Sloppak' : 'Feedpak',
+      ));
+      item.addEventListener('click', () => selectSongTool(song));
+      row.appendChild(item);
+      if (selected) {
+        row.appendChild(el.songToolSelection);
+        selectionPlaced = true;
+      }
+      el.songToolResults.appendChild(row);
+    });
+    if (tools.selected && !selectionPlaced) {
+      tools.selected = null;
+      tools.selectionRequest += 1;
+      el.songToolSelection.replaceChildren();
+      setHidden(el.songToolSelection, true);
+    }
+
+    const first = tools.total ? tools.page * SONG_TOOL_PAGE_SIZE + 1 : 0;
+    const last = Math.min(tools.total, (tools.page + 1) * SONG_TOOL_PAGE_SIZE);
+    text(
+      el.songToolCount,
+      tools.total
+        ? `Showing ${number(first)}-${number(last)} of ${number(tools.total)} local songs.`
+        : tools.query
+          ? 'No local songs match this search.'
+          : 'No indexed local songs are available.',
+    );
+    const pageCount = Math.max(1, Math.ceil(tools.total / SONG_TOOL_PAGE_SIZE));
+    setHidden(el.songToolPagination, tools.total <= SONG_TOOL_PAGE_SIZE);
+    text(el.songToolPage, `Page ${number(tools.page + 1)} of ${number(pageCount)}`);
+    el.songToolPrev.disabled = tools.page <= 0;
+    el.songToolNext.disabled = tools.page + 1 >= pageCount;
+  }
+
+  async function loadSongTools() {
+    const requestId = ++state.songTools.requestId;
+    setHidden(el.songToolError, true);
+    text(el.songToolCount, 'Loading local songs...');
+    const params = new URLSearchParams({
+      provider: 'local',
+      q: state.songTools.query,
+      page: String(state.songTools.page),
+      size: String(SONG_TOOL_PAGE_SIZE),
+      sort: 'artist',
+    });
+    try {
+      const payload = await coreRequest(`/api/library?${params}`);
+      if (
+        requestId !== state.songTools.requestId
+        || !state.active
+        || state.workspace !== 'tools'
+      ) return;
+      state.songTools.items = Array.isArray(payload?.songs) ? payload.songs : [];
+      state.songTools.total = Number(payload?.total || 0);
+      state.songTools.loaded = true;
+      renderSongToolLibrary();
+    } catch (error) {
+      if (requestId !== state.songTools.requestId || !state.active) return;
+      state.songTools.items = [];
+      state.songTools.total = 0;
+      closeSongToolSelection({ render: false });
+      el.songToolResults.replaceChildren();
+      text(el.songToolCount, 'The local song list could not be loaded.');
+      text(el.songToolError, error.message);
+      setHidden(el.songToolError, false);
+      setHidden(el.songToolPagination, true);
+    }
+  }
+
+  function songToolHeading(song) {
+    const packageName = songPackage(song);
+    const heading = make('div', 'lh-song-tool-selection-header');
+    const title = make('div');
+    title.appendChild(make('h3', '', song.title || packageName));
+    title.appendChild(make('p', '', song.artist || 'Unknown artist'));
+    heading.appendChild(title);
+    heading.appendChild(badge('Selected local song', 'good'));
+    return heading;
+  }
+
+  function renderPreviewCreator(song, status, region) {
+    const packageName = songPackage(song);
+    const report = {
+      package: packageName,
+      title: status.title || song.title || packageName,
+      artist: status.artist || song.artist || '',
+      features: {
+        preview_declared: !!status.preview_declared,
+        preview_available: !!status.current_preview_available,
+      },
+    };
+    region.replaceChildren();
+
+    const card = make('section', 'lh-song-tool-card');
+    card.appendChild(make('h4', '', 'Preview Creator'));
+    card.appendChild(make(
+      'p',
+      '',
+      status.current_preview_available
+        ? 'Listen to the current library preview, or create a new 30-second excerpt from the full song mix. This is optional even when the current preview passes Library Doctor checks.'
+        : 'Create a standard 30-second library preview from the full song mix. Songs shorter than 30 seconds use the available song length.',
+    ));
+    if (status.current_preview_available) {
+      const currentLabel = make('strong', 'lh-song-tool-current-label', 'Current preview');
+      card.appendChild(currentLabel);
+      const audio = document.createElement('audio');
+      audio.className = 'lh-media-preview-player';
+      audio.controls = true;
+      audio.preload = 'none';
+      audio.src = currentPreviewUrl(packageName);
+      card.appendChild(audio);
+    }
+
+    if (status.available && status.rule_code) {
+      const finding = { code: status.rule_code };
+      const actions = make('div', 'lh-repair-buttons');
+      const manual = make(
+        'button',
+        'lh-button',
+        status.current_preview_available
+          ? 'Review a replacement preview'
+          : 'Review a new preview',
+      );
+      const automatic = make(
+        'button', 'lh-button lh-button-primary', 'Create automatically and finish',
+      );
+      manual.type = 'button';
+      automatic.type = 'button';
+      const actionRegion = make('div', 'lh-repair-preview');
+      actionRegion.setAttribute('aria-live', 'polite');
+      manual.addEventListener('click', () => previewRepair(
+        report, finding, manual, actionRegion,
+      ));
+      automatic.addEventListener('click', () => confirmAutomaticPreviewRepair(
+        report, finding, automatic, manual, actionRegion,
+      ));
+      actions.appendChild(manual);
+      actions.appendChild(automatic);
+      card.appendChild(actions);
+      card.appendChild(actionRegion);
+    } else {
+      card.appendChild(make(
+        'p', 'lh-repair-warning', status.message || 'Preview Creator is unavailable for this Feedpak.',
+      ));
+    }
+    region.appendChild(card);
+  }
+
+  async function openPreviewCreator(song, trigger, region, { refresh = false } = {}) {
+    const packageName = songPackage(song);
+    if (!packageName) return;
+    if (!refresh && state.songTools.activeTool === 'preview') {
+      state.songTools.activeTool = '';
+      state.songTools.selectionRequest += 1;
+      trigger.setAttribute('aria-expanded', 'false');
+      region.replaceChildren();
+      setHidden(region, true);
+      return;
+    }
+    const selectionRequest = ++state.songTools.selectionRequest;
+    state.songTools.activeTool = 'preview';
+    trigger.setAttribute('aria-expanded', 'true');
+    setHidden(region, false);
+    region.replaceChildren(make('p', 'lh-muted', 'Opening Preview Creator...'));
+    try {
+      const status = await request(
+        `/repair/media/tool/status?package=${encodeURIComponent(packageName)}`,
+      );
+      if (
+        !state.active
+        || state.workspace !== 'tools'
+        || state.songTools.activeTool !== 'preview'
+        || selectionRequest !== state.songTools.selectionRequest
+        || songPackage(state.songTools.selected) !== packageName
+      ) return;
+      renderPreviewCreator(song, status, region);
+    } catch (error) {
+      if (
+        state.songTools.activeTool !== 'preview'
+        || selectionRequest !== state.songTools.selectionRequest
+        || songPackage(state.songTools.selected) !== packageName
+      ) return;
+      region.replaceChildren(make('p', 'lh-inline-error', error.message));
+    }
+  }
+
+  function renderSongToolMenu(song, { openTool = '' } = {}) {
+    const packageName = songPackage(song);
+    state.songTools.activeTool = '';
+    el.songToolSelection.replaceChildren();
+    el.songToolSelection.appendChild(songToolHeading(song));
+    el.songToolSelection.appendChild(make('p', 'lh-song-tool-path', packageName));
+    el.songToolSelection.appendChild(make(
+      'p', 'lh-song-tool-menu-label', 'Available tools',
+    ));
+
+    const menu = make('div', 'lh-song-tool-menu');
+    const preview = make('button', 'lh-song-tool-choice');
+    preview.type = 'button';
+    preview.setAttribute('aria-expanded', 'false');
+    preview.setAttribute('aria-controls', 'lh-song-tool-active');
+    preview.appendChild(make('strong', '', 'Preview Creator'));
+    preview.appendChild(make(
+      'span', '', 'Listen to, replace, or create the short preview used in the song library.',
+    ));
+    const region = make('div', 'lh-song-tool-active');
+    region.id = 'lh-song-tool-active';
+    region.setAttribute('aria-live', 'polite');
+    setHidden(region, true);
+    preview.addEventListener('click', () => openPreviewCreator(song, preview, region));
+    menu.appendChild(preview);
+    el.songToolSelection.appendChild(menu);
+    el.songToolSelection.appendChild(region);
+    setHidden(el.songToolSelection, false);
+    if (openTool === 'preview') {
+      openPreviewCreator(song, preview, region, { refresh: true });
+    }
+  }
+
+  function closeSongToolSelection({ render = true } = {}) {
+    state.songTools.selected = null;
+    state.songTools.activeTool = '';
+    state.songTools.selectionRequest += 1;
+    el.songToolSelection.replaceChildren();
+    setHidden(el.songToolSelection, true);
+    if (render) renderSongToolLibrary();
+  }
+
+  function selectSongTool(song) {
+    const packageName = songPackage(song);
+    if (!packageName) return;
+    if (
+      songPackage(state.songTools.selected) === packageName
+    ) {
+      closeSongToolSelection();
+      return;
+    }
+    state.songTools.selectionRequest += 1;
+    state.songTools.selected = song;
+    renderSongToolLibrary();
+    renderSongToolMenu(song);
+  }
+
+  function refreshSelectedSongTool(packageName) {
+    if (
+      state.workspace === 'tools'
+      && songPackage(state.songTools.selected) === packageName
+    ) {
+      renderSongToolMenu(state.songTools.selected, { openTool: 'preview' });
+    }
+  }
+
   function packageNode(report) {
     const details = make('details', 'lh-package');
     const summary = make('summary');
     const heading = make('div', 'lh-package-title');
     const displayTitle = report.title || report.package || 'Unnamed package';
     const findings = Array.isArray(report.findings) ? report.findings : [];
-    const findingNodes = findings.length ? displayFindingNodes(report) : [];
+    const findingNodes = (findings.length || !report.features?.preview_declared)
+      ? displayFindingNodes(report) : [];
     const counts = { error: 0, warning: 0, info: 0 };
     findingNodes.forEach((node) => {
       const severity = node.dataset.severity;
@@ -2001,11 +3239,16 @@
     try {
       const payload = await request('/rules');
       if (!state.active) return;
+      state.ruleMetadata = {};
+      (payload.items || []).forEach((item) => {
+        if (item?.code && item?.rule) state.ruleMetadata[item.code] = item.rule;
+      });
       const available = (payload.items || []).some((item) => item.code === state.ruleCode);
       if (state.ruleCode && !available) state.ruleCode = '';
       renderRules(payload);
     } catch (error) {
       if (!state.active) return;
+      state.ruleMetadata = {};
       text(el.ruleError, error.message);
       setHidden(el.ruleError, false);
     }
@@ -2119,6 +3362,17 @@
       scope: state.targetKind,
       deep_audio: !!el.deepAudio.checked,
     };
+    if (state.workerMode === 'custom') {
+      const maximum = Number(el.workerLimit.value);
+      if (!Number.isInteger(maximum) || maximum < 1) {
+        text(el.error, 'Maximum validation workers must be a positive whole number.');
+        setHidden(el.error, false);
+        return;
+      }
+      state.workerLimit = maximum;
+      target.max_workers = maximum;
+      saveWorkerSettings();
+    }
     if (state.targetKind !== 'library') target.path = selectedPath();
     try {
       const payload = await request(`/scan?force=${force ? 'true' : 'false'}`, {
@@ -2148,6 +3402,30 @@
   function bind() {
     if (el.root.dataset.libraryDoctorBound === '1') return;
     el.root.dataset.libraryDoctorBound = '1';
+    loadWorkerSettings();
+    el.workspaceTabs.addEventListener('click', (event) => {
+      const button = event.target.closest('button[data-workspace]');
+      if (button) setWorkspace(button.dataset.workspace);
+    });
+    el.songToolSearch.addEventListener('input', () => {
+      clearTimeout(state.songTools.searchTimer);
+      state.songTools.searchTimer = setTimeout(() => {
+        closeSongToolSelection({ render: false });
+        state.songTools.query = el.songToolSearch.value.trim();
+        state.songTools.page = 0;
+        loadSongTools();
+      }, 250);
+    });
+    el.songToolPrev.addEventListener('click', () => {
+      closeSongToolSelection({ render: false });
+      state.songTools.page = Math.max(0, state.songTools.page - 1);
+      loadSongTools();
+    });
+    el.songToolNext.addEventListener('click', () => {
+      closeSongToolSelection({ render: false });
+      state.songTools.page += 1;
+      loadSongTools();
+    });
     el.targets.addEventListener('change', (event) => {
       const option = event.target.closest('input[name="lh-target"]');
       if (!option || !['library', 'folder', 'file'].includes(option.value)) return;
@@ -2155,9 +3433,24 @@
       updateTargetControls();
     });
     el.chooseTarget.addEventListener('click', chooseTarget);
+    el.workerMode.addEventListener('change', () => {
+      state.workerMode = el.workerMode.value === 'custom' ? 'custom' : 'automatic';
+      saveWorkerSettings();
+      updateWorkerControls();
+    });
+    el.workerLimit.addEventListener('change', () => {
+      const maximum = Number(el.workerLimit.value);
+      if (Number.isInteger(maximum) && maximum > 0) state.workerLimit = maximum;
+      saveWorkerSettings();
+      updateWorkerControls();
+    });
     el.scan.addEventListener('click', () => startScan(false));
     el.scanAll.addEventListener('click', () => startScan(true));
     el.cancel.addEventListener('click', cancelScan);
+    el.batchPreviewMedia.addEventListener('change', () => {
+      if (state.batch?.phase !== 'ready') return;
+      startBatchPreview();
+    });
     el.batchReview.addEventListener('click', startBatchPreview);
     el.batchCancel.addEventListener('click', cancelBatchOperation);
     el.filters.addEventListener('click', (event) => {
@@ -2198,6 +3491,7 @@
     const dropdown = document.getElementById('plugin-dropdown');
     if (dropdown) dropdown.classList.add('hidden');
     bind();
+    setWorkspace(state.workspace);
     updateFilterButtons();
     updateTargetControls();
     await refreshStatus();
@@ -2211,6 +3505,7 @@
     state.active = false;
     clearTimeout(state.pollTimer);
     clearTimeout(state.searchTimer);
+    clearTimeout(state.songTools.searchTimer);
   }
 
   function onScreenChanged(event) {

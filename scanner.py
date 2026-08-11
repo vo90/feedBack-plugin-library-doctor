@@ -3,15 +3,18 @@
 from __future__ import annotations
 
 import csv
+import concurrent.futures
 import hashlib
 import inspect
 import io
 import json
 import os
 import sqlite3
+import sys
 import threading
 import time
 import zipfile
+from collections import deque
 from pathlib import Path, PurePosixPath
 
 
@@ -26,6 +29,119 @@ SIGNATURE_FULL_FILE_BYTES = 1024 * 1024
 MAX_SIGNATURE_MEMBERS = 50_000
 MAX_DISCOVERY_ERRORS = 20
 MAX_BATCH_SCOPE_PACKAGES = 10_000
+MIN_PARALLEL_PACKAGES = 3
+MAX_SOURCE_CHANGE_RETRIES = 2
+WINDOWS_PROCESS_POOL_LIMIT = 61
+STANDARD_WORKER_MEMORY_BYTES = 384 * 1024 * 1024
+DEEP_AUDIO_WORKER_MEMORY_BYTES = 768 * 1024 * 1024
+MIN_SYSTEM_MEMORY_RESERVE_BYTES = 1024 * 1024 * 1024
+MAX_SYSTEM_MEMORY_RESERVE_BYTES = 4 * 1024 * 1024 * 1024
+_BATCH_PREVIEW_RULE_PRIORITY = (
+    "media.preview-missing",
+    "media.preview-too-long",
+    "media.preview-too-short",
+)
+
+
+def _positive_int(value) -> int | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed > 0 else None
+
+
+def choose_worker_policy(
+    pending_packages: int,
+    *,
+    deep_audio: bool,
+    requested_max: int | None = None,
+    worker_backend_available: bool = True,
+    logical_cpus: int | None = None,
+    physical_cpus: int | None = None,
+    total_memory: int | None = None,
+    available_memory: int | None = None,
+    platform: str | None = None,
+    environment: dict | None = None,
+) -> dict:
+    """Choose a bounded worker maximum from work, CPU, RAM, host and user limits."""
+    pending = max(0, int(pending_packages or 0))
+    env = os.environ if environment is None else environment
+    platform_name = sys.platform if platform is None else platform
+
+    if logical_cpus is None:
+        logical_cpus = os.cpu_count() or 1
+    if physical_cpus is None or total_memory is None or available_memory is None:
+        try:
+            import psutil  # FeedBack dependency; optional for standalone tests.
+
+            if physical_cpus is None:
+                physical_cpus = psutil.cpu_count(logical=False)
+            memory = psutil.virtual_memory()
+            if total_memory is None:
+                total_memory = int(memory.total)
+            if available_memory is None:
+                available_memory = int(memory.available)
+        except (ImportError, OSError, RuntimeError, ValueError):
+            pass
+
+    logical = max(1, _positive_int(logical_cpus) or 1)
+    physical = max(1, _positive_int(physical_cpus) or max(1, (logical + 1) // 2))
+    global_value = env.get("FEEDBACK_MAX_SCAN_WORKERS") or env.get("SCAN_MAX_WORKERS")
+    global_limit = _positive_int(global_value)
+    user_limit = _positive_int(requested_max)
+    platform_limit = WINDOWS_PROCESS_POOL_LIMIT if platform_name == "win32" else physical
+
+    memory_per_worker = (
+        DEEP_AUDIO_WORKER_MEMORY_BYTES if deep_audio else STANDARD_WORKER_MEMORY_BYTES
+    )
+    memory_limit = physical
+    if _positive_int(total_memory) and _positive_int(available_memory):
+        reserve = min(
+            MAX_SYSTEM_MEMORY_RESERVE_BYTES,
+            max(MIN_SYSTEM_MEMORY_RESERVE_BYTES, int(total_memory * 0.15)),
+        )
+        usable = max(0, int(available_memory) - reserve)
+        memory_limit = max(1, usable // memory_per_worker)
+
+    limits = {
+        "packages": max(1, pending),
+        "physical_cpu": physical,
+        "memory": max(1, memory_limit),
+        "platform": max(1, platform_limit),
+    }
+    if global_limit is not None:
+        limits["feedback"] = global_limit
+    if user_limit is not None:
+        limits["user"] = user_limit
+
+    selected = min(limits.values())
+    reason = "automatic"
+    if not worker_backend_available:
+        selected = 1
+        reason = "worker_backend_unavailable"
+    elif pending < MIN_PARALLEL_PACKAGES:
+        selected = 1
+        reason = "small_scope"
+    elif selected <= 1:
+        reason = "limited_to_one"
+
+    return {
+        "schema": "library_doctor.worker_policy.v1",
+        "mode": "custom" if user_limit is not None else "automatic",
+        "reason": reason,
+        "selected_workers": max(1, selected),
+        "pending_packages": pending,
+        "deep_audio": bool(deep_audio),
+        "logical_cpus": logical,
+        "physical_cpus": physical,
+        "memory_per_worker_bytes": memory_per_worker,
+        "total_memory_bytes": _positive_int(total_memory),
+        "available_memory_bytes": _positive_int(available_memory),
+        "limits": limits,
+    }
 
 
 class _ReportCache:
@@ -226,6 +342,52 @@ class _ReportCache:
                 (package, signature, *versions),
             ).fetchone()
         return row is not None
+
+    def verified_report(
+        self,
+        package: str,
+        signature: str,
+        validator_version: str,
+    ) -> dict | None:
+        """Return one report only when its exact scan binding still matches."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT report_json FROM reports WHERE package = ? "
+                "AND signature = ? AND validator_version = ?",
+                (package, signature, validator_version),
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            return json.loads(row["report_json"])
+        except (TypeError, json.JSONDecodeError):
+            return None
+
+    def current_report_binding(
+        self,
+        package: str,
+        validator_version: str,
+    ) -> dict | None:
+        """Return one current-scope report and the signature that binds it."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT r.signature, r.report_json FROM reports AS r "
+                "INNER JOIN current_scope AS s ON s.package = r.package "
+                "WHERE r.package = ? AND r.validator_version = ?",
+                (package, validator_version),
+            ).fetchone()
+        if row is None:
+            return None
+        try:
+            report = json.loads(row["report_json"])
+        except (TypeError, json.JSONDecodeError):
+            return None
+        if not isinstance(report, dict):
+            return None
+        return {
+            "signature": row["signature"],
+            "report": report,
+        }
 
     def put(
         self,
@@ -502,6 +664,7 @@ class _ReportCache:
         result_filter: str,
         query: str,
         rule_code: str,
+        include_signature: bool = False,
     ) -> list[dict]:
         where, params = self._where(result_filter, query, rule_code)
         source = (
@@ -511,7 +674,7 @@ class _ReportCache:
         order = " ORDER BY r.artist COLLATE NOCASE, r.title COLLATE NOCASE, r.package COLLATE NOCASE"
         with self._lock:
             rows = self._conn.execute(
-                f"SELECT r.report_json, r.scanned_at{source}{where}{order}",
+                f"SELECT r.report_json, r.scanned_at, r.signature{source}{where}{order}",
                 params,
             ).fetchall()
         reports = []
@@ -521,6 +684,8 @@ class _ReportCache:
             except (TypeError, json.JSONDecodeError):
                 continue
             report["scanned_at"] = row["scanned_at"]
+            if include_signature:
+                report["_scan_signature"] = row["signature"]
             reports.append(report)
         return reports
 
@@ -571,6 +736,7 @@ class LibraryScanner:
         validator_version: str,
         log,
         rule_metadata=None,
+        worker_pool_factory=None,
     ) -> None:
         self._get_dlc_dir = get_dlc_dir
         self._validate_feedpak = validate_feedpak
@@ -582,6 +748,9 @@ class LibraryScanner:
         )
         self._validator_version = validator_version
         self._rule_metadata = rule_metadata if callable(rule_metadata) else None
+        self._worker_pool_factory = (
+            worker_pool_factory if callable(worker_pool_factory) else None
+        )
         self._log = log
         self._cache = _ReportCache(Path(config_dir) / "library_doctor" / "library_doctor.db")
         self._lock = threading.Lock()
@@ -592,6 +761,7 @@ class LibraryScanner:
         self._pause_started: float | None = None
         self._run_started_monotonic: float | None = None
         self._thread: threading.Thread | None = None
+        self._worker_pool = None
         self._status = self._initial_status(self._cache.current_target())
 
     @staticmethod
@@ -619,6 +789,29 @@ class LibraryScanner:
             "playback_paused": False,
             "scope_complete": True,
             "discovery_errors": [],
+            "performance": {
+                "discovery_seconds": 0.0,
+                "signature_seconds": 0.0,
+                "cache_lookup_seconds": 0.0,
+                "validation_seconds": 0.0,
+                "parallel_validation_wall_seconds": 0.0,
+                "worker_validation_seconds": 0.0,
+                "worker_queue_seconds": 0.0,
+                "source_recheck_seconds": 0.0,
+                "source_change_retries": 0,
+                "parallel_fallbacks": 0,
+                "cache_write_seconds": 0.0,
+                "scope_update_seconds": 0.0,
+            },
+            "worker_policy": {
+                "schema": "library_doctor.worker_policy.v1",
+                "mode": "automatic",
+                "reason": "not_started",
+                "selected_workers": 1,
+                "pending_packages": 0,
+                "deep_audio": False,
+                "limits": {},
+            },
             "target": target or {"kind": "library", "label": "Whole library"},
         }
 
@@ -631,7 +824,18 @@ class LibraryScanner:
             status["running"] and status["stage"] == "paused"
         )
         status["summary"] = self._cache.summary()
-        status["last_scan"] = self._cache.last_scan()
+        last_scan = self._cache.last_scan()
+        scan_current = bool(
+            isinstance(last_scan, dict)
+            and last_scan.get("complete")
+            and last_scan.get("validator_version") == self._validator_version
+        )
+        status["validator_version"] = self._validator_version
+        status["scan_current"] = scan_current
+        status["scope_complete"] = bool(
+            status.get("scope_complete") and scan_current
+        )
+        status["last_scan"] = last_scan
         return status
 
     def start(
@@ -641,7 +845,14 @@ class LibraryScanner:
         target_kind: str = "library",
         selected_path: str | None = None,
         deep_audio: bool = False,
+        max_workers: int | None = None,
     ) -> bool:
+        if max_workers is not None and (
+            isinstance(max_workers, bool)
+            or not isinstance(max_workers, int)
+            or max_workers < 1
+        ):
+            raise ValueError("Maximum scan workers must be a positive whole number.")
         with self._lock:
             if self._status["running"] or self._status.get("repairing"):
                 return False
@@ -679,6 +890,7 @@ class LibraryScanner:
                     "target_path": target_path,
                     "target": target,
                     "deep_audio": bool(deep_audio),
+                    "max_workers": max_workers,
                     "started_at": started_at,
                 },
                 name="library-doctor-scan",
@@ -759,11 +971,21 @@ class LibraryScanner:
         return report
 
     def cancel(self) -> bool:
+        worker_pool = None
         with self._lock:
             if not self._status["running"]:
                 return False
             self._cancel.set()
             self._status["stage"] = "cancelling"
+            worker_pool = self._worker_pool
+        if worker_pool is not None:
+            try:
+                worker_pool.cancel()
+            except Exception as exc:
+                self._log.warning(
+                    "Library Doctor could not signal its validation workers: %s",
+                    exc,
+                )
         with self._playback_condition:
             self._playback_condition.notify_all()
         return True
@@ -771,10 +993,28 @@ class LibraryScanner:
     def set_playback_active(self, active: bool) -> bool:
         """Prioritize an active song session over diagnostic scanning."""
         active = bool(active)
-        with self._playback_condition:
-            changed = self._playback_active != active
-            self._playback_active = active
-            self._playback_condition.notify_all()
+        with self._lock:
+            worker_pool = self._worker_pool
+            running = bool(self._status.get("running"))
+            with self._playback_condition:
+                changed = self._playback_active != active
+                self._playback_active = active
+                if running and active and self._pause_started is None:
+                    self._pause_started = time.monotonic()
+                elif running and not active and self._pause_started is not None:
+                    self._paused_seconds += max(
+                        0.0, time.monotonic() - self._pause_started
+                    )
+                    self._pause_started = None
+                self._playback_condition.notify_all()
+            if running and active and self._status.get("stage") not in {
+                "cancelling", "discovering",
+            }:
+                self._status["stage"] = "paused"
+            elif running and not active and self._status.get("stage") == "paused":
+                self._status["stage"] = "scanning"
+        if worker_pool is not None:
+            worker_pool.set_paused(active)
         return changed
 
     def playback_active(self) -> bool:
@@ -793,8 +1033,9 @@ class LibraryScanner:
         pause_started = None
         with self._playback_condition:
             if self._playback_active and not self._cancel.is_set():
-                pause_started = time.monotonic()
-                self._pause_started = pause_started
+                if self._pause_started is None:
+                    self._pause_started = time.monotonic()
+                pause_started = self._pause_started
         if pause_started is None:
             return
 
@@ -847,19 +1088,26 @@ class LibraryScanner:
             limit=limit,
             offset=offset,
         )
-        if self._rule_metadata is not None:
-            for report in payload.get("items", []):
-                self._enrich_report(report)
+        for report in payload.get("items", []):
+            self._enrich_report(report)
         return payload
 
-    def repair_scope_snapshot(self, safe_rule_codes) -> dict:
+    def repair_scope_snapshot(
+        self,
+        safe_rule_codes,
+        preview_rule_codes=(),
+    ) -> dict:
         """Return a bounded snapshot of repairable packages in current scan scope."""
         safe_codes = {
             str(code) for code in safe_rule_codes
             if isinstance(code, str) and code
         }
-        if not safe_codes:
-            raise ValueError("No safe repair rules are currently available.")
+        preview_codes = {
+            str(code) for code in preview_rule_codes
+            if isinstance(code, str) and code
+        }
+        if not safe_codes and not preview_codes:
+            raise ValueError("No batch repair rules are currently available.")
         last_scan = self._cache.last_scan()
         if not isinstance(last_scan, dict) or not last_scan.get("complete"):
             raise ValueError(
@@ -873,6 +1121,7 @@ class LibraryScanner:
             result_filter="all",
             query="",
             rule_code="",
+            include_signature=True,
         )
         if len(reports) > MAX_BATCH_SCOPE_PACKAGES:
             raise ValueError(
@@ -888,38 +1137,222 @@ class LibraryScanner:
                 for finding in findings
                 if isinstance(finding, dict) and finding.get("code") in safe_codes
             })
+            reported_preview_codes = {
+                finding.get("code")
+                for finding in findings
+                if (
+                    isinstance(finding, dict)
+                    and finding.get("code") in preview_codes
+                )
+            }
+            features = (
+                report.get("features")
+                if isinstance(report.get("features"), dict)
+                else {}
+            )
+            eligibility = (
+                features.get("repair_eligibility")
+                if isinstance(features.get("repair_eligibility"), dict)
+                else {}
+            )
+
+            def automatically_repairable(code: str) -> bool:
+                item = eligibility.get(code)
+                return not isinstance(item, dict) or item.get("status") == "automatic"
+
+            rule_codes = [
+                code for code in rule_codes if automatically_repairable(code)
+            ]
+            reported_preview_codes = {
+                code for code in reported_preview_codes
+                if automatically_repairable(code)
+            }
+            if (
+                "media.preview-missing" in preview_codes
+                and not bool(features.get("preview_declared"))
+                and bool(features.get("preview_source_available"))
+                and automatically_repairable("media.preview-missing")
+            ):
+                reported_preview_codes.add("media.preview-missing")
+            preview_rule_code = next(
+                (
+                    code for code in _BATCH_PREVIEW_RULE_PRIORITY
+                    if code in reported_preview_codes
+                ),
+                None,
+            )
             package = report.get("package")
-            if not rule_codes or not isinstance(package, str) or not package:
+            if (
+                (not rule_codes and preview_rule_code is None)
+                or not isinstance(package, str)
+                or not package
+            ):
                 continue
+            safe_findings = []
+            for code in rule_codes:
+                matching = [
+                    finding for finding in findings
+                    if isinstance(finding, dict) and finding.get("code") == code
+                ]
+                first = matching[0] if matching else {}
+                rule = (
+                    first.get("rule")
+                    if isinstance(first.get("rule"), dict)
+                    else {}
+                )
+                affected_count = 0
+                for finding in matching:
+                    try:
+                        affected_count += max(
+                            1, int(finding.get("affected_count") or 1)
+                        )
+                    except (TypeError, ValueError):
+                        affected_count += 1
+                safe_findings.append({
+                    "rule_code": code,
+                    "title": str(rule.get("title") or code),
+                    "finding_count": len(matching),
+                    "reported_affected_count": affected_count,
+                })
             candidates.append({
                 "package": package,
                 "title": str(report.get("title") or package),
                 "artist": str(report.get("artist") or ""),
                 "rule_codes": rule_codes,
+                "safe_findings": safe_findings,
+                "preview_rule_code": preview_rule_code,
+                "scan_signature": report.get("_scan_signature"),
             })
         target = self._cache.current_target()
         return {
             "schema": "library_doctor.repair_scope.v1",
             "target": target,
             "deep_audio": bool(last_scan.get("deep_audio")),
+            "include_preview_repairs": bool(preview_codes),
             "validator_version": self._validator_version,
             "scanned_at": last_scan.get("completed_at"),
             "scope_package_count": len(reports),
             "candidates": candidates,
         }
 
+    def package_matches_signature(self, package: str, expected: str) -> bool:
+        """Confirm that one package still matches its completed scan snapshot."""
+        if not isinstance(expected, str) or not expected:
+            return False
+        relative = PurePosixPath(str(package))
+        if (
+            relative.is_absolute()
+            or "\\" in str(package)
+            or any(part in {"", ".", ".."} for part in relative.parts)
+            or relative.suffix.lower() not in SONG_SUFFIXES
+        ):
+            return False
+        try:
+            root_value = self._get_dlc_dir()
+            if not root_value:
+                return False
+            root = Path(root_value).resolve(strict=True)
+            package_path = root.joinpath(*relative.parts).resolve(strict=True)
+            package_path.relative_to(root)
+            if not (package_path.is_file() or package_path.is_dir()):
+                return False
+            root_namespace = hashlib.blake2b(
+                str(root).casefold().encode("utf-8", "surrogatepass"),
+                digest_size=12,
+            ).hexdigest()
+            return self._signature(package_path, root_namespace) == expected
+        except (OSError, ValueError):
+            return False
+
+    def current_deep_audio_repair_context(self, package: str) -> dict | None:
+        """Return a guarded Deep Audio binding for one current-scope repair.
+
+        The caller must use ``package_matches_signature`` immediately before
+        trusting the report and again before commit. Keeping the signature with
+        the report avoids a second package hash just to read the cache.
+        """
+        last_scan = self._cache.last_scan()
+        if not isinstance(last_scan, dict):
+            return None
+        if (
+            not last_scan.get("complete")
+            or not last_scan.get("deep_audio")
+            or last_scan.get("validator_version") != self._validator_version
+        ):
+            return None
+        return self._cache.current_report_binding(
+            package,
+            f"{self._validator_version}:deep-audio",
+        )
+
+    def verified_deep_audio_report(
+        self, package: str, expected_signature: str
+    ) -> dict | None:
+        """Return the completed Deep Audio report bound to unchanged bytes."""
+        if not self.package_matches_signature(package, expected_signature):
+            return None
+        return self.deep_audio_report_for_signature(package, expected_signature)
+
+    def deep_audio_report_for_signature(
+        self, package: str, expected_signature: str
+    ) -> dict | None:
+        """Read a Deep Audio report after the caller verified this signature.
+
+        This cache-only variant avoids hashing a package twice in one guarded
+        batch step. Callers must first compare the current package with the same
+        signature; commit-time source guards remain independently required.
+        """
+        if not isinstance(expected_signature, str) or not expected_signature:
+            return None
+        return self._cache.verified_report(
+            package,
+            expected_signature,
+            f"{self._validator_version}:deep-audio",
+        )
+
     def _enrich_report(self, report: dict) -> None:
         """Add current catalog metadata to reports written by older rule sets."""
         findings = report.get("findings") if isinstance(report, dict) else None
-        if not isinstance(findings, list) or self._rule_metadata is None:
+        if not isinstance(findings, list):
             return
+        features = (
+            report.get("features")
+            if isinstance(report.get("features"), dict)
+            else {}
+        )
+        features["repair_scan_current"] = (
+            report.get("validator_version") == self._validator_version
+        )
+        report["features"] = features
         for finding in findings:
             if not isinstance(finding, dict):
                 continue
             severity = str(finding.get("severity") or "info")
             category = str(finding.get("category") or "validation")
             code = str(finding.get("code") or "unknown")
-            finding["rule"] = self._rule_metadata(code, severity, category)
+            if self._rule_metadata is not None:
+                finding["rule"] = self._rule_metadata(code, severity, category)
+            eligibility = (
+                features.get("repair_eligibility")
+                if isinstance(features.get("repair_eligibility"), dict)
+                else {}
+            )
+            repair_status = eligibility.get(code)
+            rule = finding.get("rule")
+            if isinstance(repair_status, dict) and isinstance(rule, dict):
+                status = repair_status.get("status")
+                if status == "author_review":
+                    rule["repairability"] = "review_required"
+                    rule["guidance"] = repair_status.get("message") or (
+                        "This occurrence needs author review before it is changed."
+                    )
+                elif status == "unavailable":
+                    rule["repairability"] = "manual"
+                    rule["guidance"] = repair_status.get("message") or (
+                        "The package does not contain the source data required for this automatic repair."
+                    )
+                elif status == "automatic":
+                    rule["repairability"] = "safe_candidate"
             finding.setdefault("affected_count", 1)
             finding.setdefault("evidence", {
                 key: value
@@ -1375,6 +1808,8 @@ class LibraryScanner:
         expected: int | None,
         completed: int,
         discovery_errors: list[str],
+        performance: dict | None = None,
+        worker_policy: dict | None = None,
     ) -> None:
         self._cache.record_scan({
             "outcome": outcome,
@@ -1387,6 +1822,8 @@ class LibraryScanner:
             "expected": expected,
             "completed": completed,
             "discovery_errors": discovery_errors[:MAX_DISCOVERY_ERRORS],
+            "performance": dict(performance or {}),
+            "worker_policy": dict(worker_policy or {}),
         })
 
     def _finish_cancelled(
@@ -1429,6 +1866,8 @@ class LibraryScanner:
             expected=expected,
             completed=completed,
             discovery_errors=discovery_errors,
+            performance=self._status.get("performance"),
+            worker_policy=self._status.get("worker_policy"),
         )
 
     def _failure_report(
@@ -1487,9 +1926,43 @@ class LibraryScanner:
         target_path: Path,
         target: dict,
         deep_audio: bool,
+        max_workers: int | None,
         started_at: float,
     ) -> None:
+        performance = {
+            "discovery_seconds": 0.0,
+            "signature_seconds": 0.0,
+            "cache_lookup_seconds": 0.0,
+            "validation_seconds": 0.0,
+            "parallel_validation_wall_seconds": 0.0,
+            "worker_validation_seconds": 0.0,
+            "worker_queue_seconds": 0.0,
+            "source_recheck_seconds": 0.0,
+            "source_change_retries": 0,
+            "parallel_fallbacks": 0,
+            "cache_write_seconds": 0.0,
+            "scope_update_seconds": 0.0,
+        }
+
+        def timed_phase(key: str, started_phase: float) -> None:
+            performance[key] += max(0.0, time.perf_counter() - started_phase)
+
+        def public_performance() -> dict:
+            return {
+                key: round(value, 6)
+                for key, value in performance.items()
+            }
+
+        def validation_options() -> dict:
+            options = {}
+            if deep_audio:
+                options["deep_audio"] = True
+            if self._validator_accepts_checkpoint:
+                options["scan_checkpoint"] = self._playback_checkpoint
+            return options
+
         try:
+            discovery_started = time.perf_counter()
             self._playback_checkpoint(resume_stage="discovering")
             packages, discovery_errors = self._discover_target(
                 target_path,
@@ -1499,6 +1972,8 @@ class LibraryScanner:
                 ),
                 cancelled=self._cancel.is_set,
             )
+            timed_phase("discovery_seconds", discovery_started)
+            self._set_status(performance=public_performance())
             if self._cancel.is_set():
                 self._finish_cancelled(
                     target=target,
@@ -1532,6 +2007,7 @@ class LibraryScanner:
             scanned = 0
             reused = 0
             completed_packages: set[str] = set()
+            pending: list[dict] = []
             standard_version = f"{self._validator_version}:standard"
             deep_version = f"{self._validator_version}:deep-audio"
             scan_version = deep_version if deep_audio else standard_version
@@ -1544,7 +2020,53 @@ class LibraryScanner:
                 # Reuse reports written before scan profiles were introduced.
                 self._validator_version,
             )
-            for index, (path, package_name) in enumerate(zip(packages, relative)):
+
+            def update_progress(current: str = "") -> None:
+                done = len(completed_packages)
+                elapsed = max(0.0, time.time() - started_at)
+                active_elapsed = max(0.001, self._active_elapsed())
+                rate = done / active_elapsed
+                eta = (len(packages) - done) / rate if rate > 0 else None
+                self._set_status(
+                    current=current,
+                    done=done,
+                    scanned=scanned,
+                    reused=reused,
+                    elapsed_seconds=elapsed,
+                    active_seconds=active_elapsed,
+                    packages_per_second=rate,
+                    eta_seconds=eta,
+                    performance=public_performance(),
+                )
+
+            def cache_report(package_name: str, signature: str, report: dict) -> None:
+                nonlocal scanned
+                operation_started = time.perf_counter()
+                try:
+                    self._cache.put(
+                        package_name,
+                        signature,
+                        scan_version,
+                        report,
+                        time.time(),
+                    )
+                finally:
+                    timed_phase("cache_write_seconds", operation_started)
+                scanned += 1
+                completed_packages.add(package_name)
+                update_progress(package_name)
+
+            def cache_unreadable(package_name: str, exc: Exception) -> None:
+                cache_report(
+                    package_name,
+                    f"unreadable:{time.time_ns()}",
+                    self._failure_report(package_name, exc, deep_audio=deep_audio),
+                )
+
+            # Signatures and cache ownership stay in this parent process.  A
+            # forced scan normally leaves every package in ``pending``; an
+            # incremental scan avoids starting a pool when everything is cached.
+            for path, package_name in zip(packages, relative):
                 self._playback_checkpoint()
                 if self._cancel.is_set():
                     self._finish_cancelled(
@@ -1558,95 +2080,280 @@ class LibraryScanner:
                     return
                 self._set_status(current=package_name)
                 try:
+                    operation_started = time.perf_counter()
                     signature = self._signature(
                         path, root_namespace, self._playback_checkpoint
                     )
-                    if not force and self._cache.cached(
-                        package_name, signature, accepted_versions
-                    ):
-                        reused += 1
-                    else:
-                        try:
-                            validation_options = {}
-                            if deep_audio:
-                                validation_options["deep_audio"] = True
-                            if self._validator_accepts_checkpoint:
-                                validation_options["scan_checkpoint"] = (
-                                    self._playback_checkpoint
-                                )
-                            report = self._validate_feedpak(
-                                path,
-                                package_name,
-                                **validation_options,
-                            )
-                        except Exception as exc:  # One third-party rule must not abort the batch.
-                            self._log.warning(
-                                "Library Doctor validation failed for %s: %s",
-                                package_name,
-                                exc,
-                            )
-                            report = self._failure_report(
-                                package_name,
-                                exc,
-                                deep_audio=deep_audio,
-                            )
-                        self._cache.put(
-                            package_name,
-                            signature,
-                            scan_version,
-                            report,
-                            time.time(),
+                    timed_phase("signature_seconds", operation_started)
+                    operation_started = time.perf_counter()
+                    cached = bool(
+                        not force
+                        and self._cache.cached(
+                            package_name, signature, accepted_versions
                         )
-                        scanned += 1
-                    completed_packages.add(package_name)
+                    )
+                    timed_phase("cache_lookup_seconds", operation_started)
+                    if cached:
+                        reused += 1
+                        completed_packages.add(package_name)
+                        update_progress(package_name)
+                    else:
+                        pending.append({
+                            "path": path,
+                            "package": package_name,
+                            "signature": signature,
+                            "retries": 0,
+                        })
                 except OSError as exc:
-                    report = self._failure_report(
-                        package_name,
-                        exc,
-                        deep_audio=deep_audio,
-                    )
-                    fallback_signature = f"unreadable:{time.time_ns()}"
-                    self._cache.put(
-                        package_name,
-                        fallback_signature,
-                        scan_version,
-                        report,
-                        time.time(),
-                    )
-                    scanned += 1
-                    completed_packages.add(package_name)
-                done = index + 1
-                elapsed = max(0.0, time.time() - started_at)
-                active_elapsed = max(0.001, self._active_elapsed())
-                rate = done / active_elapsed
-                eta = (len(packages) - done) / rate if rate > 0 else None
-                self._set_status(
-                    done=done,
-                    scanned=scanned,
-                    reused=reused,
-                    elapsed_seconds=elapsed,
-                    active_seconds=active_elapsed,
-                    packages_per_second=rate,
-                    eta_seconds=eta,
-                )
-                if self._cancel.is_set():
-                    self._finish_cancelled(
-                        target=target,
-                        deep_audio=deep_audio,
-                        started_at=started_at,
-                        expected=len(packages),
-                        completed_packages=completed_packages,
-                        discovery_errors=discovery_errors,
-                    )
-                    return
+                    cache_unreadable(package_name, exc)
 
-            if target["kind"] == "library" and not discovery_errors:
-                self._cache.delete_stale(completed_packages)
-            self._cache.replace_scope(
-                completed_packages,
-                kind=target["kind"],
-                label=target["label"],
+            worker_policy = choose_worker_policy(
+                len(pending),
+                deep_audio=deep_audio,
+                requested_max=max_workers,
+                worker_backend_available=self._worker_pool_factory is not None,
             )
+            self._set_status(worker_policy=worker_policy)
+
+            def stable_signature(item: dict) -> tuple[bool, str | None]:
+                operation_started = time.perf_counter()
+                try:
+                    current_signature = self._signature(
+                        item["path"], root_namespace, self._playback_checkpoint
+                    )
+                except OSError:
+                    current_signature = None
+                finally:
+                    timed_phase("source_recheck_seconds", operation_started)
+                return current_signature == item["signature"], current_signature
+
+            def accept_report(item: dict, report: dict) -> bool:
+                unchanged, current_signature = stable_signature(item)
+                if unchanged:
+                    cache_report(item["package"], item["signature"], report)
+                    return True
+                item["retries"] += 1
+                performance["source_change_retries"] += 1
+                if current_signature is not None and item["retries"] <= MAX_SOURCE_CHANGE_RETRIES:
+                    item["signature"] = current_signature
+                    return False
+                exc = RuntimeError("The Feedpak kept changing while it was being scanned.")
+                self._log.warning(
+                    "Library Doctor could not capture a stable version of %s.",
+                    item["package"],
+                )
+                cache_unreadable(item["package"], exc)
+                return True
+
+            def validate_sequential(items) -> None:
+                queue = deque(items)
+                while queue and not self._cancel.is_set():
+                    item = queue.popleft()
+                    self._playback_checkpoint()
+                    self._set_status(current=item["package"])
+                    operation_started = time.perf_counter()
+                    try:
+                        report = self._validate_feedpak(
+                            item["path"],
+                            item["package"],
+                            **validation_options(),
+                        )
+                    except Exception as exc:  # One package must not abort the scan.
+                        self._log.warning(
+                            "Library Doctor validation failed for %s: %s",
+                            item["package"],
+                            exc,
+                        )
+                        report = self._failure_report(
+                            item["package"], exc, deep_audio=deep_audio
+                        )
+                    finally:
+                        timed_phase("validation_seconds", operation_started)
+                    if not accept_report(item, report):
+                        queue.append(item)
+
+            selected_workers = int(worker_policy["selected_workers"])
+            if selected_workers <= 1 or not pending:
+                validate_sequential(pending)
+            else:
+                parallel_remaining = deque(pending)
+                pool = None
+                futures: dict = {}
+                fallback_items: list[dict] = []
+                parallel_started = time.perf_counter()
+                try:
+                    pool = self._worker_pool_factory(
+                        selected_workers, self._validator_version
+                    )
+                    with self._lock:
+                        # Publish the pool and copy the current playback state
+                        # atomically.  ``set_playback_active`` takes these locks
+                        # in the same order, so it cannot miss a newly-created
+                        # pool or immediately overwrite this initial signal.
+                        with self._playback_condition:
+                            self._worker_pool = pool
+                            pool.set_paused(self._playback_active)
+
+                    def fill_workers() -> None:
+                        capacity = max(1, selected_workers * 2)
+                        while (
+                            parallel_remaining
+                            and len(futures) < capacity
+                            and not self._cancel.is_set()
+                        ):
+                            item = parallel_remaining.popleft()
+                            future = pool.submit(
+                                item["path"], item["package"], deep_audio
+                            )
+                            futures[future] = (item, time.perf_counter())
+
+                    fill_workers()
+                    while futures and not self._cancel.is_set():
+                        finished, _ = concurrent.futures.wait(
+                            tuple(futures),
+                            timeout=0.25,
+                            return_when=concurrent.futures.FIRST_COMPLETED,
+                        )
+                        if not finished:
+                            continue
+                        for future in finished:
+                            item, submitted_at = futures.pop(future)
+                            try:
+                                result = future.result()
+                            except Exception as exc:
+                                fallback_items = [
+                                    item,
+                                    *(value[0] for value in futures.values()),
+                                    *parallel_remaining,
+                                ]
+                                raise RuntimeError(
+                                    "The validation process pool stopped unexpectedly."
+                                ) from exc
+                            worker_elapsed = max(
+                                0.0, float(result.get("elapsed_seconds") or 0.0)
+                            )
+                            performance["worker_validation_seconds"] += worker_elapsed
+                            performance["worker_queue_seconds"] += max(
+                                0.0,
+                                time.perf_counter() - submitted_at - worker_elapsed,
+                            )
+                            outcome = result.get("outcome")
+                            if outcome == "cancelled":
+                                if not self._cancel.is_set():
+                                    fallback_items = [
+                                        item,
+                                        *(value[0] for value in futures.values()),
+                                        *parallel_remaining,
+                                    ]
+                                    raise RuntimeError(
+                                        "A validation worker stopped before cancellation."
+                                    )
+                                break
+                            if outcome == "complete" and isinstance(
+                                result.get("report"), dict
+                            ):
+                                report = result["report"]
+                            else:
+                                error_type = str(result.get("error_type") or "WorkerError")
+                                detail = str(result.get("error") or "Unknown worker error")
+                                self._log.warning(
+                                    "Library Doctor validation failed for %s in %s: %s",
+                                    item["package"],
+                                    error_type,
+                                    detail,
+                                )
+                                report = self._failure_report(
+                                    item["package"],
+                                    RuntimeError(f"{error_type}: {detail}"),
+                                    deep_audio=deep_audio,
+                                )
+                            if not accept_report(item, report):
+                                parallel_remaining.append(item)
+                        fill_workers()
+                except Exception as exc:
+                    if not self._cancel.is_set():
+                        performance["parallel_fallbacks"] += 1
+                        self._log.warning(
+                            "Library Doctor parallel validation is unavailable; "
+                            "continuing safely with one worker: %s",
+                            exc,
+                        )
+                        if not fallback_items:
+                            fallback_items = [
+                                *(value[0] for value in futures.values()),
+                                *parallel_remaining,
+                            ]
+                finally:
+                    performance["parallel_validation_wall_seconds"] += max(
+                        0.0, time.perf_counter() - parallel_started
+                    )
+                    if pool is not None:
+                        if self._cancel.is_set() or fallback_items:
+                            try:
+                                pool.cancel()
+                            except Exception as exc:
+                                self._log.warning(
+                                    "Library Doctor could not stop its validation workers: %s",
+                                    exc,
+                                )
+                        with self._lock:
+                            if self._worker_pool is pool:
+                                self._worker_pool = None
+                        try:
+                            pool.shutdown()
+                        except Exception as exc:
+                            if not fallback_items and not self._cancel.is_set():
+                                self._log.warning(
+                                    "Library Doctor validation workers did not close cleanly: %s",
+                                    exc,
+                                )
+                if fallback_items and not self._cancel.is_set():
+                    # A broken pool can leave the same item in more than one
+                    # bookkeeping collection.  Revalidate each unfinished
+                    # package once; validation is read-only and deterministic.
+                    unique = {}
+                    for item in fallback_items:
+                        if item["package"] not in completed_packages:
+                            unique[item["package"]] = item
+                    validate_sequential(unique.values())
+
+            if self._cancel.is_set():
+                self._finish_cancelled(
+                    target=target,
+                    deep_audio=deep_audio,
+                    started_at=started_at,
+                    expected=len(packages),
+                    completed_packages=completed_packages,
+                    discovery_errors=discovery_errors,
+                )
+                return
+
+            if len(completed_packages) != len(packages):
+                missing = [
+                    name for name in relative if name not in completed_packages
+                ]
+                raise RuntimeError(
+                    f"Validation finished without reports for {len(missing)} package(s)."
+                )
+
+            # ``validation_seconds`` remains end-to-end validation wall time
+            # for comparable telemetry; worker CPU time is reported separately.
+            if selected_workers > 1:
+                performance["validation_seconds"] += performance[
+                    "parallel_validation_wall_seconds"
+                ]
+
+            operation_started = time.perf_counter()
+            try:
+                if target["kind"] == "library" and not discovery_errors:
+                    self._cache.delete_stale(completed_packages)
+                self._cache.replace_scope(
+                    completed_packages,
+                    kind=target["kind"],
+                    label=target["label"],
+                )
+            finally:
+                timed_phase("scope_update_seconds", operation_started)
             completed_at = time.time()
             elapsed = max(0.0, completed_at - started_at)
             active_elapsed = self._active_elapsed()
@@ -1663,6 +2370,7 @@ class LibraryScanner:
                 packages_per_second=(len(packages) / rate_elapsed if packages else 0.0),
                 eta_seconds=0.0,
                 scope_complete=complete,
+                performance=public_performance(),
             )
             self._record_finished_scan(
                 outcome=stage,
@@ -1674,6 +2382,8 @@ class LibraryScanner:
                 expected=len(packages),
                 completed=len(completed_packages),
                 discovery_errors=discovery_errors,
+                performance=public_performance(),
+                worker_policy=worker_policy,
             )
         except Exception as exc:
             self._log.warning("Library Doctor scan failed: %s", exc)
@@ -1702,4 +2412,6 @@ class LibraryScanner:
                 expected=self._status.get("total"),
                 completed=self._status.get("done", 0),
                 discovery_errors=self._status.get("discovery_errors", []),
+                performance=public_performance(),
+                worker_policy=self._status.get("worker_policy"),
             )

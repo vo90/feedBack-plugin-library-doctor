@@ -2,15 +2,23 @@
 
 Library Doctor is FeedBack's Feedpak library validator and conservative repair
 assistant. Scans are always read-only. The plugin reports problems in `.feedpak`
-and legacy `.sloppak` packages and offers an explicit preview only for repairs
-that can be performed without choosing between different musical data.
+and legacy `.sloppak` packages. Deterministic song-data repairs show an exact
+change preview; audio-preview recommendations offer both a listen-first workflow
+and a confirmed automatic workflow. A separate **Song Tools** workspace provides
+optional, user-requested changes for any indexed local song without requiring a
+scan finding.
 
 The first scan validates every package. Later scans reuse cached reports only
 when package identity, file metadata, and sampled content still match. This
 helps catch changes even when a tool preserves a file's size and timestamp.
-Validation runs in a background thread. Both scan modes automatically pause
-while a song session is open and resume after the player is closed, so gameplay
-always has priority.
+Validation runs in a background coordinator and, when enough uncached packages
+need checking, a bounded pool of read-only worker processes. Automatic worker
+selection considers physical CPU cores, available memory, FeedBack's global
+scan-worker ceiling, the pending package count, and the operating-system limit.
+Small and fully cached scans stay single-worker. An advanced custom maximum is
+available, but remains a ceiling rather than forcing unsafe parallelism. Both
+scan modes automatically pause all workers while a song session is open and
+resume after the player is closed, so gameplay always has priority.
 
 ## Install
 
@@ -32,7 +40,9 @@ directory), then restart FeedBack. Do not copy its files into FeedBack core.
 
 ## Use
 
-1. Open **Library Doctor** from FeedBack's plugin navigation.
+1. Open **Library Doctor** from FeedBack's plugin navigation. **Health Scan** is
+   the diagnostic and repair workspace; **Song Tools** is for optional changes
+   to a song you choose.
 2. Choose **Whole library**, **Selected folder**, or **Single Feedpak**. Folder
    scans include all Feedpaks and Sloppaks in their subfolders. Selected paths
    must be inside FeedBack's configured song library.
@@ -42,7 +52,10 @@ directory), then restart FeedBack. Do not copy its files into FeedBack core.
    want supported Ogg container and duration validation; it reads substantially
    more data, can take a long time for a large library, and is therefore off by
    default. If you open a song, the scan pauses without losing progress and
-   resumes automatically when you leave the player.
+   resumes automatically when you leave the player. **Scan performance** uses
+   an automatic worker count by default and shows the chosen count in progress
+   and scan provenance. Its custom maximum is for troubleshooting or deliberate
+   tuning; it cannot override CPU, memory, task, or platform safety limits.
 4. Review **Needs attention** first. The rule summary shows how widespread each
    issue is and can filter the package list. Every finding separates the actual
    data problem, what a player may notice in FeedBack, and why fixing it matters.
@@ -51,30 +64,60 @@ directory), then restart FeedBack. Do not copy its files into FeedBack core.
    JSON and CSV exports use the current package, search, and rule filters.
 5. When **Review safe fix** appears beside a finding, open the preview to see
    exactly how many stored copies and musical positions are affected. Applying
-   the repair requires a separate confirmation. Library Doctor creates a
-   recovery backup, validates a repaired candidate, and saves it only if it
+   the repair requires a separate confirmation. Library Doctor creates
+   recovery data, validates a repaired candidate, and saves it only if it
    introduces no new finding. A persistent result card confirms success or
    failure, states exactly what changed and what to expect in game, and offers
-   Undo after a successful repair. Repeated findings for the same repair rule
+   Undo after a successful chart repair. Repeated findings for the same repair rule
    are grouped into one package-wide action with an arrangement/source
    breakdown. When a Feedpak has more than one distinct safe repair type,
    **Fix all safe issues** previews and applies them as one validated package
    transaction with one recovery backup and one Undo. The individual repair
    controls remain available. Findings without a deterministic repair remain
-   report-only.
-6. Correct remaining source-package problems in an editor, then run the same
+   report-only. Preview recommendations instead offer **Review preview manually**
+   and **Create automatically and finish**. Both generate from the full song mix
+   using the same selection standard; manual review lets you listen and choose
+   another starting point. A validated preview repair removes its temporary
+   recovery copy automatically, so no later finalization step is required.
+6. Open **Song Tools** to search FeedBack's indexed local library and select any
+   song, even one that has not been scanned or has no warning. **Preview
+   Creator** can add a missing preview or replace an existing valid preview.
+   It reuses the same source-bound generation, complete-package validation, and
+   temporary-recovery transaction as preview repair; it is not a separate audio
+   implementation.
+7. Correct remaining source-package problems in an editor, then run the same
    target again. Only changed packages are revalidated. **Recheck without
    cache** is available when timestamps cannot be trusted or a fresh
    confirmation is wanted.
 
+Saved reports from an older Library Doctor rule version remain readable after
+an update, but are clearly marked as needing a new scan and do not expose repair
+controls. This prevents historical classifications from being treated as a
+current automatic-repair decision.
+
 For larger cleanups, **Safe batch repair** uses the complete current scan scope
 (whole library, selected folder, or single Feedpak). It first builds a read-only
 preview showing eligible packages, repair totals, and every package excluded by
-a safety blocker. A second confirmation is required before execution. Packages
-are then repaired one at a time, so each receives its own candidate validation,
-recovery backup, cache refresh, result, and Undo path. Gameplay pauses the batch
-between packages. Stopping also takes effect between packages: completed repairs
-remain valid and recoverable, while packages not yet started remain unchanged.
+a safety blocker. The scan records whether conditional handshape findings are
+actually unambiguous enough for automatic repair and whether a missing or invalid
+preview has a usable full-song source; findings that require author review or
+lack source audio are never advertised as batch-repairable. Flagged missing,
+short, and long previews can be included with
+an explicit opt-in; acceptable previews are never replaced by batch repair. A
+second confirmation is required before execution. Packages are then repaired
+one at a time, with their own candidate validation, cache refresh, and result.
+Safe song-data changes retain an individual Undo backup. Automatic previews use
+temporary recovery while the candidate is validated, then remove that copy and
+finish without Preview Undo. Gameplay pauses the batch between packages.
+Stopping also takes effect between packages: completed repairs remain valid,
+while packages not yet started remain unchanged.
+During a running repair, live counters show repaired, partial, safely skipped,
+failed, and generated-preview outcomes. A compact durable checkpoint is written
+only between complete Feedpak transactions, at most once per minute or every
+100 packages, so completed receipts survive an unexpected app or system stop
+without materially slowing the batch. The completed result can be searched,
+filtered by outcome, sorted by attention/change count/song/artist/path, and
+browsed in a progressively rendered scrollable list instead of page-by-page.
 The completed result distinguishes repairs that are still active from originals
 that have since been restored. **Review Undo all remaining repairs** first checks
 every retained backup and current repaired song-data file without changing anything. A
@@ -167,28 +210,104 @@ deterministic allowlist above; warnings that require musical judgment remain
 unchanged.
 
 Batch repair orchestrates this same per-Feedpak transaction; it does not use a
-less strict mass-editing path. A package that changed after the preview is
-skipped safely, a failure in one package does not prevent later eligible
-packages from being attempted, and blocked packages are clearly excluded before
-confirmation. The latest batch outcome is retained across restarts. Successful
-package rows expose their own reviewed Undo action. The same result also offers
-a controlled Undo-all workflow with preview, confirmation, gameplay pausing,
-safe stopping, per-package outcomes, and current-state totals.
+less strict mass-editing path. Its read-only review reuses the completed scan's
+findings, including scan-time automatic-repair eligibility, and verifies each
+candidate's scan signature, instead of reopening and
+fully planning every song only to repeat that work during application. After
+confirmation, Library Doctor recalculates the selected repair rules from the
+current bytes exactly once, immediately before candidate validation, backup,
+and commit. A package that changed, no longer needs a repair, or fails this
+authoritative safety planning is skipped without being changed. A failure in
+one package does not prevent later packages from being attempted, and the final
+receipt reports exact changes and every skipped or failed package. The latest
+batch outcome is retained across restarts. Successful package rows expose their
+own reviewed Undo action. The same result also offers a controlled Undo-all
+workflow with preview, confirmation, gameplay pausing, safe stopping,
+per-package outcomes, and current-state totals. **Finalize all remaining
+repairs** provides the complementary cleanup workflow. Its read-only review
+verifies every retained recovery copy and shows the storage that can be freed.
+After explicit confirmation, each Feedpak and backup are verified again before
+only that private recovery copy is removed. Changed or uncertain packages are
+skipped, playable Feedpaks are never rewritten by finalization, and the result
+reports every removed, retained, or failed copy. Finalization permanently
+removes Library Doctor Undo for the related repair.
+
+When the completed scan used Deep Audio and a repair changes only song-data
+members in an archived Feedpak, Library Doctor reuses the signature-bound media
+findings and coverage counters for unchanged audio. It still reparses and
+validates the complete changed song data, verifies every untouched archive
+member by size and CRC, and checks the source signature again before commit.
+Unpacked directory packages, and repairs that create or replace audio, continue
+to run fresh Deep Audio validation on the new candidate.
 
 Library Doctor does not add a second playable Feedpak to the song library. It
 builds a complete candidate beside the package, verifies every archive member,
 runs the current package validation, and creates a private recovery backup
 before replacing the archive at the same path (or atomically writing each changed
-file in an unpacked directory package). The backup
-contains the original bytes of only the song-data files changed by the repair, not
-another full copy of large audio and artwork assets. It is stored under
-`library_doctor/repair_backups` in FeedBack's config directory and is retained
-after repair. **Undo this repair** restores those exact original song-data bytes only
+file in an unpacked directory package). The backup contains the original bytes
+of only the package members changed by the repair, never another full copy of
+the Feedpak. For chart repairs these are the affected song-data files. The
+backup is stored under `library_doctor/repair_backups` in FeedBack's config
+directory and is retained until the repair is undone or explicitly finalized.
+**Undo this repair** restores
+those exact original member bytes only
 when the repaired files have not subsequently changed; unrelated current package
 members are preserved. Recovery is validated before it is saved. Findings that
 were present in the exact original are allowed to return, because restoring that
 previous state is the purpose of Undo; they are shown again in the refreshed
-package report. The backup remains available afterward.
+package report. A successful Undo removes the now-redundant backup. **Finalize
+and remove recovery copy** first verifies that the relevant package members
+still exactly match the repaired state, then removes only the private recovery
+copy; the playable Feedpak is not changed, but that repair can no longer be
+undone from Library Doctor.
+
+Declared Ogg previews from 20 through 35 seconds are accepted without a finding.
+A shorter preview receives a recommendation unless the song itself is shorter
+than 20 seconds and the preview reasonably covers it. A preview longer than 35
+seconds receives the single **Preview needs replacement** recommendation. Its
+technical detail reports only the measured preview duration and accepted limit.
+The decision is made from duration alone. This duration check is part of the
+normal scan when the preview is within the scanner's media safety bound. A
+missing preview remains optional coverage information rather than making the
+Feedpak unhealthy, but the **Without previews** view offers the same creation
+controls.
+
+Every newly generated preview targets 30 seconds, or the available full-song
+length when the song is shorter. Library Doctor does not reuse the authored
+preview's starting point. Its automatic selection tries usable musical cues and
+then a bounded audio-energy choice, with a deterministic 25-percent fallback.
+Manual review uses the same proposed excerpt but lets the user listen and choose
+another start. Both paths render an Ogg excerpt with short fades and validate the
+complete candidate before saving it. The manual path changes nothing until the
+user chooses **Keep this preview** and then **Confirm replacement and finish**.
+The automatic path selects, creates, validates, and finishes the repair in one
+confirmed action.
+
+An existing dedicated preview is replaced in place. If no preview is declared,
+Library Doctor adds a new preview member and manifest pointer. If a malformed
+Feedpak points `preview` directly at the full song mix, Library Doctor creates a
+separate preview member and redirects only the manifest pointer; it never
+overwrites the gameplay audio. Charts, lyrics, artwork, and every unrelated
+package member are preserved.
+
+Preview repair remains separate from the per-song **Fix all safe issues** chart
+transaction because it creates audio and follows different recovery semantics.
+It can be included explicitly in **Safe batch repair** after reviewing the batch
+scope and confirming that flagged previews should be generated automatically.
+The read-only batch review performs no encoding; generation happens for one
+Feedpak at a time during the confirmed run. During replacement, temporary
+recovery contains the original preview and any manifest state required to
+protect the transaction. During creation, it records the exact original manifest
+and absence of the new member. After the candidate passes complete validation
+and is committed, this temporary recovery is removed automatically. If cleanup
+exceptionally fails, the result clearly reports that the preview is repaired but
+cleanup remains and offers an explicit recovery-copy removal action.
+
+Song Tools reads the selectable song list from FeedBack's public local-library
+endpoint and checks Preview Creator eligibility directly against the selected
+Feedpak. Its availability is therefore independent of Library Doctor's cached
+scan scope and result filters. A malformed preview reference or an ambiguous or
+missing Ogg full mix is shown as a clear blocker rather than being guessed at.
 
 ## Checks
 
@@ -202,11 +321,12 @@ package report. The backup remains available afterward.
 - Manifest cross-reference checks for duplicate lyric-track IDs, missing lyric
   stems, empty identifying metadata, and invalid separated-stem/full-mix
   combinations required by current Feedpak versions.
-- Invalid, empty, or out-of-range lyric timelines, entries with no visible text,
+- Invalid, empty, or out-of-range lyric timelines, genuinely blank lyric text,
   plus lyric tracks with implausibly long uninterrupted lines based on timed
   syllables, visible characters, or duration. Authored line endings use a
-  trailing `+`; the check also honors FeedBack's automatic break after gaps
-  longer than four seconds.
+  trailing `+`; standalone `+` and `-` control markers are valid and are not
+  reported as empty text. The check also honors FeedBack's automatic break
+  after gaps longer than four seconds.
 - Contradictory events on the same string at the same time; exact duplicate
   standalone notes, chord members, complete chords, anchors, and handshapes;
   standalone notes that exactly repeat an explicit chord member; conflicting
@@ -273,14 +393,15 @@ package report. The backup remains available afterward.
 - Explicitly declared guitar/bass arrangements that have no playable events at
   any difficulty level. Empty vocals or other non-fretted arrangements are not
   flagged.
-- A preview that is byte-for-byte identical to the full-mix stem.
+- Declared Ogg previews outside the accepted 20-to-35-second window, with a
+  short-song exception when the available preview reasonably covers the song.
+  Missing previews remain optional coverage information with an actionable
+  recommendation in the **Without previews** view.
 - Cover files whose image header is unreadable, whose image type is unsupported
   by FeedBack, or whose filename extension makes FeedBack serve the wrong media
   type.
-- Suspiciously large Ogg previews are inspected without decoding audio: the
-  validator detects the same encoded payload even when container headers differ,
-  and warns when a different preview still runs for at least 90% of a full mix
-  longer than 35 seconds.
+- Ogg preview duration is inspected without decoding audio. Preview findings are
+  based only on the accepted duration policy, not comparisons with the full mix.
 - Optional deep audio checks validate the page structure of every declared Ogg
   stem and preview, compare the primary audio duration with the manifest, and
   identify separated stems containing the same encoded payload. Duration
@@ -307,10 +428,12 @@ hand size, playing style, alternate tunings, musical correctness, or audio/tab
 sync.
 
 Audio decoding, subjective lyric-to-vocal alignment, and manifest-to-audio
-offset judgments are not part of the scan. Normal scans limit container
-inspection to previews that are at least 80% of the full mix's file size.
-Deep audio mode reads declared Ogg containers but still does not decode samples
-or judge whether the tab is synchronized to what is being played.
+offset judgments are not part of the scan. Normal scans inspect a declared Ogg
+preview within the bounded media limit so its duration policy can be checked.
+Deep audio mode reads every supported, bounded declared Ogg container but still
+does not decode samples or judge whether the tab is synchronized to what is
+being played. Audio samples are decoded only on demand while proposing a preview
+repair, never as part of a library scan.
 
 The report cache is local to FeedBack's config directory at
 `library_doctor/library_doctor.db`. It stores package-relative paths and scan
@@ -325,15 +448,29 @@ structured evidence and a conservative repair classification. Scanning remains
 strictly read-only; package writes are available only through the separately
 confirmed safe-repair workflow.
 
+Completed scans and batch-repair receipts also retain aggregate phase timings.
+They separate discovery, signatures, validation, cache work, song-data repair,
+preview repair, and checkpoint work without recording additional song identity
+data. These diagnostics make performance changes measurable while keeping the
+normal in-game workflow focused on package outcomes.
+
 ## Architecture
 
 - `validator.py` contains the package reader and validation rules. It has no
   server or UI state and can be tested directly.
+- `repair_eligibility.py` contains the pure conditional handshape and preview
+  source predicates shared by scanning and transactional repair planning.
 - `scanner.py` owns the playback-aware background scan, incremental SQLite
   cache, cancellation, pagination, rule summaries, and report exports.
+- `library_doctor_scan_worker.py` is the spawn-safe, side-effect-free process
+  worker. It can only read and validate a package; SQLite and every file change
+  remain in the parent process.
 - `repair.py` owns the small repair allowlist, source-bound previews, candidate
   construction, full archive-integrity and validation gates, recovery backups,
   bounded repair receipts, undo, and transactional package writes.
+- `preview_repair.py` generates bounded, listenable Ogg candidates in private
+  temporary storage. It never writes to the song library; `repair.py` remains
+  the only package transaction and recovery authority.
 - `migration.py` performs the one-time, fail-closed move from the retired
   pre-0.15 identity while preserving scan history and recovery artifacts.
 - `routes.py` exposes the scanner through plugin-scoped FastAPI routes and uses
@@ -353,9 +490,9 @@ the test dependencies and run:
 
 ```bash
 python -m pip install -r requirements-test.txt
-python -m ruff check validator.py scanner.py repair.py batch_repair.py migration.py routes.py tests
+python -m ruff check validator.py scanner.py library_doctor_scan_worker.py repair.py repair_eligibility.py preview_repair.py batch_repair.py migration.py routes.py tests
 python -m pytest --cov --cov-report=term
-python -m py_compile validator.py scanner.py repair.py batch_repair.py migration.py routes.py
+python -m py_compile validator.py scanner.py library_doctor_scan_worker.py repair.py repair_eligibility.py preview_repair.py batch_repair.py migration.py routes.py
 node --check screen.js
 ```
 

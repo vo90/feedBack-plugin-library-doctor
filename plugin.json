@@ -1,9 +1,9 @@
 {
   "id": "library_doctor",
   "name": "Library Doctor",
-  "version": "0.25.0",
+  "version": "0.34.0",
   "private": false,
-  "description": "Scan, diagnose, and safely repair the local FeedBack song library.",
+  "description": "Scan, diagnose, safely repair, and use focused tools on the local FeedBack song library.",
   "category": "tools",
   "icon": "assets/thumb.svg",
   "nav": { "label": "Library Doctor", "screen": "plugin-library_doctor" },

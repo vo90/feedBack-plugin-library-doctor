@@ -9,10 +9,13 @@ extracts a package.
 from __future__ import annotations
 
 import hashlib
+import io
+import importlib.util
 import json
 import math
 import os
 import re
+import sys
 import zipfile
 from bisect import bisect_left, bisect_right
 from contextlib import contextmanager
@@ -24,9 +27,25 @@ from typing import BinaryIO, Iterator
 import yaml
 from jsonschema import Draft202012Validator
 
+try:
+    from repair_eligibility import assess_redundant_handshapes, preview_source_path
+except ModuleNotFoundError:  # Tests and some plugin hosts load files by path.
+    _eligibility_name = "_library_doctor_repair_eligibility"
+    _eligibility = sys.modules.get(_eligibility_name)
+    if _eligibility is None:
+        _eligibility_spec = importlib.util.spec_from_file_location(
+            _eligibility_name,
+            Path(__file__).resolve().with_name("repair_eligibility.py"),
+        )
+        _eligibility = importlib.util.module_from_spec(_eligibility_spec)
+        sys.modules[_eligibility_name] = _eligibility
+        _eligibility_spec.loader.exec_module(_eligibility)
+    assess_redundant_handshapes = _eligibility.assess_redundant_handshapes
+    preview_source_path = _eligibility.preview_source_path
+
 
 SPEC_REVISION = "52548b742f64c2a35052a141976ea1b7889f4b1a"
-VALIDATOR_VERSION = f"rules-22:feedpak-{SPEC_REVISION}"
+VALIDATOR_VERSION = f"rules-27:feedpak-{SPEC_REVISION}"
 SUPPORTED_MAJOR = 1
 SCHEMA_DIR = Path(__file__).resolve().parent / "schemas"
 MAX_TEXT_BYTES = 64 * 1024 * 1024
@@ -66,9 +85,9 @@ LYRIC_FALLBACK_BREAK_GAP_SECONDS = 4.0  # Match FeedBack's lyric renderer.
 MAX_LYRIC_SYLLABLES_PER_LINE = 80
 MAX_LYRIC_CHARACTERS_PER_LINE = 500
 MAX_LYRIC_LINE_SECONDS = 45.0
-PREVIEW_INSPECTION_SIZE_RATIO = 0.8
-PREVIEW_FULL_LENGTH_RATIO = 0.9
+MIN_ACCEPTABLE_PREVIEW_SECONDS = 20.0
 MAX_EXPECTED_PREVIEW_SECONDS = 35.0
+SHORT_SONG_PREVIEW_TOLERANCE_SECONDS = 2.0
 AUDIO_SHORTFALL_TOLERANCE_SECONDS = 5.0
 AUDIO_SHORTFALL_TOLERANCE_RATIO = 0.02
 AUDIO_PADDING_TOLERANCE_SECONDS = 10.0
@@ -102,9 +121,9 @@ _RULE_TITLES = {
     "timeline.repeated-beat-time": "Repeated beat time has conflicting data",
     "timeline.duplicate-section": "Identical duplicate section marker",
     "timeline.repeated-section-time": "Repeated section time has conflicting data",
-    "media.preview-is-full-mix": "Preview duplicates the full song audio",
-    "media.preview-full-length": "Preview is almost the full song length",
-    "media.preview-too-long": "Preview is unusually long",
+    "media.preview-missing": "Song preview is missing",
+    "media.preview-too-short": "Preview is unusually short",
+    "media.preview-too-long": "Preview needs replacement",
     "media.invalid-cover-image": "Cover image cannot be read",
     "media.cover-extension-mismatch": "Cover filename and image type disagree",
     "media.unsupported-cover-image": "Cover image type is not supported",
@@ -261,14 +280,6 @@ _RULE_EXPERIENCE = {
         "Lyric text can jump backward, appear late, or be skipped as playback moves forward.",
         "Putting cues in time order makes lyric progression predictable during the song.",
     ),
-    "media.preview-is-full-mix": (
-        "Browsing the library loads another complete copy of the song instead of a short preview, wasting storage and read time.",
-        "A dedicated short preview makes browsing quicker and avoids storing the full mix twice.",
-    ),
-    "media.preview-full-length": (
-        "The preview plays for nearly the whole song, making library previewing slow and using unnecessary package space.",
-        "A short representative excerpt gives faster browsing and a smaller, cleaner package.",
-    ),
     "media.preview-too-long": (
         "The library preview takes unusually long to reach its end and may use more storage than needed.",
         "A shorter representative excerpt makes song browsing faster while preserving a useful preview.",
@@ -292,6 +303,14 @@ _RULE_EXPERIENCE = {
     "review.near-simultaneous-string-notes": (
         "Notes that are only milliseconds apart may look like a chord but require an unintended rapid stagger when played.",
         "Confirming or aligning them makes the intended chord or picking pattern clearer to the player.",
+    ),
+    "media.preview-missing": (
+        "The song has no embedded audio excerpt, so library browsing cannot play a quick preview for this Feedpak.",
+        "Adding a representative 30-second excerpt makes the song easier to recognize while browsing without changing gameplay audio.",
+    ),
+    "media.preview-too-short": (
+        "The library preview may end before it gives the player a useful sense of the song.",
+        "A representative 30-second excerpt gives a more useful sample while keeping the package compact.",
     ),
     "review.same-fret-slide": (
         "This slide marker does not move by itself. It may be intentional authoring data, but an isolated marker can show no visible slide in FeedBack.",
@@ -488,6 +507,15 @@ def rule_metadata(code: str, severity: str = "warning", category: str = "validat
             "The repeated time has different stored data. Choose the intended marker "
             "in an authoring tool; Library Doctor will not guess."
         )
+    elif code in {
+        "media.preview-missing", "media.preview-too-short", "media.preview-too-long",
+    }:
+        repairability = "review_required"
+        guidance = (
+            "Library Doctor can select and create a 30-second excerpt automatically. "
+            "You can also open the manual preview repair to listen first or choose "
+            "another start position."
+        )
     elif code in _SAFE_REPAIR_CANDIDATES:
         repairability = "safe_candidate"
         guidance = "The repeated entries appear identical. Keep one copy in the source and scan it again."
@@ -502,7 +530,7 @@ def rule_metadata(code: str, severity: str = "warning", category: str = "validat
             "The Feedpak value is allowed, but the current FeedBack display or "
             "playback path may not represent it correctly."
         )
-    if severity == "info":
+    if severity == "info" and repairability == "manual":
         guidance = "Review this if the song behaves or looks wrong in FeedBack."
     area = _RULE_AREAS.get(prefix, category.replace("-", " ").title())
     player_impact, fix_benefit = _rule_experience(code, severity, category, area)
@@ -1088,6 +1116,59 @@ def _exact_json_identity(value) -> str | None:
         return None
 
 
+def _exact_json_key(value, *, allow_nonfinite: bool = False):
+    """Return a hashable key with the same distinctions as JSON rendering.
+
+    Validation compares many chart objects for exact equality. Serializing every
+    value with ``json.dumps`` made that comparison a significant part of scan
+    time. Parsed Feedpak JSON contains only these bounded JSON types, so a typed
+    structural key is equivalent while avoiding repeated string allocation.
+
+    ``None`` is reserved for values that JSON rendering would reject. JSON null
+    therefore has its own tagged tuple, as do booleans, integers, and floats so
+    Python's otherwise-equal ``True``, ``1``, and ``1.0`` remain distinct.
+    """
+    if value is None:
+        return ("null",)
+    if isinstance(value, bool):
+        return ("bool", value)
+    if isinstance(value, int):
+        return ("int", value)
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            if not allow_nonfinite:
+                return None
+            if math.isnan(value):
+                return ("float", "nan")
+            return ("float", "infinity" if value > 0 else "-infinity")
+        return ("float", value.hex())
+    if isinstance(value, str):
+        return ("string", value)
+    if isinstance(value, (list, tuple)):
+        items = []
+        for item in value:
+            key = _exact_json_key(item, allow_nonfinite=allow_nonfinite)
+            if key is None:
+                return None
+            items.append(key)
+        return ("array", tuple(items))
+    if isinstance(value, dict):
+        items = []
+        for raw_key, item in value.items():
+            if not isinstance(raw_key, str):
+                return None
+            key = _exact_json_key(item, allow_nonfinite=allow_nonfinite)
+            if key is None:
+                return None
+            items.append((raw_key, key))
+        items.sort(key=lambda entry: entry[0])
+        return ("object", tuple(items))
+    return None
+
+
+_MISSING_JSON_VALUE = object()
+
+
 @dataclass(frozen=True)
 class _LaneEvent:
     kind: str
@@ -1098,9 +1179,9 @@ class _LaneEvent:
     sustain: float
     link_next: bool
     slide_to: int | None
-    attributes: tuple[tuple[str, str], ...]
+    attributes: tuple[tuple[str, object], ...]
     explicit_chord_note: bool = False
-    repair_identity: str | None = None
+    repair_identity: object | None = None
 
 
 @dataclass(frozen=True)
@@ -1344,18 +1425,21 @@ class _TabValidator:
         time_key: str,
         occurrence_kind: str,
     ) -> None:
-        groups: dict[str, list[int]] = {}
+        groups: dict[object, list[int]] = {}
         for index, raw in enumerate(items):
             if not isinstance(raw, dict) or _number(raw.get(time_key)) is None:
                 continue
-            identity = _exact_json_identity(raw)
+            identity = _exact_json_key(raw)
             if identity is not None:
                 groups.setdefault(identity, []).append(index)
-        for identity, indices in groups.items():
+        for indices in groups.values():
             if len(indices) < 2:
                 continue
             first_index = indices[0]
             raw = items[first_index]
+            rendered_identity = _exact_json_identity(raw)
+            if rendered_identity is None:
+                continue
             event_time = _number(raw.get(time_key))
             self._record(
                 code,
@@ -1363,7 +1447,7 @@ class _TabValidator:
                 time=event_time,
                 occurrence=(
                     occurrence_kind,
-                    hashlib.sha256(identity.encode("utf-8")).hexdigest(),
+                    hashlib.sha256(rendered_identity.encode("utf-8")).hexdigest(),
                 ),
             )
 
@@ -1761,7 +1845,7 @@ class _TabValidator:
             _time_key(chord_time) if chord_time is not None else None,
             template_id,
         )
-        chord_note_groups: dict[str, list[int]] = {}
+        chord_note_groups: dict[object, list[int]] = {}
         for note_index, note in enumerate(chord_notes):
             if chord_time is None or not isinstance(note, dict):
                 continue
@@ -1769,13 +1853,16 @@ class _TabValidator:
             fret = _integer(note.get("f"))
             if string is None or string < 0 or fret is None:
                 continue
-            identity = _exact_json_identity(note)
+            identity = _exact_json_key(note)
             if identity is not None:
                 chord_note_groups.setdefault(identity, []).append(note_index)
-        for identity, indices in chord_note_groups.items():
+        for indices in chord_note_groups.values():
             if len(indices) < 2:
                 continue
             first_note = chord_notes[indices[0]]
+            rendered_identity = _exact_json_identity(first_note)
+            if rendered_identity is None:
+                continue
             self._record(
                 "chart.duplicate-chord-note",
                 f"{location}.notes[{indices[0]}]",
@@ -1786,7 +1873,7 @@ class _TabValidator:
                     _time_key(chord_time) if chord_time is not None else None,
                     _integer(first_note.get("s")),
                     _integer(first_note.get("f")),
-                    hashlib.sha256(identity.encode("utf-8")).hexdigest(),
+                    hashlib.sha256(rendered_identity.encode("utf-8")).hexdigest(),
                 ),
             )
         if self.check_fretted and template is None and ("id" in raw or not chord_notes):
@@ -2653,20 +2740,9 @@ def _validate_lane_semantics(
             repair_value = raw
         elif explicit_chord_note:
             repair_value = {"t": event_time, **raw}
-        try:
-            repair_identity = (
-                json.dumps(
-                    repair_value,
-                    sort_keys=True,
-                    ensure_ascii=False,
-                    separators=(",", ":"),
-                    allow_nan=False,
-                )
-                if repair_value is not None
-                else None
-            )
-        except (TypeError, ValueError):
-            repair_identity = None
+        repair_identity = (
+            _exact_json_key(repair_value) if repair_value is not None else None
+        )
         lanes.setdefault((_time_key(event_time), string), []).append(_LaneEvent(
             kind=kind,
             fret=fret,
@@ -2679,7 +2755,7 @@ def _validate_lane_semantics(
             attributes=tuple(sorted(
                 (
                     str(key),
-                    json.dumps(value, sort_keys=True, ensure_ascii=False),
+                    _exact_json_key(value, allow_nonfinite=True),
                 )
                 for key, value in raw.items()
                 if key not in {"t", "s", "f"}
@@ -2783,7 +2859,7 @@ def _validate_lane_semantics(
                 keys = sorted(set().union(*(mapping.keys() for mapping in attribute_maps)))
                 differing = [
                     key for key in keys
-                    if len({mapping.get(key, "<missing>") for mapping in attribute_maps}) > 1
+                    if len({mapping.get(key, _MISSING_JSON_VALUE) for mapping in attribute_maps}) > 1
                 ]
                 detail = ", ".join(differing[:8]) or "other note properties"
                 conflicting_duplicates.append(_LaneIssue(
@@ -2834,7 +2910,7 @@ def _validate_lane_semantics(
             chord_event_identities = []
             for chord_index in chord_groups:
                 identity = (
-                    _exact_json_identity(chords[chord_index])
+                    _exact_json_key(chords[chord_index])
                     if isinstance(chord_index, int)
                     and 0 <= chord_index < len(chords)
                     else None
@@ -3822,8 +3898,8 @@ def _validate_song_timeline_semantics(
         previous: float | None = None
         first_inversion: tuple[int, float] | None = None
         after_duration: list[tuple[int, float]] = []
-        exact_entries: dict[str, int] = {}
-        entries_by_time: dict[int, dict[str, int]] = {}
+        exact_entries: dict[object, int] = {}
+        entries_by_time: dict[int, dict[object, int]] = {}
         previous_tick: int | None = None
         exact_duplicates: list[tuple[int, int, float]] = []
         repeated_time_conflicts: list[tuple[int, int, float]] = []
@@ -3834,7 +3910,7 @@ def _validate_song_timeline_semantics(
             if event_time is None:
                 continue
             tick = _time_key(event_time)
-            identity = _exact_json_identity(raw)
+            identity = _exact_json_key(raw)
             first_exact = exact_entries.get(identity) if identity is not None else None
             earlier_at_time = entries_by_time.get(tick)
             if field in {"beats", "sections"} and identity is not None:
@@ -4006,8 +4082,16 @@ def _validate_lyrics_semantics(
             continue
         valid.append((index, start, length))
         word = entry.get("w")
-        if isinstance(word, str) and not word.rstrip("+").strip():
-            empty_text.append(index)
+        if isinstance(word, str):
+            # FeedBack removes one trailing '+' (line break) or '-' (word
+            # continuation) before drawing a lyric syllable. Standalone
+            # control markers are therefore intentionally non-visible, not
+            # damaged lyric text. Match the renderer exactly here: flag only
+            # genuinely blank rendered text while preserving the two valid
+            # control-only entries.
+            visible_word = word[:-1] if word.endswith(("+", "-")) else word
+            if not visible_word.strip() and word not in {"+", "-"}:
+                empty_text.append(index)
         if start < 0 or length < 0:
             invalid_timing.append((index, start, length))
         if duration is not None and duration > 0 and start + max(length, 0) > duration + 0.05:
@@ -4134,42 +4218,6 @@ def _validate_lyrics_semantics(
     return len(valid)
 
 
-def _same_content(
-    reader: _PackageReader,
-    left: str,
-    right: str,
-    *,
-    scan_checkpoint=None,
-) -> bool:
-    left_size = reader.size(left)
-    right_size = reader.size(right)
-    if left_size is None or right_size is None or left_size != right_size or left_size <= 0:
-        return False
-    if left == right:
-        return True
-    if left_size > MAX_MEDIA_INSPECTION_BYTES:
-        return False
-
-    def digest(relpath: str) -> bytes:
-        hasher = hashlib.sha256()
-        with reader.open_binary(relpath) as stream:
-            while True:
-                if scan_checkpoint is not None:
-                    scan_checkpoint()
-                block = stream.read(1024 * 1024)
-                if not block:
-                    break
-                hasher.update(block)
-        return hasher.digest()
-
-    try:
-        return digest(left) == digest(right)
-    except _PackageBudgetError:
-        raise
-    except _PackageReadError:
-        return False
-
-
 def _inspect_cover_image(reader: _PackageReader, relpath: str) -> _ImageFacts | None:
     """Recognize common browser-safe image headers without decoding pixels."""
     try:
@@ -4244,55 +4292,34 @@ def _read_exact(stream: BinaryIO, size: int) -> bytes:
     return bytes(data)
 
 
-def _inspect_ogg(
-    reader: _PackageReader,
-    relpath: str,
-    *,
-    max_bytes: int = MAX_MEDIA_INSPECTION_BYTES,
-    scan_checkpoint=None,
-) -> _OggFacts | None:
-    """Read bounded Ogg container facts without decoding audio samples."""
-    size = reader.size(relpath)
-    if (
-        not relpath.lower().endswith(".ogg")
-        or size is None
-        or size <= 0
-        or size > max_bytes
-    ):
-        return None
-
+def _inspect_ogg_stream(stream: BinaryIO, *, scan_checkpoint=None) -> _OggFacts | None:
+    """Inspect one Ogg stream without decoding samples or writing a temp file."""
     payload_hasher = hashlib.sha256()
     prefix = bytearray()
     primary_serial: int | None = None
     last_granule: int | None = None
     saw_page = False
-    try:
-        with reader.open_binary(relpath) as stream:
-            while True:
-                if scan_checkpoint is not None:
-                    scan_checkpoint()
-                header = stream.read(27)
-                if not header:
-                    break
-                if len(header) != 27 or header[:4] != b"OggS" or header[4] != 0:
-                    return None
-                lacing = _read_exact(stream, header[26])
-                body = _read_exact(stream, sum(lacing))
-                payload_hasher.update(body)
-                if len(prefix) < 64:
-                    prefix.extend(body[: 64 - len(prefix)])
+    while True:
+        if scan_checkpoint is not None:
+            scan_checkpoint()
+        header = stream.read(27)
+        if not header:
+            break
+        if len(header) != 27 or header[:4] != b"OggS" or header[4] != 0:
+            return None
+        lacing = _read_exact(stream, header[26])
+        body = _read_exact(stream, sum(lacing))
+        payload_hasher.update(body)
+        if len(prefix) < 64:
+            prefix.extend(body[: 64 - len(prefix)])
 
-                serial = int.from_bytes(header[14:18], "little")
-                granule = int.from_bytes(header[6:14], "little")
-                if primary_serial is None:
-                    primary_serial = serial
-                if serial == primary_serial and granule != (1 << 64) - 1:
-                    last_granule = granule
-                saw_page = True
-    except _PackageBudgetError:
-        raise
-    except (_PackageReadError, OSError, ValueError):
-        return None
+        serial = int.from_bytes(header[14:18], "little")
+        granule = int.from_bytes(header[6:14], "little")
+        if primary_serial is None:
+            primary_serial = serial
+        if serial == primary_serial and granule != (1 << 64) - 1:
+            last_granule = granule
+        saw_page = True
 
     if not saw_page:
         return None
@@ -4317,45 +4344,47 @@ def _inspect_ogg(
     )
 
 
-def _inspect_suspicious_preview_pair(
+def probe_ogg_duration(source: bytes) -> float:
+    """Return duration from bounded Ogg container metadata in memory.
+
+    Preview generation uses this same parser as Deep Audio validation, avoiding
+    extra FFmpeg launches and temporary copies merely to measure duration.
+    """
+    if not isinstance(source, bytes) or not 0 < len(source) <= MAX_MEDIA_INSPECTION_BYTES:
+        raise RuntimeError("The song audio is too large or unavailable for inspection.")
+    try:
+        facts = _inspect_ogg_stream(io.BytesIO(source))
+    except (OSError, ValueError) as exc:
+        raise RuntimeError("The song audio duration could not be confirmed.") from exc
+    if facts is None or facts.duration_seconds is None:
+        raise RuntimeError("The song audio duration could not be confirmed.")
+    return facts.duration_seconds
+
+
+def _inspect_ogg(
     reader: _PackageReader,
-    preview_rel: str,
-    full_mix_rel: str,
-    facts_cache: dict[str, _OggFacts | None] | None = None,
+    relpath: str,
     *,
+    max_bytes: int = MAX_MEDIA_INSPECTION_BYTES,
     scan_checkpoint=None,
-    require_size_ratio: bool = True,
-) -> tuple[_OggFacts, _OggFacts] | None:
-    preview_size = reader.size(preview_rel)
-    full_size = reader.size(full_mix_rel)
+) -> _OggFacts | None:
+    """Read bounded Ogg container facts without decoding audio samples."""
+    size = reader.size(relpath)
     if (
-        preview_size is None
-        or full_size is None
-        or preview_size <= 0
-        or full_size <= 0
-        or (
-            require_size_ratio
-            and preview_size / full_size < PREVIEW_INSPECTION_SIZE_RATIO
-        )
+        not relpath.lower().endswith(".ogg")
+        or size is None
+        or size <= 0
+        or size > max_bytes
     ):
         return None
-    def facts(relpath: str) -> _OggFacts | None:
-        if facts_cache is not None and relpath in facts_cache:
-            return facts_cache[relpath]
-        value = _inspect_ogg(
-            reader,
-            relpath,
-            scan_checkpoint=scan_checkpoint,
-        )
-        if facts_cache is not None:
-            facts_cache[relpath] = value
-        return value
 
-    preview_facts = facts(preview_rel)
-    full_facts = facts(full_mix_rel)
-    if preview_facts is None or full_facts is None:
+    try:
+        with reader.open_binary(relpath) as stream:
+            return _inspect_ogg_stream(stream, scan_checkpoint=scan_checkpoint)
+    except _PackageBudgetError:
+        raise
+    except (_PackageReadError, OSError, ValueError):
         return None
-    return preview_facts, full_facts
 
 
 def _result(
@@ -4372,6 +4401,27 @@ def _result(
         else "review" if findings.counts["info"]
         else "healthy"
     )
+    rendered_findings = [finding.to_dict() for finding in findings.items]
+    eligibility = features.get("repair_eligibility")
+    if isinstance(eligibility, dict):
+        for finding in rendered_findings:
+            item = eligibility.get(finding.get("code"))
+            rule = finding.get("rule")
+            if not isinstance(item, dict) or not isinstance(rule, dict):
+                continue
+            repair_status = item.get("status")
+            if repair_status == "author_review":
+                rule["repairability"] = "review_required"
+                rule["guidance"] = item.get("message") or (
+                    "This occurrence is not unambiguous enough for an automatic repair."
+                )
+            elif repair_status == "unavailable":
+                rule["repairability"] = "manual"
+                rule["guidance"] = item.get("message") or (
+                    "Library Doctor cannot perform this repair from the available package data."
+                )
+            elif repair_status == "automatic":
+                rule["repairability"] = "safe_candidate"
     return {
         "schema": "library_doctor.package.v1",
         "validator_version": VALIDATOR_VERSION,
@@ -4382,8 +4432,33 @@ def _result(
         "status": status,
         "counts": dict(findings.counts),
         "features": features,
-        "findings": [finding.to_dict() for finding in findings.items],
+        "findings": rendered_findings,
     }
+
+
+def _merge_handshape_eligibility(
+    features: dict,
+    rule_code: str,
+    assessment: dict,
+) -> None:
+    if not int(assessment.get("reported_count") or 0):
+        return
+    eligibility = features.setdefault("repair_eligibility", {})
+    current = eligibility.setdefault(rule_code, {
+        "status": "automatic",
+        "reported_count": 0,
+        "safe_count": 0,
+        "unsafe_count": 0,
+        "reason_code": None,
+        "message": "",
+    })
+    current["reported_count"] += int(assessment.get("reported_count") or 0)
+    current["safe_count"] += int(assessment.get("safe_count") or 0)
+    current["unsafe_count"] += int(assessment.get("unsafe_count") or 0)
+    if current["unsafe_count"]:
+        current["status"] = "author_review"
+        current["reason_code"] = assessment.get("blocker_code")
+        current["message"] = assessment.get("message") or current["message"]
 
 
 def validate_feedpak(
@@ -4404,6 +4479,8 @@ def validate_feedpak(
         "lyrics_entries": 0,
         "preview_declared": False,
         "preview_available": False,
+        "preview_source_available": False,
+        "repair_eligibility": {},
         "deep_audio_checked": bool(deep_audio),
         "deep_audio_files": 0,
         "deep_audio_skipped": 0,
@@ -4548,6 +4625,20 @@ def validate_feedpak(
                         check_fretted=_is_fretted_arrangement(entry, data, notation_data),
                     )
                     if isinstance(data, dict):
+                        _merge_handshape_eligibility(
+                            features,
+                            "chart.zero-length-handshape",
+                            assess_redundant_handshapes(
+                                data, span_kind="zero_length"
+                            ),
+                        )
+                        _merge_handshape_eligibility(
+                            features,
+                            "chart.invalid-handshape-span",
+                            assess_redundant_handshapes(
+                                data, span_kind="reversed"
+                            ),
+                        )
                         for field in ("beats", "sections"):
                             events = data.get(field)
                             if (
@@ -4625,6 +4716,41 @@ def validate_feedpak(
                         full_mix_entry = stem
 
             valid_stems = [stem for stem in stems if isinstance(stem, dict)]
+            preview_source_rel = preview_source_path(manifest)
+            preview_source_size = (
+                reader.size(preview_source_rel) if preview_source_rel else None
+            )
+            features["preview_source_available"] = bool(
+                preview_source_rel
+                and preview_source_rel.lower().endswith(".ogg")
+                and preview_source_size is not None
+                and preview_source_size >= 1_000
+            )
+            preview_eligibility = {
+                "status": (
+                    "automatic"
+                    if features["preview_source_available"]
+                    else "unavailable"
+                ),
+                "reason_code": (
+                    None
+                    if features["preview_source_available"]
+                    else "full_mix_unavailable"
+                ),
+                "message": (
+                    "Library Doctor can create a standard preview from the available manifest-declared Ogg full mix."
+                    if features["preview_source_available"]
+                    else "Automatic preview creation needs one unambiguous manifest-declared Ogg full mix of usable size. This package does not provide one."
+                ),
+            }
+            for preview_rule in (
+                "media.preview-missing",
+                "media.preview-too-short",
+                "media.preview-too-long",
+            ):
+                features["repair_eligibility"][preview_rule] = dict(
+                    preview_eligibility
+                )
             if len(valid_stems) > 1:
                 if full_mix_entry is None and _semver_at_least(feedpak_version, (1, 16, 0)):
                     findings.add(
@@ -4891,115 +5017,89 @@ def validate_feedpak(
                 preview_rel = _pointer(reader, preview, "preview", findings)
                 if preview_rel:
                     features["preview_available"] = True
-                    if reader.size(preview_rel) == 0:
+                    preview_size = reader.size(preview_rel)
+                    preview_facts = None
+                    if preview_size == 0:
                         findings.add(
                             "error", "media.empty-file", "The preview audio file is empty.", location=preview_rel
                         )
-                    elif deep_audio:
-                        if not preview_rel.lower().endswith(".ogg"):
-                            features["deep_audio_unsupported"] += 1
-                        else:
-                            preview_size = reader.size(preview_rel)
-                            if (
-                                preview_size is not None
-                                and preview_size > MAX_DEEP_AUDIO_INSPECTION_BYTES
-                            ):
-                                features["deep_audio_skipped"] += 1
-                            else:
-                                preview_facts = _inspect_ogg(
-                                    reader,
-                                    preview_rel,
-                                    max_bytes=MAX_DEEP_AUDIO_INSPECTION_BYTES,
-                                    scan_checkpoint=scan_checkpoint,
-                                )
-                                ogg_facts[preview_rel] = preview_facts
-                                features["deep_audio_files"] += 1
-                                if preview_facts is None:
-                                    findings.add(
-                                        "error",
-                                        "media.invalid-ogg-container",
-                                        "The declared Ogg preview has malformed or unreadable container pages.",
-                                        location=preview_rel,
-                                    )
-                                elif preview_facts.codec is None:
-                                    features["deep_audio_unsupported"] += 1
-                                elif (
-                                    preview_facts.duration_seconds is not None
-                                    and preview_facts.duration_seconds > MAX_EXPECTED_PREVIEW_SECONDS
-                                    and not full_mix_rel
-                                ):
-                                    findings.add(
-                                        "warning",
-                                        "media.preview-too-long",
-                                        (
-                                            f"The preview is {preview_facts.duration_seconds:.1f}s long; "
-                                            f"a preview is normally at most {MAX_EXPECTED_PREVIEW_SECONDS:.0f}s."
-                                        ),
-                                        location=preview_rel,
-                                    )
-                    if reader.size(preview_rel) and full_mix_rel:
-                        ogg_pair = _inspect_suspicious_preview_pair(
-                            reader,
-                            preview_rel,
-                            full_mix_rel,
-                            ogg_facts,
-                            scan_checkpoint=scan_checkpoint,
-                            require_size_ratio=not deep_audio,
+                    elif preview_rel.lower().endswith(".ogg"):
+                        inspection_limit = (
+                            MAX_DEEP_AUDIO_INSPECTION_BYTES
+                            if deep_audio else MAX_MEDIA_INSPECTION_BYTES
                         )
-                        same_full_mix = False
-                        if ogg_pair is not None:
-                            preview_facts, full_facts = ogg_pair
-                            same_full_mix = (
-                                preview_facts.payload_digest == full_facts.payload_digest
+                        if preview_size is not None and preview_size <= inspection_limit:
+                            preview_facts = _inspect_ogg(
+                                reader,
+                                preview_rel,
+                                max_bytes=inspection_limit,
+                                scan_checkpoint=scan_checkpoint,
                             )
-                            full_duration = full_facts.duration_seconds
-                            preview_duration = preview_facts.duration_seconds
-                            full_is_long = (
-                                full_duration is None
-                                or full_duration > MAX_EXPECTED_PREVIEW_SECONDS
-                            )
-                            if same_full_mix and full_is_long:
+                            ogg_facts[preview_rel] = preview_facts
+                        elif deep_audio:
+                            features["deep_audio_skipped"] += 1
+                        if deep_audio and preview_size is not None and preview_size <= inspection_limit:
+                            features["deep_audio_files"] += 1
+                            if preview_facts is None:
                                 findings.add(
-                                    "warning",
-                                    "media.preview-is-full-mix",
-                                    (
-                                        "The preview contains the same encoded Ogg payload as "
-                                        "the full-mix stem instead of a short clip."
-                                    ),
+                                    "error",
+                                    "media.invalid-ogg-container",
+                                    "The declared Ogg preview has malformed or unreadable container pages.",
                                     location=preview_rel,
                                 )
-                            elif (
-                                preview_duration is not None
-                                and full_duration is not None
-                                and full_duration > MAX_EXPECTED_PREVIEW_SECONDS
-                                and preview_duration / full_duration
-                                >= PREVIEW_FULL_LENGTH_RATIO
-                            ):
-                                findings.add(
-                                    "warning",
-                                    "media.preview-full-length",
-                                    (
-                                        f"The preview is {preview_duration:.1f}s long, "
-                                        f"{preview_duration / full_duration:.0%} of the "
-                                        f"{full_duration:.1f}s full mix, instead of a short clip."
-                                    ),
-                                    location=preview_rel,
-                                )
-                        if ogg_pair is None and _same_content(
-                            reader,
-                            preview_rel,
-                            full_mix_rel,
-                            scan_checkpoint=scan_checkpoint,
-                        ):
+                            elif preview_facts.codec is None:
+                                features["deep_audio_unsupported"] += 1
+                    elif deep_audio:
+                        features["deep_audio_unsupported"] += 1
+
+                    preview_duration = (
+                        preview_facts.duration_seconds
+                        if preview_facts is not None and preview_facts.codec is not None
+                        else None
+                    )
+                    song_duration = duration
+                    cached_full_facts = ogg_facts.get(full_mix_rel) if full_mix_rel else None
+                    if (
+                        cached_full_facts is not None
+                        and cached_full_facts.duration_seconds is not None
+                    ):
+                        song_duration = cached_full_facts.duration_seconds
+                    if preview_duration is not None and preview_duration < MIN_ACCEPTABLE_PREVIEW_SECONDS:
+                        short_song_exception = bool(
+                            song_duration is not None
+                            and song_duration < MIN_ACCEPTABLE_PREVIEW_SECONDS
+                            and preview_duration >= max(
+                                0.0,
+                                song_duration - SHORT_SONG_PREVIEW_TOLERANCE_SECONDS,
+                            )
+                        )
+                        if not short_song_exception:
                             findings.add(
                                 "warning",
-                                "media.preview-is-full-mix",
+                                "media.preview-too-short",
                                 (
-                                    "The preview is byte-for-byte identical to the full-mix "
-                                    "stem instead of being a short clip."
+                                    f"The preview is {preview_duration:.1f}s long; Library Doctor "
+                                    f"accepts previews from {MIN_ACCEPTABLE_PREVIEW_SECONDS:.0f}s to "
+                                    f"{MAX_EXPECTED_PREVIEW_SECONDS:.0f}s for songs long enough to provide one."
                                 ),
+                                category="library_optimization",
                                 location=preview_rel,
                             )
+
+                    if (
+                        preview_duration is not None
+                        and preview_duration > MAX_EXPECTED_PREVIEW_SECONDS
+                    ):
+                        findings.add(
+                            "warning",
+                            "media.preview-too-long",
+                            (
+                                f"The preview is {preview_duration:.1f}s long; Library Doctor "
+                                f"accepts previews up to {MAX_EXPECTED_PREVIEW_SECONDS:.0f}s."
+                            ),
+                            category="library_optimization",
+                            location=preview_rel,
+                        )
     except _PackageBudgetError as exc:
         findings.add("error", "package.validation-budget-exceeded", str(exc))
     except _PackageReadError as exc:

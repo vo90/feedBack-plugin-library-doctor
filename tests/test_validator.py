@@ -104,6 +104,29 @@ def _vorbis_ogg(*, duration=60.0, serial=1, payload=b"encoded audio"):
     return header + bytes([len(body)]) + body
 
 
+def test_structural_json_key_preserves_exact_json_comparison_semantics(validator):
+    left = {"b": [True, 1, 1.0, None], "a": {"value": "x"}}
+    reordered = {"a": {"value": "x"}, "b": [True, 1, 1.0, None]}
+
+    assert validator._exact_json_key(left) == validator._exact_json_key(reordered)
+    assert validator._exact_json_key(True) != validator._exact_json_key(1)
+    assert validator._exact_json_key(1) != validator._exact_json_key(1.0)
+    assert validator._exact_json_key(-0.0) != validator._exact_json_key(0.0)
+    assert validator._exact_json_key([1, 2]) != validator._exact_json_key([2, 1])
+    assert validator._exact_json_key(float("nan")) is None
+    assert validator._exact_json_key(
+        float("nan"), allow_nonfinite=True
+    ) == ("float", "nan")
+
+
+def test_preview_duration_probe_reuses_bounded_ogg_container_parser(validator):
+    source = _vorbis_ogg(duration=31.25)
+
+    assert validator.probe_ogg_duration(source) == pytest.approx(31.25)
+    with pytest.raises(RuntimeError, match="could not be confirmed"):
+        validator.probe_ogg_duration(b"not an ogg stream")
+
+
 def test_valid_minimal_package_is_healthy_without_optional_media(tmp_path, validator):
     report = validator.validate_feedpak(_package(tmp_path), "song.feedpak")
 
@@ -116,6 +139,36 @@ def test_valid_minimal_package_is_healthy_without_optional_media(tmp_path, valid
         "lyrics_entries": 0,
         "preview_declared": False,
         "preview_available": False,
+        "preview_source_available": False,
+        "repair_eligibility": {
+            "media.preview-missing": {
+                "status": "unavailable",
+                "reason_code": "full_mix_unavailable",
+                "message": (
+                    "Automatic preview creation needs one unambiguous "
+                    "manifest-declared Ogg full mix of usable size. This "
+                    "package does not provide one."
+                ),
+            },
+            "media.preview-too-short": {
+                "status": "unavailable",
+                "reason_code": "full_mix_unavailable",
+                "message": (
+                    "Automatic preview creation needs one unambiguous "
+                    "manifest-declared Ogg full mix of usable size. This "
+                    "package does not provide one."
+                ),
+            },
+            "media.preview-too-long": {
+                "status": "unavailable",
+                "reason_code": "full_mix_unavailable",
+                "message": (
+                    "Automatic preview creation needs one unambiguous "
+                    "manifest-declared Ogg full mix of usable size. This "
+                    "package does not provide one."
+                ),
+            },
+        },
         "deep_audio_checked": False,
         "deep_audio_files": 0,
         "deep_audio_skipped": 0,
@@ -815,14 +868,58 @@ def test_anchor_and_handshape_geometry_is_checked(tmp_path, validator):
         item for item in report["findings"]
         if item["code"] == "chart.invalid-handshape-span"
     )
-    assert invalid_span["rule"]["repairability"] == "safe_candidate"
-    assert "end is earlier" in invalid_span["rule"]["guidance"]
+    assert invalid_span["rule"]["repairability"] == "review_required"
+    assert "authoring data" in invalid_span["rule"]["guidance"]
     zero_length = next(
         item for item in report["findings"]
         if item["code"] == "chart.zero-length-handshape"
     )
-    assert zero_length["rule"]["repairability"] == "safe_candidate"
-    assert "may supply a chord" in zero_length["rule"]["guidance"]
+    assert zero_length["rule"]["repairability"] == "review_required"
+    assert "could supply a chord" in zero_length["rule"]["guidance"]
+
+
+def test_scan_marks_only_unambiguous_handshapes_as_automatic(tmp_path, validator):
+    chord = {"t": 4.0, "id": 0, "notes": [{"s": 0, "f": 3}]}
+    report = validator.validate_feedpak(_package(tmp_path, arrangement={
+        "notes": [],
+        "chords": [chord],
+        "templates": [{"frets": [3], "fingers": [1]}],
+        "handshapes": [
+            {"chord_id": 0, "start_time": 4.0, "end_time": 4.0}
+        ],
+    }))
+
+    eligibility = report["features"]["repair_eligibility"][
+        "chart.zero-length-handshape"
+    ]
+    finding = next(
+        item for item in report["findings"]
+        if item["code"] == "chart.zero-length-handshape"
+    )
+    assert eligibility["status"] == "automatic"
+    assert eligibility["safe_count"] == 1
+    assert eligibility["unsafe_count"] == 0
+    assert finding["rule"]["repairability"] == "safe_candidate"
+
+
+def test_scan_records_preview_source_eligibility_without_deep_audio(
+    tmp_path, validator
+):
+    report = validator.validate_feedpak(_package(
+        tmp_path,
+        files={
+            "stems/full.ogg": (
+                _vorbis_ogg(duration=60.0, serial=41, payload=b"source")
+                + b"\x00" * 1_000
+            )
+        },
+    ))
+
+    assert report["features"]["deep_audio_checked"] is False
+    assert report["features"]["preview_source_available"] is True
+    assert report["features"]["repair_eligibility"][
+        "media.preview-missing"
+    ]["status"] == "automatic"
 
 
 def test_root_and_mastery_copies_do_not_inflate_chart_event_counts(
@@ -1572,13 +1669,14 @@ def test_excessively_long_lyric_line_is_a_warning(tmp_path, validator):
     assert "0 authored '+' line break marker(s)" in finding["message"]
 
 
-def test_long_lyric_text_and_empty_visible_syllables_are_reported(
+def test_standalone_lyric_controls_are_not_reported_as_empty_text(
     tmp_path, validator
 ):
     lyrics = _lyrics(60)
     for entry in lyrics:
         entry["w"] = "abcdefghij"
     lyrics[4]["w"] = "+"
+    lyrics[5]["w"] = "-"
     manifest = _manifest(lyrics="lyrics.json")
 
     report = validator.validate_feedpak(_package(
@@ -1587,8 +1685,29 @@ def test_long_lyric_text_and_empty_visible_syllables_are_reported(
         files={"lyrics.json": json.dumps(lyrics)},
     ))
 
-    assert "lyrics.empty-text" in _codes(report)
+    assert "lyrics.empty-text" not in _codes(report)
     assert "lyrics.too-few-line-breaks" in _codes(report)
+
+
+def test_genuinely_blank_lyric_text_is_reported(tmp_path, validator):
+    lyrics = _lyrics(6)
+    lyrics[1]["w"] = ""
+    lyrics[2]["w"] = "   "
+    lyrics[3]["w"] = " +"
+    manifest = _manifest(lyrics="lyrics.json")
+
+    report = validator.validate_feedpak(_package(
+        tmp_path,
+        manifest=manifest,
+        files={"lyrics.json": json.dumps(lyrics)},
+    ))
+
+    finding = next(
+        item for item in report["findings"]
+        if item["code"] == "lyrics.empty-text"
+    )
+    assert finding["affected_count"] == 3
+    assert finding["location"] == "lyrics.json:[1].w"
 
 
 def test_authored_and_renderer_fallback_lyric_breaks_limit_line_length(
@@ -1952,7 +2071,9 @@ stems:
     assert "package.validation-budget-exceeded" in _codes(report)
 
 
-def test_preview_identical_to_full_mix_is_a_warning(tmp_path, validator):
+def test_preview_without_readable_duration_is_not_classified_by_payload(
+    tmp_path, validator
+):
     manifest = _manifest(preview="preview.ogg")
     report = validator.validate_feedpak(
         _package(
@@ -1963,16 +2084,16 @@ def test_preview_identical_to_full_mix_is_a_warning(tmp_path, validator):
     )
 
     assert report["features"]["preview_available"] is True
-    assert "media.preview-is-full-mix" in _codes(report)
+    assert "media.preview-too-long" not in _codes(report)
 
 
-def test_different_preview_is_not_hashed_as_a_problem(tmp_path, validator):
+def test_unreadable_preview_duration_is_not_guessed_from_bytes(tmp_path, validator):
     manifest = _manifest(preview="preview.ogg")
     report = validator.validate_feedpak(
         _package(tmp_path, manifest=manifest, files={"preview.ogg": b"short"})
     )
 
-    assert "media.preview-is-full-mix" not in _codes(report)
+    assert "media.preview-too-long" not in _codes(report)
 
 
 def test_deep_audio_reports_invalid_containers_and_duration_mismatch(tmp_path, validator):
@@ -2070,7 +2191,9 @@ def test_deep_audio_finds_duplicate_separated_stem_payloads(tmp_path, validator)
     assert "media.duplicate-stem-audio" in _codes(report)
 
 
-def test_remuxed_ogg_preview_with_same_payload_is_a_warning(tmp_path, validator):
+def test_overlong_preview_uses_only_its_duration_even_when_payload_matches(
+    tmp_path, validator
+):
     manifest = _manifest(preview="preview.ogg")
     full = _vorbis_ogg(duration=60.0, serial=11)
     preview = _vorbis_ogg(duration=60.0, serial=22)
@@ -2082,11 +2205,16 @@ def test_remuxed_ogg_preview_with_same_payload_is_a_warning(tmp_path, validator)
     ))
 
     assert full != preview
-    assert "media.preview-is-full-mix" in _codes(report)
-    assert "media.preview-full-length" not in _codes(report)
+    assert "media.preview-too-long" in _codes(report)
+    finding = next(
+        item for item in report["findings"]
+        if item["code"] == "media.preview-too-long"
+    )
+    assert "60.0s long" in finding["message"]
+    assert "payload" not in finding["message"]
 
 
-def test_full_length_ogg_preview_with_different_payload_is_a_warning(
+def test_overlong_preview_message_does_not_compare_it_with_song_length(
     tmp_path, validator
 ):
     manifest = _manifest(preview="preview.ogg")
@@ -2099,8 +2227,93 @@ def test_full_length_ogg_preview_with_different_payload_is_a_warning(
         files={"stems/full.ogg": full, "preview.ogg": preview},
     ))
 
-    assert "media.preview-is-full-mix" not in _codes(report)
-    assert "media.preview-full-length" in _codes(report)
+    assert "media.preview-too-long" in _codes(report)
+    finding = next(
+        item for item in report["findings"]
+        if item["code"] == "media.preview-too-long"
+    )
+    assert "58.0s long" in finding["message"]
+    assert "%" not in finding["message"]
+    assert finding["rule"]["repairability"] == "manual"
+    assert "full mix" in finding["rule"]["guidance"]
+
+
+@pytest.mark.parametrize("preview_duration", [20.0, 27.0, 35.0])
+def test_preview_lengths_from_twenty_through_thirty_five_seconds_are_accepted(
+    tmp_path, validator, preview_duration
+):
+    report = validator.validate_feedpak(_package(
+        tmp_path,
+        manifest=_manifest(preview="preview.ogg"),
+        files={
+            "stems/full.ogg": _vorbis_ogg(duration=60.0, serial=11),
+            "preview.ogg": _vorbis_ogg(
+                duration=preview_duration,
+                serial=22,
+                payload=b"dedicated preview",
+            ),
+        },
+    ))
+
+    assert "media.preview-too-short" not in _codes(report)
+    assert "media.preview-too-long" not in _codes(report)
+
+
+def test_full_mix_payload_is_accepted_when_preview_duration_is_in_range(
+    tmp_path, validator
+):
+    full = _vorbis_ogg(duration=30.0, serial=11, payload=b"same audio")
+    preview = _vorbis_ogg(duration=30.0, serial=22, payload=b"same audio")
+    report = validator.validate_feedpak(_package(
+        tmp_path,
+        manifest=_manifest(duration=30.0, preview="preview.ogg"),
+        files={"stems/full.ogg": full, "preview.ogg": preview},
+    ))
+
+    assert "media.preview-too-short" not in _codes(report)
+    assert "media.preview-too-long" not in _codes(report)
+
+
+def test_preview_outside_the_accepted_duration_range_is_reported(
+    tmp_path, validator
+):
+    short = validator.validate_feedpak(_package(
+        tmp_path / "short",
+        manifest=_manifest(preview="preview.ogg"),
+        files={"preview.ogg": _vorbis_ogg(duration=19.0, serial=22)},
+    ))
+    long = validator.validate_feedpak(_package(
+        tmp_path / "long",
+        manifest=_manifest(preview="preview.ogg"),
+        files={
+            "stems/full.ogg": _vorbis_ogg(
+                duration=180.0, serial=11, payload=b"full" * 20
+            ),
+            "preview.ogg": _vorbis_ogg(
+                duration=36.0, serial=22, payload=b"different"
+            ),
+        },
+    ))
+
+    assert "media.preview-too-short" in _codes(short)
+    assert "media.preview-too-long" in _codes(long)
+
+
+def test_under_twenty_second_preview_is_accepted_for_a_short_song(
+    tmp_path, validator
+):
+    report = validator.validate_feedpak(_package(
+        tmp_path,
+        manifest=_manifest(duration=18.0, preview="preview.ogg"),
+        files={
+            "stems/full.ogg": _vorbis_ogg(duration=18.0, serial=11),
+            "preview.ogg": _vorbis_ogg(
+                duration=17.0, serial=22, payload=b"short-song-preview"
+            ),
+        },
+    ))
+
+    assert "media.preview-too-short" not in _codes(report)
 
 
 def test_deep_audio_compares_preview_duration_even_when_file_is_much_smaller(
@@ -2118,8 +2331,14 @@ def test_deep_audio_compares_preview_duration_even_when_file_is_much_smaller(
     normal = validator.validate_feedpak(package)
     deep = validator.validate_feedpak(package, deep_audio=True)
 
-    assert "media.preview-full-length" not in _codes(normal)
-    assert "media.preview-full-length" in _codes(deep)
+    assert "media.preview-too-long" in _codes(normal)
+    assert "media.preview-too-long" in _codes(deep)
+    deep_finding = next(
+        item for item in deep["findings"]
+        if item["code"] == "media.preview-too-long"
+    )
+    assert "58.0s long" in deep_finding["message"]
+    assert "%" not in deep_finding["message"]
 
 
 def test_short_ogg_preview_and_short_song_are_not_media_warnings(tmp_path, validator):
@@ -2143,10 +2362,10 @@ def test_short_ogg_preview_and_short_song_are_not_media_warnings(tmp_path, valid
         files={"stems/full.ogg": short_full, "preview.ogg": short_preview},
     ))
 
-    assert "media.preview-is-full-mix" not in _codes(report)
-    assert "media.preview-full-length" not in _codes(report)
-    assert "media.preview-is-full-mix" not in _codes(short_report)
-    assert "media.preview-full-length" not in _codes(short_report)
+    assert "media.preview-too-short" not in _codes(report)
+    assert "media.preview-too-long" not in _codes(report)
+    assert "media.preview-too-short" not in _codes(short_report)
+    assert "media.preview-too-long" not in _codes(short_report)
 
 
 def test_zip_packages_are_read_without_extraction(tmp_path, validator):

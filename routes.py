@@ -2,8 +2,59 @@
 
 from pathlib import Path
 
-from fastapi import APIRouter, Body, HTTPException, Query
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter, Body, Header, HTTPException, Query
+from fastapi.responses import Response, StreamingResponse
+
+
+def _audio_response(content: bytes, range_header: str | None = None) -> Response:
+    """Return in-memory Ogg audio with the single byte ranges browsers require."""
+    total = len(content)
+    headers = {
+        "Accept-Ranges": "bytes",
+        "Cache-Control": "no-store",
+    }
+    if not range_header:
+        return Response(content=content, media_type="audio/ogg", headers=headers)
+
+    def unsatisfied() -> Response:
+        return Response(
+            content=b"",
+            status_code=416,
+            media_type="audio/ogg",
+            headers={**headers, "Content-Range": f"bytes */{total}"},
+        )
+
+    if total == 0 or not range_header.startswith("bytes="):
+        return unsatisfied()
+    requested = range_header[6:].strip()
+    if not requested or "," in requested:
+        return unsatisfied()
+    first, separator, last = requested.partition("-")
+    if not separator or (not first and not last):
+        return unsatisfied()
+    try:
+        if first:
+            start = int(first)
+            end = int(last) if last else total - 1
+            if start < 0 or end < start or start >= total:
+                return unsatisfied()
+            end = min(end, total - 1)
+        else:
+            suffix_length = int(last)
+            if suffix_length <= 0:
+                return unsatisfied()
+            start = max(0, total - suffix_length)
+            end = total - 1
+    except ValueError:
+        return unsatisfied()
+
+    headers["Content-Range"] = f"bytes {start}-{end}/{total}"
+    return Response(
+        content=content[start : end + 1],
+        status_code=206,
+        media_type="audio/ogg",
+        headers=headers,
+    )
 
 
 def setup(app, context):
@@ -21,7 +72,9 @@ def setup(app, context):
     migration.migrate_legacy_state(Path(context["config_dir"]), log)
     validator = load_sibling("validator")
     scanner_module = load_sibling("scanner")
+    scan_worker_module = load_sibling("library_doctor_scan_worker")
     repair_module = load_sibling("repair")
+    preview_module = load_sibling("preview_repair")
     batch_module = load_sibling("batch_repair")
     scanner = scanner_module.LibraryScanner(
         config_dir=Path(context["config_dir"]),
@@ -30,6 +83,18 @@ def setup(app, context):
         validator_version=validator.VALIDATOR_VERSION,
         log=log,
         rule_metadata=validator.rule_metadata,
+        worker_pool_factory=lambda max_workers, validator_version: (
+            scan_worker_module.ValidationProcessPool(
+                max_workers=max_workers,
+                validator_version=validator_version,
+            )
+        ),
+    )
+    preview_repair = preview_module.PreviewRepairEngine(
+        validate_feedpak=validator.validate_feedpak,
+        error_type=repair_module.RepairPlanningError,
+        log=log,
+        probe_duration=validator.probe_ogg_duration,
     )
     repair_service = repair_module.RepairService(
         config_dir=Path(context["config_dir"]),
@@ -38,6 +103,7 @@ def setup(app, context):
         validator_version=validator.VALIDATOR_VERSION,
         log=log,
         legacy_schemas=migration.LEGACY_SCHEMAS,
+        preview_repair=preview_repair,
     )
     batch_manager = batch_module.BatchRepairManager(
         config_dir=Path(context["config_dir"]),
@@ -76,6 +142,7 @@ def setup(app, context):
                 target_kind=payload.get("scope", "library"),
                 selected_path=payload.get("path"),
                 deep_audio=payload.get("deep_audio") is True,
+                max_workers=payload.get("max_workers"),
             )
             if started:
                 batch_manager.invalidate_ready(
@@ -133,10 +200,22 @@ def setup(app, context):
         return batch_manager.status()
 
     @router.post("/repair/batch/preview", status_code=202)
-    def preview_batch_repairs():
+    def preview_batch_repairs(payload: dict | None = Body(default=None)):
         try:
+            include_preview_repairs = bool(
+                isinstance(payload, dict)
+                and payload.get("include_preview_repairs") is True
+            )
             snapshot = scanner.repair_scope_snapshot(
-                item["rule_code"] for item in repair_module.repair_catalog()
+                tuple(
+                    item["rule_code"]
+                    for item in repair_module.repair_catalog()
+                    if item.get("safety") == "safe_automatic"
+                ),
+                preview_rule_codes=(
+                    preview_module.PREVIEW_RULE_CODES - {"media.preview-regenerate"}
+                    if include_preview_repairs else ()
+                ),
             )
             return batch_manager.start_preview(snapshot)
         except batch_module.BatchRepairError as exc:
@@ -184,11 +263,47 @@ def setup(app, context):
         except batch_module.BatchRepairError as exc:
             raise HTTPException(status_code=409, detail=batch_error(exc)) from exc
 
+    @router.post("/repair/batch/finalize/preview", status_code=202)
+    def preview_batch_finalization():
+        try:
+            return batch_manager.start_finalize_preview()
+        except batch_module.BatchRepairError as exc:
+            raise HTTPException(status_code=409, detail=batch_error(exc)) from exc
+
+    @router.post("/repair/batch/finalize/apply", status_code=202)
+    def apply_batch_finalization(payload: dict = Body(...)):
+        finalize_plan_id = payload.get("finalize_plan_id")
+        if not isinstance(finalize_plan_id, str):
+            raise HTTPException(
+                status_code=400,
+                detail="Review Finalize all before applying it.",
+            )
+        try:
+            return batch_manager.start_finalize_apply(finalize_plan_id)
+        except batch_module.BatchRepairError as exc:
+            raise HTTPException(status_code=409, detail=batch_error(exc)) from exc
+
     def repair_error(exc):
         return {
             "code": exc.code,
             "message": str(exc),
             "file_state": exc.file_state,
+        }
+
+    def verified_deep_audio_options(package: str) -> dict:
+        """Build service arguments that remain guarded through commit."""
+        context = scanner.current_deep_audio_repair_context(package)
+        if not isinstance(context, dict):
+            return {}
+        signature = context.get("signature")
+        report = context.get("report")
+        if not isinstance(signature, str) or not isinstance(report, dict):
+            return {}
+        return {
+            "verified_before_report": report,
+            "source_guard": lambda: scanner.package_matches_signature(
+                package, signature
+            ),
         }
 
     @router.post("/repair/preview")
@@ -198,7 +313,44 @@ def setup(app, context):
         if not isinstance(package, str) or not isinstance(rule_code, str):
             raise HTTPException(status_code=400, detail="Choose a package finding to repair.")
         try:
-            return repair_service.preview(package, rule_code)
+            return repair_service.preview(
+                package,
+                rule_code,
+                start_seconds=payload.get("start_seconds"),
+            )
+        except repair_module.RepairPlanningError as exc:
+            raise HTTPException(status_code=400, detail=repair_error(exc)) from exc
+
+    @router.get("/repair/media/candidate/{plan_id}")
+    def get_media_repair_candidate(
+        plan_id: str,
+        range_header: str | None = Header(default=None, alias="Range"),
+    ):
+        try:
+            return _audio_response(
+                repair_service.preview_audio(plan_id),
+                range_header,
+            )
+        except repair_module.RepairPlanningError as exc:
+            raise HTTPException(status_code=404, detail=repair_error(exc)) from exc
+
+    @router.get("/repair/media/current")
+    def get_current_media_preview(
+        package: str = Query(...),
+        range_header: str | None = Header(default=None, alias="Range"),
+    ):
+        try:
+            return _audio_response(
+                repair_service.current_preview_audio(package),
+                range_header,
+            )
+        except repair_module.RepairPlanningError as exc:
+            raise HTTPException(status_code=404, detail=repair_error(exc)) from exc
+
+    @router.get("/repair/media/tool/status")
+    def get_preview_tool_status(package: str = Query(...)):
+        try:
+            return repair_service.preview_tool_status(package)
         except repair_module.RepairPlanningError as exc:
             raise HTTPException(status_code=400, detail=repair_error(exc)) from exc
 
@@ -226,11 +378,15 @@ def setup(app, context):
             status = scanner.status()
             last_scan = status.get("last_scan") if isinstance(status.get("last_scan"), dict) else {}
             deep_audio = bool(last_scan.get("deep_audio"))
+            verified_options = (
+                verified_deep_audio_options(package) if deep_audio else {}
+            )
             if all_safe:
                 result = repair_service.apply_all(
                     package,
                     plan_id,
                     deep_audio=deep_audio,
+                    **verified_options,
                 )
             else:
                 result = repair_service.apply(
@@ -238,12 +394,14 @@ def setup(app, context):
                     rule_code,
                     plan_id,
                     deep_audio=deep_audio,
+                    **verified_options,
                 )
             try:
+                result_deep_audio = bool(result.get("deep_audio", deep_audio))
                 scanner.record_repair_result(
                     package,
                     result["report"],
-                    deep_audio=deep_audio,
+                    deep_audio=result_deep_audio,
                 )
                 result["cache_updated"] = True
             except Exception as exc:  # The package repair itself already succeeded.
@@ -286,6 +444,58 @@ def setup(app, context):
             plan_id,
             rule_code=rule_code,
         )
+
+    @router.post("/repair/media/automatic")
+    def apply_automatic_media_repair(payload: dict = Body(...)):
+        package = payload.get("package")
+        rule_code = payload.get("rule_code")
+        if not isinstance(package, str) or not isinstance(rule_code, str):
+            raise HTTPException(
+                status_code=400,
+                detail="Choose a preview recommendation to repair automatically.",
+            )
+        reserved, reason = scanner.begin_repair()
+        if not reserved:
+            raise HTTPException(status_code=409, detail=reason)
+        try:
+            result = repair_service.apply_automatic_preview(
+                package,
+                rule_code,
+                **verified_deep_audio_options(package),
+            )
+            try:
+                scanner.record_repair_result(
+                    package,
+                    result["report"],
+                    deep_audio=True,
+                )
+                result["cache_updated"] = True
+            except Exception as exc:
+                log.warning(
+                    "Library Doctor created a preview but could not refresh its report: %s",
+                    exc,
+                )
+                result["cache_updated"] = False
+            batch_manager.invalidate_ready(
+                "A Feedpak changed after the batch preview. Review the batch again."
+            )
+            return result
+        except repair_module.RepairPlanningError as exc:
+            raise HTTPException(status_code=409, detail=repair_error(exc)) from exc
+        except Exception as exc:
+            log.exception("Library Doctor automatic preview repair failed safely: %s", exc)
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "code": "unexpected_preview_repair_failure",
+                    "message": (
+                        "The preview could not be created automatically. Scan this Feedpak again before retrying."
+                    ),
+                    "file_state": "verify_required",
+                },
+            ) from exc
+        finally:
+            scanner.finish_repair()
 
     @router.post("/repair/all/apply")
     def apply_all_safe_repairs(payload: dict = Body(...)):
@@ -346,6 +556,41 @@ def setup(app, context):
             ) from exc
         finally:
             scanner.finish_repair()
+
+    @router.post("/repair/recovery/finalize")
+    def finalize_recovery(payload: dict = Body(...)):
+        package = payload.get("package")
+        backup_id = payload.get("backup_id")
+        if not isinstance(package, str) or not isinstance(backup_id, str):
+            raise HTTPException(
+                status_code=400,
+                detail="Choose a repair recovery copy to finalize.",
+            )
+        try:
+            result = repair_service.finalize_backup(package, backup_id)
+            batch_manager.invalidate_ready(
+                "A recovery copy changed after the batch recovery review. Review the operation again."
+            )
+            batch_manager.mark_finalized(
+                package,
+                backup_id,
+                package_state=result.get("package_state"),
+            )
+            return result
+        except repair_module.RepairPlanningError as exc:
+            raise HTTPException(status_code=409, detail=repair_error(exc)) from exc
+        except Exception as exc:
+            log.exception("Library Doctor recovery finalization failed safely: %s", exc)
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "code": "unexpected_recovery_cleanup_failure",
+                    "message": (
+                        "The recovery copy could not be removed. The Feedpak was not changed."
+                    ),
+                    "file_state": "unchanged",
+                },
+            ) from exc
 
     @router.get("/export")
     def export_results(

@@ -44,7 +44,13 @@ def _valid_package(library: Path, name="Artist/Song.feedpak") -> Path:
     return root
 
 
-def _client(tmp_path, *, with_library=True, validator_hook=None):
+def _client(
+    tmp_path,
+    *,
+    with_library=True,
+    validator_hook=None,
+    preview_hook=None,
+):
     root = Path(__file__).parents[1]
     loaded = {}
 
@@ -55,6 +61,8 @@ def _client(tmp_path, *, with_library=True, validator_hook=None):
             )
             if name == "validator" and validator_hook is not None:
                 validator_hook(loaded[name])
+            if name == "preview_repair" and preview_hook is not None:
+                preview_hook(loaded[name])
         return loaded[name]
 
     library = tmp_path / "library"
@@ -95,6 +103,65 @@ def _wait_for_batch(client, phases, timeout=10):
     raise AssertionError(
         f"Library Doctor batch did not reach {sorted(expected)}; last status: {status}"
     )
+
+
+def test_audio_response_supports_browser_byte_ranges():
+    root = Path(__file__).parents[1]
+    routes = _load(root / "routes.py", "library_doctor_routes_range_test")
+    payload = b"0123456789"
+
+    full = routes._audio_response(payload)
+    first = routes._audio_response(payload, "bytes=0-3")
+    remainder = routes._audio_response(payload, "bytes=7-")
+    suffix = routes._audio_response(payload, "bytes=-3")
+
+    assert full.status_code == 200
+    assert full.body == payload
+    assert full.headers["accept-ranges"] == "bytes"
+    assert full.headers["cache-control"] == "no-store"
+    assert first.status_code == 206
+    assert first.body == b"0123"
+    assert first.headers["content-range"] == "bytes 0-3/10"
+    assert remainder.body == b"789"
+    assert remainder.headers["content-range"] == "bytes 7-9/10"
+    assert suffix.body == b"789"
+    assert suffix.headers["content-range"] == "bytes 7-9/10"
+
+
+@pytest.mark.parametrize(
+    "range_header",
+    ["items=0-1", "bytes=", "bytes=0-1,4-5", "bytes=20-", "bytes=5-2", "bytes=-0"],
+)
+def test_audio_response_rejects_invalid_or_unsupported_ranges(range_header):
+    root = Path(__file__).parents[1]
+    routes = _load(
+        root / "routes.py",
+        f"library_doctor_routes_invalid_range_test_{range_header}",
+    )
+
+    response = routes._audio_response(b"0123456789", range_header)
+
+    assert response.status_code == 416
+    assert response.body == b""
+    assert response.headers["content-range"] == "bytes */10"
+
+
+def test_preview_tool_status_does_not_require_a_library_doctor_scan(tmp_path):
+    client, library = _client(tmp_path)
+    _valid_package(library)
+
+    missing = client.get(
+        "/api/plugins/library_doctor/repair/media/tool/status",
+        params={"package": "Artist/Song.feedpak"},
+    )
+
+    assert missing.status_code == 200
+    payload = missing.json()
+    assert payload["schema"] == "library_doctor.preview_tool_status.v1"
+    assert payload["available"] is True
+    assert payload["rule_code"] == "media.preview-missing"
+    assert payload["current_preview_available"] is False
+    client.close()
 
 
 def test_scan_and_results_are_available_through_plugin_routes(tmp_path):
@@ -146,6 +213,69 @@ def test_deep_audio_option_is_forwarded_and_reported(tmp_path):
     assert response.status_code == 202
     assert status["deep_audio"] is True
     assert observed == [True]
+    client.close()
+
+
+def test_single_archive_repair_reuses_current_deep_audio_scan(tmp_path):
+    client, library = _client(tmp_path)
+    package = library / "Artist" / "Song.feedpak"
+    package.parent.mkdir()
+    note = {"t": 2.0, "s": 1, "f": 5}
+    manifest = {
+        "feedpak_version": "1.19.0",
+        "title": "Song",
+        "artist": "Artist",
+        "duration": 30.0,
+        "arrangements": [{"id": "lead", "file": "arrangements/lead.json"}],
+    }
+    with zipfile.ZipFile(package, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(
+            "manifest.yaml",
+            yaml.safe_dump(manifest, sort_keys=False),
+        )
+        archive.writestr(
+            "arrangements/lead.json",
+            json.dumps({"notes": [note, dict(note)], "chords": []}),
+        )
+
+    started = client.post(
+        "/api/plugins/library_doctor/scan?force=true",
+        json={"scope": "library", "deep_audio": True},
+    )
+    scan = _wait_for_scan(client)
+    plan = client.post(
+        "/api/plugins/library_doctor/repair/preview",
+        json={
+            "package": "Artist/Song.feedpak",
+            "rule_code": "chart.duplicate-note",
+        },
+    ).json()
+    applied = client.post(
+        "/api/plugins/library_doctor/repair/apply",
+        json={
+            "package": "Artist/Song.feedpak",
+            "rule_code": "chart.duplicate-note",
+            "plan_id": plan["plan_id"],
+        },
+    )
+
+    assert started.status_code == 202
+    assert scan["stage"] == "complete"
+    assert applied.status_code == 200
+    result = applied.json()
+    assert result["verified_scan_report_reused"] is True
+    assert result["deep_audio_reused"] is True
+    assert result["performance"]["deep_audio_requested"] is True
+    assert result["performance"]["verified_scan_report_reused"] is True
+    assert result["performance"]["deep_audio_reused"] is True
+    assert result["performance"]["elapsed_seconds"] >= 0
+    history = client.get(
+        "/api/plugins/library_doctor/repair/history?limit=1"
+    ).json()["items"][0]
+    assert history["performance"] == result["performance"]
+    with zipfile.ZipFile(package, "r") as archive:
+        arrangement = json.loads(archive.read("arrangements/lead.json"))
+    assert arrangement["notes"] == [note]
     client.close()
 
 
@@ -334,7 +464,7 @@ def test_exact_duplicate_repair_requires_preview_backs_up_and_refreshes_report(t
     assert len(backups) == 1
     with zipfile.ZipFile(backups[0], "r") as backup:
         metadata = json.loads(backup.read("repair.json"))
-        assert metadata["schema"] == "library_doctor.repair_backup.v2"
+        assert metadata["schema"] == "library_doctor.repair_backup.v3"
         assert metadata["rule_code"] == "chart.duplicate-note"
         assert metadata["summary"]["removed_count"] == 1
     results = client.get("/api/plugins/library_doctor/results").json()
@@ -360,7 +490,8 @@ def test_exact_duplicate_repair_requires_preview_backs_up_and_refreshes_report(t
     assert restored.json()["cache_updated"] is True
     assert restored.json()["receipt_saved"] is True
     assert len(json.loads(arrangement.read_text(encoding="utf-8"))["notes"]) == 2
-    assert backups[0].exists()
+    assert restored.json()["file_handling"]["backup_removed"] is True
+    assert not backups[0].exists()
     restored_results = client.get("/api/plugins/library_doctor/results").json()
     assert any(
         finding["code"] == "chart.duplicate-note"
@@ -608,6 +739,331 @@ def test_negative_string_mute_repair_normalizes_frets_and_is_reversible(tmp_path
     assert "chart.negative-muted-fret" in {
         item["code"] for item in restored.json()["report"]["findings"]
     }
+    client.close()
+
+
+def test_scan_accepts_a_custom_worker_ceiling_and_rejects_invalid_values(tmp_path):
+    client, library = _client(tmp_path)
+    _valid_package(library)
+
+    invalid = client.post(
+        "/api/plugins/library_doctor/scan",
+        json={"scope": "library", "max_workers": True},
+    )
+    accepted = client.post(
+        "/api/plugins/library_doctor/scan",
+        json={"scope": "library", "max_workers": 8},
+    )
+    status = _wait_for_scan(client)
+
+    assert invalid.status_code == 400
+    assert "positive whole number" in invalid.json()["detail"]
+    assert accepted.status_code == 202
+    assert status["worker_policy"]["mode"] == "custom"
+    assert status["worker_policy"]["limits"]["user"] == 8
+    assert status["worker_policy"]["selected_workers"] == 1
+    assert status["worker_policy"]["reason"] == "small_scope"
+    client.close()
+
+
+def test_recovery_finalization_keeps_repaired_feedpak_and_removes_undo_copy(tmp_path):
+    client, library = _client(tmp_path)
+    package = _valid_package(library)
+    arrangement = package / "arrangements" / "lead.json"
+    note = {"t": 2.0, "s": 1, "f": 5}
+    arrangement.write_text(
+        json.dumps({"notes": [note, dict(note)], "chords": []}),
+        encoding="utf-8",
+    )
+    plan = client.post(
+        "/api/plugins/library_doctor/repair/preview",
+        json={"package": "Artist/Song.feedpak", "rule_code": "chart.duplicate-note"},
+    ).json()
+    applied = client.post(
+        "/api/plugins/library_doctor/repair/apply",
+        json={
+            "package": "Artist/Song.feedpak",
+            "rule_code": "chart.duplicate-note",
+            "plan_id": plan["plan_id"],
+        },
+    ).json()
+    backup = (
+        tmp_path / "config" / "library_doctor" / "repair_backups"
+        / f"{applied['backup_id']}.zip"
+    )
+    repaired_bytes = arrangement.read_bytes()
+
+    finalized = client.post(
+        "/api/plugins/library_doctor/repair/recovery/finalize",
+        json={
+            "package": "Artist/Song.feedpak",
+            "backup_id": applied["backup_id"],
+        },
+    )
+
+    assert finalized.status_code == 200
+    result = finalized.json()
+    assert result["outcome"] == "finalized"
+    assert result["package_state"] == "repaired"
+    assert result["undo_available"] is False
+    assert result["file_handling"]["recovery_bytes_freed"] > 0
+    assert arrangement.read_bytes() == repaired_bytes
+    assert not backup.exists()
+    unavailable = client.post(
+        "/api/plugins/library_doctor/repair/restore",
+        json={
+            "package": "Artist/Song.feedpak",
+            "backup_id": applied["backup_id"],
+        },
+    )
+    assert unavailable.status_code == 409
+    assert unavailable.json()["detail"]["code"] == "backup_unavailable"
+    history = client.get("/api/plugins/library_doctor/repair/history?limit=1").json()
+    assert history["items"][0]["outcome"] == "finalized"
+    assert history["items"][0]["undo_available"] is False
+    client.close()
+
+
+def test_automatic_preview_route_finishes_without_retained_recovery(
+    tmp_path,
+):
+    source = b"OggS" + (b"full-song" * 200)
+    candidate = b"OggS" + (b"new-preview" * 150)
+
+    def validator_hook(module):
+        def validate(path, package_name, *, deep_audio=False, **_kwargs):
+            manifest = yaml.safe_load((Path(path) / "manifest.yaml").read_bytes())
+            preview_path = manifest.get("preview")
+            preview_exists = bool(
+                preview_path and (Path(path) / str(preview_path)).is_file()
+            )
+            return {
+                "schema": "library_doctor.report.v1",
+                "package": package_name,
+                "title": manifest.get("title") or package_name,
+                "artist": manifest.get("artist") or "",
+                "status": "healthy",
+                "counts": {"error": 0, "warning": 0, "info": 0},
+                "findings": [],
+                "features": {
+                    "preview_declared": preview_exists,
+                    "preview_available": preview_exists,
+                    "preview_source_available": True,
+                    "repair_eligibility": {
+                        "media.preview-missing": {"status": "automatic"},
+                    },
+                    "lyrics_declared": False,
+                    "deep_audio_checked": deep_audio,
+                },
+            }
+
+        module.validate_feedpak = validate
+        module.probe_ogg_duration = lambda raw: 60.0 if raw == source else 30.0
+
+    def preview_hook(module):
+        module._probe_with_ffmpeg = lambda raw: 60.0 if raw == source else 30.0
+        module._render_with_ffmpeg = (
+            lambda raw, _start, _duration: candidate if raw == source else b""
+        )
+        module._loudest_start_with_ffmpeg = (
+            lambda _raw, _duration, _target: 15.0
+        )
+
+    client, library = _client(
+        tmp_path,
+        validator_hook=validator_hook,
+        preview_hook=preview_hook,
+    )
+    package = _valid_package(library)
+    (package / "stems" / "full.ogg").write_bytes(source)
+    original_manifest = (package / "manifest.yaml").read_bytes()
+
+    applied = client.post(
+        "/api/plugins/library_doctor/repair/media/automatic",
+        json={
+            "package": "Artist/Song.feedpak",
+            "rule_code": "media.preview-missing",
+        },
+    )
+
+    assert applied.status_code == 200
+    result = applied.json()
+    repaired_manifest = yaml.safe_load((package / "manifest.yaml").read_bytes())
+    preview_path = repaired_manifest["preview"]
+    assert result["outcome"] == "success"
+    assert result["media"]["creates_preview"] is True
+    assert result["cache_updated"] is True
+    assert result["undo_available"] is False
+    assert result["file_handling"]["backup_removed"] is True
+    assert (package / preview_path).read_bytes() == candidate
+    assert (package / "stems" / "full.ogg").read_bytes() == source
+
+    current = client.get(
+        "/api/plugins/library_doctor/repair/media/current",
+        params={"package": "Artist/Song.feedpak"},
+        headers={"Range": "bytes=0-7"},
+    )
+    assert current.status_code == 206
+    assert current.headers["content-range"] == f"bytes 0-7/{len(candidate)}"
+    assert current.content == candidate[:8]
+
+    restored = client.post(
+        "/api/plugins/library_doctor/repair/restore",
+        json={
+            "package": "Artist/Song.feedpak",
+            "backup_id": result["backup_id"],
+        },
+    )
+    assert restored.status_code == 409
+    assert restored.json()["detail"]["code"] == "backup_unavailable"
+    assert (package / "manifest.yaml").read_bytes() != original_manifest
+    assert (package / preview_path).read_bytes() == candidate
+    assert (package / "stems" / "full.ogg").read_bytes() == source
+    client.close()
+
+
+def test_batch_can_optionally_create_flagged_previews_without_retained_backups(
+    tmp_path,
+):
+    source = b"OggS" + (b"batch-full-song" * 200)
+    candidate = b"OggS" + (b"batch-preview" * 150)
+
+    def validator_hook(module):
+        def validate(path, package_name, *, deep_audio=False, **_kwargs):
+            manifest = yaml.safe_load((Path(path) / "manifest.yaml").read_bytes())
+            preview_path = manifest.get("preview")
+            preview_exists = bool(
+                preview_path and (Path(path) / str(preview_path)).is_file()
+            )
+            arrangement = json.loads(
+                (Path(path) / "arrangements" / "lead.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            notes = arrangement.get("notes") or []
+            duplicate_notes = len(notes) > 1 and notes[0] == notes[1]
+            findings = ([{
+                "severity": "warning",
+                "code": "chart.duplicate-note",
+                "message": "An exact duplicate note is stored twice.",
+                "category": "validation",
+                "location": "arrangements/lead.json:notes[1]",
+                "arrangement_id": "lead",
+                "time": 2.0,
+                "string": 1,
+                "affected_count": 1,
+            }] if duplicate_notes else [])
+            return {
+                "schema": "library_doctor.package.v1",
+                "package": package_name,
+                "title": manifest.get("title") or package_name,
+                "artist": manifest.get("artist") or "",
+                "status": "warning" if findings else "healthy",
+                "counts": {
+                    "error": 0,
+                    "warning": len(findings),
+                    "info": 0,
+                },
+                "findings": findings,
+                "features": {
+                    "preview_declared": preview_exists,
+                    "preview_available": preview_exists,
+                    "preview_source_available": True,
+                    "repair_eligibility": {
+                        "media.preview-missing": {"status": "automatic"},
+                    },
+                    "lyrics_declared": False,
+                    "deep_audio_checked": deep_audio,
+                },
+            }
+
+        module.validate_feedpak = validate
+        module.probe_ogg_duration = lambda raw: 90.0 if raw == source else 30.0
+
+    def preview_hook(module):
+        module._probe_with_ffmpeg = lambda raw: 90.0 if raw == source else 30.0
+        module._render_with_ffmpeg = (
+            lambda raw, _start, _duration: candidate if raw == source else b""
+        )
+        module._loudest_start_with_ffmpeg = (
+            lambda _raw, _duration, _target: 20.0
+        )
+
+    client, library = _client(
+        tmp_path,
+        validator_hook=validator_hook,
+        preview_hook=preview_hook,
+    )
+    package = _valid_package(library)
+    (package / "stems" / "full.ogg").write_bytes(source)
+    arrangement_path = package / "arrangements" / "lead.json"
+    duplicate = {"t": 2.0, "s": 1, "f": 5}
+    arrangement_path.write_text(
+        json.dumps({"notes": [duplicate, dict(duplicate)], "chords": []}),
+        encoding="utf-8",
+    )
+    preview_only = _valid_package(library, "PreviewOnly.feedpak")
+    (preview_only / "stems" / "full.ogg").write_bytes(source)
+    client.post("/api/plugins/library_doctor/scan")
+    _wait_for_scan(client)
+
+    default_started = client.post(
+        "/api/plugins/library_doctor/repair/batch/preview"
+    )
+    default_preview = _wait_for_batch(client, "ready")["preview"]
+    assert default_started.status_code == 202
+    assert default_preview["include_preview_repairs"] is False
+    assert default_preview["preview_repair_count"] == 0
+    assert default_preview["eligible_count"] == 1
+
+    started = client.post(
+        "/api/plugins/library_doctor/repair/batch/preview",
+        json={"include_preview_repairs": True},
+    )
+    ready = _wait_for_batch(client, "ready")
+    preview = ready["preview"]
+
+    assert started.status_code == 202
+    assert preview["include_preview_repairs"] is True
+    assert preview["eligible_count"] == 2
+    assert preview["safe_repair_package_count"] == 1
+    assert preview["preview_repair_count"] == 2
+    assert preview["mixed_repair_package_count"] == 1
+    assert all(
+        item["preview_rule_code"] == "media.preview-missing"
+        for item in preview["packages"]
+    )
+
+    applied = client.post(
+        "/api/plugins/library_doctor/repair/batch/apply",
+        json={"batch_plan_id": preview["batch_plan_id"]},
+    )
+    completed = _wait_for_batch(client, "completed")
+    result = completed["result"]
+    repaired_manifest = yaml.safe_load((package / "manifest.yaml").read_bytes())
+
+    assert applied.status_code == 202
+    assert result["successful_count"] == 2
+    assert result["preview_successful_count"] == 2
+    assert result["preview_failed_count"] == 0
+    assert result["backup_count"] == 1
+    assert result["undoable_count"] == 1
+    mixed = next(
+        item for item in result["outcomes"]
+        if item["package"] == "Artist/Song.feedpak"
+    )
+    finalized = next(
+        item for item in result["outcomes"]
+        if item["package"] == "PreviewOnly.feedpak"
+    )
+    assert mixed["outcome"] == "success"
+    assert mixed["preview_repaired"] is True
+    assert finalized["outcome"] == "finalized"
+    assert finalized["preview_repaired"] is True
+    assert len(json.loads(arrangement_path.read_text(encoding="utf-8"))["notes"]) == 1
+    assert (package / repaired_manifest["preview"]).read_bytes() == candidate
+    backup_root = tmp_path / "config" / "library_doctor" / "repair_backups"
+    assert len(list(backup_root.glob("*.zip"))) == 1
     client.close()
 
 
@@ -1029,7 +1485,8 @@ def test_fix_all_safe_issues_is_one_validated_reversible_package_transaction(tmp
     assert rhythm_path.read_bytes() == rhythm_original
     assert drums_path.read_bytes() == original_drums
     assert lyrics_path.read_bytes() == original_lyrics
-    assert backups[0].exists()
+    assert restored.json()["file_handling"]["backup_removed"] is True
+    assert not backups[0].exists()
     client.close()
 
 
@@ -1675,14 +2132,14 @@ def test_batch_preview_and_apply_repair_each_eligible_feedpak_separately(tmp_pat
     assert started.status_code == 202
     assert preview["scope_package_count"] == 4
     assert preview["candidate_count"] == 3
-    assert preview["eligible_count"] == 2
-    assert preview["blocked_count"] == 1
+    assert preview["eligible_count"] == 3
+    assert preview["blocked_count"] == 0
     assert preview["no_longer_needed_count"] == 0
-    assert preview["removed_count"] == 7
+    assert preview["reported_affected_count"] == 8
     assert {item["package"] for item in preview["packages"]} == {
-        "First.feedpak", "Second.feedpak",
+        "First.feedpak", "Second.feedpak", "Blocked.feedpak",
     }
-    assert preview["blocked"][0]["package"] == "Blocked.feedpak"
+    assert preview["blocked"] == []
     assert len(preview["batch_plan_id"]) == 64
 
     applied = client.post(
@@ -1693,9 +2150,9 @@ def test_batch_preview_and_apply_repair_each_eligible_feedpak_separately(tmp_pat
     result = completed["result"]
 
     assert applied.status_code == 202
-    assert result["planned_count"] == 2
+    assert result["planned_count"] == 3
     assert result["successful_count"] == 2
-    assert result["skipped_count"] == 0
+    assert result["skipped_count"] == 1
     assert result["failed_count"] == 0
     assert result["backup_count"] == 2
     assert result["removed_count"] == 7
@@ -1802,10 +2259,18 @@ def test_batch_preview_and_apply_repair_each_eligible_feedpak_separately(tmp_pat
     assert current_batch["currently_repaired_count"] == 0
     assert current_batch["restored_count"] == 2
     assert current_batch["current_removed_count"] == 0
-    assert all(
-        item["file_state"] == "restored"
+    restored_packages = {
+        item["package"]
         for item in current_batch["outcomes"]
+        if item["file_state"] == "restored"
+    }
+    assert restored_packages == {"First.feedpak", "Second.feedpak"}
+    blocked_outcome = next(
+        item for item in current_batch["outcomes"]
+        if item["package"] == "Blocked.feedpak"
     )
+    assert blocked_outcome["outcome"] == "skipped"
+    assert blocked_outcome["file_state"] == "unchanged"
     assert len(json.loads(second_path.read_text(encoding="utf-8"))["notes"]) == 2
     after_undo_results = client.get(
         "/api/plugins/library_doctor/results?filter=all"
@@ -1822,6 +2287,71 @@ def test_batch_preview_and_apply_repair_each_eligible_feedpak_separately(tmp_pat
     )
     assert nothing_left.status_code == 409
     assert nothing_left.json()["detail"]["code"] == "nothing_to_restore"
+    client.close()
+
+
+def test_batch_finalizes_every_verified_recovery_copy_without_changing_feedpaks(
+    tmp_path,
+):
+    client, library = _client(tmp_path)
+    package = _valid_package(library, "Finalize All.feedpak")
+    arrangement_path = package / "arrangements" / "lead.json"
+    duplicate = {"t": 3.0, "s": 2, "f": 7}
+    arrangement_path.write_text(
+        json.dumps({"notes": [duplicate, dict(duplicate)], "chords": []}),
+        encoding="utf-8",
+    )
+    client.post("/api/plugins/library_doctor/scan")
+    _wait_for_scan(client)
+    client.post("/api/plugins/library_doctor/repair/batch/preview")
+    preview = _wait_for_batch(client, "ready")["preview"]
+    client.post(
+        "/api/plugins/library_doctor/repair/batch/apply",
+        json={"batch_plan_id": preview["batch_plan_id"]},
+    )
+    completed = _wait_for_batch(client, "completed")
+    repaired_bytes = arrangement_path.read_bytes()
+    backup_dir = tmp_path / "config" / "library_doctor" / "repair_backups"
+    assert len(list(backup_dir.glob("*.zip"))) == 1
+    assert completed["result"]["undoable_count"] == 1
+
+    reviewed = client.post(
+        "/api/plugins/library_doctor/repair/batch/finalize/preview"
+    )
+    finalize_ready = _wait_for_batch(client, "finalize_ready")
+    finalize_preview = finalize_ready["finalize_preview"]
+
+    assert reviewed.status_code == 202
+    assert finalize_preview["eligible_count"] == 1
+    assert finalize_preview["blocked_count"] == 0
+    assert finalize_preview["recovery_bytes_to_free"] > 0
+    assert len(list(backup_dir.glob("*.zip"))) == 1
+    assert arrangement_path.read_bytes() == repaired_bytes
+
+    finalized = client.post(
+        "/api/plugins/library_doctor/repair/batch/finalize/apply",
+        json={"finalize_plan_id": finalize_preview["finalize_plan_id"]},
+    )
+    finalize_completed = _wait_for_batch(client, "finalize_completed")
+    finalize_result = finalize_completed["finalize_result"]
+    batch_result = finalize_completed["result"]
+
+    assert finalized.status_code == 202
+    assert finalize_result["finalized_count"] == 1
+    assert finalize_result["skipped_count"] == 0
+    assert finalize_result["failed_count"] == 0
+    assert finalize_result["recovery_bytes_freed"] > 0
+    assert list(backup_dir.glob("*.zip")) == []
+    assert arrangement_path.read_bytes() == repaired_bytes
+    assert batch_result["undoable_count"] == 0
+    assert batch_result["finalized_count"] == 1
+    assert batch_result["outcomes"][0]["outcome"] == "finalized"
+
+    no_undo = client.post(
+        "/api/plugins/library_doctor/repair/batch/undo/preview"
+    )
+    assert no_undo.status_code == 409
+    assert no_undo.json()["detail"]["code"] == "nothing_to_restore"
     client.close()
 
 
@@ -1849,17 +2379,14 @@ def test_batch_repair_counts_and_undo_include_lossless_reordering(tmp_path):
     preview = _wait_for_batch(client, "ready")["preview"]
 
     assert preview["eligible_count"] == 1
-    assert preview["change_count"] == 1
-    assert preview["removed_count"] == 0
-    assert preview["packages"][0]["change_count"] == 1
+    assert preview["reported_affected_count"] == 1
+    assert preview["packages"][0]["reported_affected_count"] == 1
     assert preview["rule_summaries"] == [{
         "rule_code": "chart.bend-points-out-of-order",
-        "title": "Put bend points in chronological order",
-        "item_name": "bend curve",
-        "change_kind": "reorder",
+        "title": "Bend points out of order",
         "package_count": 1,
-        "change_count": 1,
-        "removed_count": 0,
+        "finding_count": 1,
+        "reported_affected_count": 1,
     }]
 
     client.post(
@@ -2202,6 +2729,19 @@ def test_restore_refuses_to_overwrite_chart_changes_made_after_repair(tmp_path):
     assert restored.status_code == 409
     assert restored.json()["detail"]["code"] == "package_changed"
     assert json.loads(arrangement.read_text(encoding="utf-8")) == author_edit
+    finalized = client.post(
+        "/api/plugins/library_doctor/repair/recovery/finalize",
+        json={
+            "package": "Artist/Song.feedpak",
+            "backup_id": applied["backup_id"],
+        },
+    )
+    assert finalized.status_code == 409
+    assert finalized.json()["detail"]["code"] == "package_changed"
+    assert (
+        tmp_path / "config" / "library_doctor" / "repair_backups"
+        / f"{applied['backup_id']}.zip"
+    ).is_file()
     client.close()
 
 

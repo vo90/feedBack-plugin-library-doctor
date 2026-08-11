@@ -8,12 +8,15 @@ small allowlist below.
 
 from __future__ import annotations
 
+import copy
 import hashlib
+import importlib.util
 import json
 import math
 import os
 import re
 import shutil
+import sys
 import tempfile
 import threading
 import time
@@ -21,21 +24,49 @@ import uuid
 import zipfile
 from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
-from typing import Iterator
+from typing import Iterable, Iterator
 
 import yaml
 
+try:
+    import repair_eligibility as _eligibility
+except ModuleNotFoundError:  # Tests and some plugin hosts load files by path.
+    _eligibility_name = "_library_doctor_repair_eligibility"
+    _eligibility = sys.modules.get(_eligibility_name)
+    if _eligibility is None:
+        _eligibility_spec = importlib.util.spec_from_file_location(
+            _eligibility_name,
+            Path(__file__).resolve().with_name("repair_eligibility.py"),
+        )
+        _eligibility = importlib.util.module_from_spec(_eligibility_spec)
+        sys.modules[_eligibility_name] = _eligibility
+        _eligibility_spec.loader.exec_module(_eligibility)
+assess_redundant_handshapes = _eligibility.assess_redundant_handshapes
+_shared_chord_matches_handshape = _eligibility.chord_matches_handshape
+redundant_handshape_is_plain = _eligibility.redundant_handshape_is_plain
+_shared_reported_invalid_handshape_span = (
+    _eligibility.reported_invalid_handshape_span
+)
+_shared_reported_reversed_handshape = _eligibility.reported_reversed_handshape
+_shared_reported_zero_length_handshape = (
+    _eligibility.reported_zero_length_handshape
+)
+_shared_strict_reversed_handshape_context = (
+    _eligibility.strict_reversed_handshape_context
+)
 
-REPAIR_CATALOG_VERSION = "repairs-12"
+
+REPAIR_CATALOG_VERSION = "repairs-17"
 REPAIR_PLAN_SCHEMA = "library_doctor.repair_plan.v1"
 MAX_REPAIR_TEXT_BYTES = 64 * 1024 * 1024
+MAX_REPAIR_MEMBER_BYTES = 128 * 1024 * 1024
 MAX_REPAIR_STRUCTURE_ITEMS = 2_000_000
 MAX_REPAIR_MANIFEST_BYTES = 4 * 1024 * 1024
 MAX_DECLARED_REPAIR_MEMBERS = 1_000
 MAX_RECOVERY_BACKUP_BYTES = 512 * 1024 * 1024
 PACKAGE_SUFFIXES = (".feedpak", ".sloppak")
 PACKAGE_REPAIR_SCHEMA = "library_doctor.package_repair.v1"
-BACKUP_SCHEMA = "library_doctor.repair_backup.v2"
+BACKUP_SCHEMA = "library_doctor.repair_backup.v3"
 HISTORY_SCHEMA = "library_doctor.repair_history.v1"
 MAX_REPAIR_HISTORY = 50
 _BACKUP_ID_RE = re.compile(r"^[0-9]{8}-[0-9]{6}-[0-9a-f]{12}$")
@@ -730,6 +761,88 @@ _ALL_SAFE_RULE_ORDER = (
     "drums.duplicate-hit",
 )
 
+_MEDIA_REPAIR_DEFINITIONS = (
+    RepairDefinition(
+        rule_code="media.preview-missing",
+        action_kind="create_song_preview",
+        source_kind="full_mix",
+        item_name="audio preview",
+        safety="review_required",
+        title="Create a song preview",
+        description=(
+            "Generate a 30-second Ogg excerpt from the full song mix and add it "
+            "to the existing Feedpak. Manual review and automatic creation use "
+            "the same selection standard."
+        ),
+        player_result=(
+            "Library browsing can play a short representative excerpt for this song."
+        ),
+        user_value=(
+            "The song becomes easier to recognize while browsing without changing gameplay audio."
+        ),
+        change_kind="replace_media",
+    ),
+    RepairDefinition(
+        rule_code="media.preview-too-short",
+        action_kind="replace_song_preview",
+        source_kind="full_mix",
+        item_name="audio preview",
+        safety="review_required",
+        title="Create a standard song preview",
+        description=(
+            "Generate a new 30-second Ogg excerpt from the full song mix. Manual "
+            "review and automatic creation use the same selection standard."
+        ),
+        player_result=(
+            "Library browsing plays a longer representative excerpt instead of an unusually short preview."
+        ),
+        user_value=(
+            "The preview gives the player a more useful sense of the song while remaining compact."
+        ),
+        change_kind="replace_media",
+    ),
+    RepairDefinition(
+        rule_code="media.preview-too-long",
+        action_kind="replace_song_preview",
+        source_kind="full_mix",
+        item_name="audio preview",
+        safety="review_required",
+        title="Create a short song preview",
+        description=(
+            "Generate a new 30-second Ogg excerpt from the full song mix. Manual "
+            "review and automatic creation use the same selection standard."
+        ),
+        player_result=(
+            "Library browsing plays a compact representative excerpt instead of an unusually long preview."
+        ),
+        user_value=(
+            "The Feedpak uses less unnecessary preview storage while preserving a useful sample."
+        ),
+        change_kind="replace_media",
+    ),
+    RepairDefinition(
+        rule_code="media.preview-regenerate",
+        action_kind="regenerate_song_preview",
+        source_kind="full_mix",
+        item_name="audio preview",
+        safety="review_required",
+        title="Create a different song preview",
+        description=(
+            "Generate a new 30-second Ogg excerpt from the full song mix even "
+            "when the current preview already passes the duration policy."
+        ),
+        player_result=(
+            "Library browsing plays the newly selected excerpt instead of the current preview."
+        ),
+        user_value=(
+            "A technically valid but unhelpful preview can be replaced without editing the Feedpak manually."
+        ),
+        change_kind="replace_media",
+    ),
+)
+
+_ALL_REPAIR_DEFINITIONS = _REPAIR_DEFINITIONS + _MEDIA_REPAIR_DEFINITIONS
+
 _ALL_SAFE_DEFINITION = {
     "rule_code": ALL_SAFE_RULE_CODE,
     "safety": "safe_automatic",
@@ -754,7 +867,7 @@ _ALL_SAFE_DEFINITION = {
 
 def repair_catalog() -> list[dict]:
     """Return the explicit repair allowlist in stable display order."""
-    return [definition.to_dict() for definition in _REPAIR_DEFINITIONS]
+    return [definition.to_dict() for definition in _ALL_REPAIR_DEFINITIONS]
 
 
 def all_safe_repair_definition() -> dict:
@@ -764,7 +877,7 @@ def all_safe_repair_definition() -> dict:
 
 def repair_for_rule(rule_code: str) -> dict | None:
     """Return a repair definition only when the rule is explicitly supported."""
-    for definition in _REPAIR_DEFINITIONS:
+    for definition in _ALL_REPAIR_DEFINITIONS:
         if definition.rule_code == rule_code:
             return definition.to_dict()
     return None
@@ -796,6 +909,12 @@ def apply_json_member(raw: bytes, plan: dict) -> bytes:
             "The song file does not have the expected JSON structure for this repair.",
         )
 
+    _apply_plan_actions_to_document(document, plan)
+    return _render_json(document, raw)
+
+
+def _apply_plan_actions_to_document(document, plan: dict) -> None:
+    """Apply already-validated safe actions to an in-memory JSON document."""
     removed: set[tuple[tuple[str | int, ...], int]] = set()
     reordered: set[tuple[str | int, ...]] = set()
     normalized: set[tuple[tuple[str | int, ...], int]] = set()
@@ -804,7 +923,6 @@ def apply_json_member(raw: bytes, plan: dict) -> bytes:
             raise RepairPlanningError("invalid_plan", "The repair preview is invalid.")
         for operation in action.get("operations", []):
             _apply_operation(document, operation, removed, reordered, normalized)
-    return _render_json(document, raw)
 
 
 class RepairService:
@@ -819,12 +937,14 @@ class RepairService:
         validator_version: str,
         log,
         legacy_schemas: dict | None = None,
+        preview_repair=None,
     ) -> None:
         self._config_dir = Path(config_dir)
         self._get_dlc_dir = get_dlc_dir
         self._validate_feedpak = validate_feedpak
         self._validator_version = validator_version
         self._log = log
+        self._preview_repair = preview_repair
         compatibility = legacy_schemas if isinstance(legacy_schemas, dict) else {}
         self._legacy_backup_schemas = frozenset(
             item
@@ -838,10 +958,30 @@ class RepairService:
         )
         self._lock = threading.Lock()
 
-    def preview(self, package: str, rule_code: str) -> dict:
+    def preview(
+        self,
+        package: str,
+        rule_code: str,
+        *,
+        start_seconds: float | None = None,
+    ) -> dict:
         """Return a bounded, read-only summary bound to current package bytes."""
         with self._lock:
             _root, package_path, package_name = self._resolve_package(package)
+            media_repair = self._is_preview_repair(rule_code)
+            if media_repair:
+                internal = self._preview_repair.preview(
+                    package_path,
+                    package_name,
+                    rule_code,
+                    lambda member_path, limit: self._read_member(
+                        package_path, member_path, limit
+                    ),
+                    catalog_version=REPAIR_CATALOG_VERSION,
+                    validator_version=self._validator_version,
+                    start_seconds=start_seconds,
+                )
+                return self._public_plan(internal)
             internal = self._plan_package(package_path, package_name, rule_code)
             return self._public_plan(internal)
 
@@ -852,6 +992,26 @@ class RepairService:
             internal = self._plan_all_package(package_path, package_name)
             return self._public_plan(internal)
 
+    def preview_selected(
+        self,
+        package: str,
+        rule_codes: Iterable[str],
+    ) -> dict:
+        """Preview only scan-reported safe rules for batch preflight.
+
+        The completed scan and its package signature define the eligible rule
+        set. Replanning those rules from current source bytes preserves the
+        authoritative safety check without traversing unrelated repair types.
+        """
+        with self._lock:
+            _root, package_path, package_name = self._resolve_package(package)
+            internal = self._plan_all_package(
+                package_path,
+                package_name,
+                rule_codes=rule_codes,
+            )
+            return self._public_plan(internal)
+
     def apply(
         self,
         package: str,
@@ -859,29 +1019,181 @@ class RepairService:
         plan_id: str,
         *,
         deep_audio: bool = False,
+        verified_before_report: dict | None = None,
+        source_guard=None,
     ) -> dict:
         """Rebuild, validate, back up, and atomically commit one package repair."""
         if not isinstance(plan_id, str) or len(plan_id) != 64:
             raise RepairPlanningError("invalid_plan", "Review the safe fix again before applying it.")
+        transaction_started = time.monotonic()
         with self._lock:
             _root, package_path, package_name = self._resolve_package(package)
-            internal = self._plan_package(package_path, package_name, rule_code)
-            if internal["plan_id"] != plan_id:
-                raise RepairPlanningError(
-                    "source_changed",
-                    "The song changed after this preview. Review the safe fix again before applying it.",
+            media_repair = self._is_preview_repair(rule_code)
+            if media_repair:
+                internal = self._preview_repair.claim(
+                    package_path,
+                    package_name,
+                    rule_code,
+                    plan_id,
+                    lambda member_path, limit: self._read_member(
+                        package_path, member_path, limit
+                    ),
                 )
+            else:
+                internal = self._plan_package(package_path, package_name, rule_code)
+                if internal["plan_id"] != plan_id:
+                    raise RepairPlanningError(
+                        "source_changed",
+                        "The song changed after this preview. Review the safe fix again before applying it.",
+                    )
             if not internal["available"]:
                 raise RepairPlanningError(
                     "nothing_to_repair",
                     "The selected safe issue is no longer present in this package.",
                 )
-            return self._apply_internal(
+            result = self._apply_internal(
                 package_path,
                 package_name,
                 internal,
-                deep_audio=deep_audio,
+                deep_audio=bool(deep_audio or media_repair),
+                retain_recovery=not media_repair,
+                verified_before_report=verified_before_report,
+                source_guard=source_guard,
+                transaction_started=transaction_started,
             )
+            if media_repair:
+                self._preview_repair.discard(plan_id)
+            return result
+
+    def preview_audio(self, plan_id: str) -> bytes:
+        """Return one in-memory proposed Ogg clip for the review player."""
+        if not isinstance(plan_id, str) or len(plan_id) != 64 or self._preview_repair is None:
+            raise RepairPlanningError(
+                "invalid_plan", "This proposed preview is unavailable. Generate it again."
+            )
+        return self._preview_repair.audio(plan_id)
+
+    def current_preview_audio(self, package: str) -> bytes:
+        """Return the package's current, bounded Ogg preview for listening only."""
+        with self._lock:
+            _root, package_path, _package_name = self._resolve_package(package)
+            manifest = self._read_repair_manifest(package_path)
+            preview_value = manifest.get("preview")
+            if not isinstance(preview_value, str) or not preview_value.strip():
+                raise RepairPlanningError(
+                    "preview_unavailable",
+                    "This Feedpak does not declare a preview to play.",
+                )
+            preview_path = _validate_member_path(preview_value)
+            if not preview_path.lower().endswith(".ogg"):
+                raise RepairPlanningError(
+                    "preview_unsupported",
+                    "This Feedpak's current preview is not a supported Ogg audio file.",
+                )
+            content = self._read_member(
+                package_path,
+                preview_path,
+                MAX_REPAIR_MEMBER_BYTES,
+            )
+            if not content.startswith(b"OggS"):
+                raise RepairPlanningError(
+                    "preview_unavailable",
+                    "This Feedpak's current preview is not playable Ogg audio.",
+                )
+            return content
+
+    def preview_tool_status(self, package: str) -> dict:
+        """Return scan-independent Preview Creator eligibility for one package."""
+        if self._preview_repair is None:
+            raise RepairPlanningError(
+                "preview_unavailable", "Preview Creator is unavailable."
+            )
+        with self._lock:
+            _root, package_path, package_name = self._resolve_package(package)
+            return self._preview_repair.tool_status(
+                package_path,
+                package_name,
+                lambda member_path, limit: self._read_member(
+                    package_path, member_path, limit
+                ),
+                lambda member_path: self._member_exists(
+                    package_path, member_path
+                ),
+            )
+
+    def apply_automatic_preview(
+        self,
+        package: str,
+        rule_code: str,
+        *,
+        verified_before_report: dict | None = None,
+        source_guard=None,
+    ) -> dict:
+        """Select, validate, and apply one temporary-recovery-protected preview."""
+        if not self._is_preview_repair(rule_code):
+            raise RepairPlanningError(
+                "unsupported_repair",
+                "This finding does not have automatic preview generation.",
+            )
+        transaction_started = time.monotonic()
+        with self._lock:
+            _root, package_path, package_name = self._resolve_package(package)
+            use_verified_report = bool(
+                package_path.is_file()
+                and self._can_reuse_verified_before_report(
+                    verified_before_report,
+                    source_guard,
+                )
+            )
+            if use_verified_report and not source_guard():
+                raise RepairPlanningError(
+                    "source_changed",
+                    "This Feedpak changed after its completed Deep Audio scan. Scan it again before repairing it.",
+                )
+            internal = self._preview_repair.preview(
+                package_path,
+                package_name,
+                rule_code,
+                lambda member_path, limit: self._read_member(
+                    package_path, member_path, limit
+                ),
+                catalog_version=REPAIR_CATALOG_VERSION,
+                validator_version=self._validator_version,
+                verified_before_report=(
+                    verified_before_report if use_verified_report else None
+                ),
+            )
+            plan_id = internal["plan_id"]
+            try:
+                claimed = self._preview_repair.claim(
+                    package_path,
+                    package_name,
+                    rule_code,
+                    plan_id,
+                    lambda member_path, limit: self._read_member(
+                        package_path, member_path, limit
+                    ),
+                )
+                return self._apply_internal(
+                    package_path,
+                    package_name,
+                    claimed,
+                    deep_audio=True,
+                    retain_recovery=False,
+                    verified_before_report=(
+                        verified_before_report if use_verified_report else None
+                    ),
+                    source_guard=source_guard if use_verified_report else None,
+                    transaction_started=transaction_started,
+                )
+            finally:
+                self._preview_repair.discard(plan_id)
+
+    def _is_preview_repair(self, rule_code: str) -> bool:
+        return bool(
+            self._preview_repair is not None
+            and self._preview_repair.supports(rule_code)
+        )
 
     def apply_all(
         self,
@@ -889,6 +1201,9 @@ class RepairService:
         plan_id: str,
         *,
         deep_audio: bool = False,
+        rule_codes: Iterable[str] | None = None,
+        verified_before_report: dict | None = None,
+        source_guard=None,
     ) -> dict:
         """Apply all available safe repairs as one package transaction."""
         if not isinstance(plan_id, str) or len(plan_id) != 64:
@@ -896,9 +1211,14 @@ class RepairService:
                 "invalid_plan",
                 "Review all safe fixes again before applying them.",
             )
+        transaction_started = time.monotonic()
         with self._lock:
             _root, package_path, package_name = self._resolve_package(package)
-            internal = self._plan_all_package(package_path, package_name)
+            internal = self._plan_all_package(
+                package_path,
+                package_name,
+                rule_codes=rule_codes,
+            )
             if internal["plan_id"] != plan_id:
                 raise RepairPlanningError(
                     "source_changed",
@@ -914,6 +1234,57 @@ class RepairService:
                 package_name,
                 internal,
                 deep_audio=deep_audio,
+                verified_before_report=verified_before_report,
+                source_guard=source_guard,
+                transaction_started=transaction_started,
+            )
+
+    def apply_selected(
+        self,
+        package: str,
+        rule_codes: Iterable[str],
+        *,
+        deep_audio: bool = False,
+        verified_before_report: dict | None = None,
+        source_guard=None,
+    ) -> dict:
+        """Plan and immediately apply scan-selected safe rules.
+
+        Batch review is bound to a completed scan signature and a fixed rule
+        set. Rebuilding that same selected plan inside the mutation lock keeps
+        the authoritative source-byte, blocker, candidate-validation, backup,
+        and atomic-commit checks without doing the expensive work twice.
+        """
+        transaction_started = time.monotonic()
+        with self._lock:
+            _root, package_path, package_name = self._resolve_package(package)
+            internal = self._plan_all_package(
+                package_path,
+                package_name,
+                rule_codes=rule_codes,
+            )
+            blockers = internal.get("blockers") or []
+            if blockers:
+                first = blockers[0]
+                raise RepairPlanningError(
+                    str(first.get("code") or "repair_blocked"),
+                    str(first.get("message") or (
+                        "A referenced song-data file cannot be changed safely."
+                    )),
+                )
+            if not internal["available"]:
+                raise RepairPlanningError(
+                    "nothing_to_repair",
+                    "No scan-selected safe repairs are currently available in this package.",
+                )
+            return self._apply_internal(
+                package_path,
+                package_name,
+                internal,
+                deep_audio=deep_audio,
+                verified_before_report=verified_before_report,
+                source_guard=source_guard,
+                transaction_started=transaction_started,
             )
 
     def _apply_internal(
@@ -923,8 +1294,17 @@ class RepairService:
         internal: dict,
         *,
         deep_audio: bool,
+        retain_recovery: bool = True,
+        verified_before_report: dict | None = None,
+        source_guard=None,
+        transaction_started: float | None = None,
     ) -> dict:
         """Validate and commit one already-recalculated package plan."""
+        if (
+            not isinstance(transaction_started, (int, float))
+            or not math.isfinite(transaction_started)
+        ):
+            transaction_started = time.monotonic()
         originals = {
             item["member_path"]: item["raw"] for item in internal["_members"]
         }
@@ -936,18 +1316,57 @@ class RepairService:
             )
             for item in internal["_members"]
         }
-        before = self._validate_feedpak(
-            package_path, package_name, deep_audio=bool(deep_audio)
+        song_data_only = all(
+            item.get("source_kind") in {
+                "arrangement", "timeline", "lyrics", "drum_tab"
+            }
+            for item in internal["_members"]
         )
+        reuse_verified_before = bool(
+            package_path.is_file()
+            and self._can_reuse_verified_before_report(
+                verified_before_report,
+                source_guard,
+            )
+        )
+        reuse_deep_audio = bool(
+            deep_audio
+            and song_data_only
+            # Archived Feedpaks receive a complete candidate CRC pass below.
+            # Unpacked directory packages have no equivalent archive checksum,
+            # so keep the conservative full Deep Audio validation for them.
+            and package_path.is_file()
+            and reuse_verified_before
+        )
+        if reuse_verified_before:
+            if not source_guard():
+                raise RepairPlanningError(
+                    "source_changed",
+                    "This Feedpak changed after its completed Deep Audio scan. Scan it again before repairing it.",
+                )
+            before = copy.deepcopy(verified_before_report)
+        else:
+            before = self._validate_feedpak(
+                package_path, package_name, deep_audio=bool(deep_audio)
+            )
         candidate, cleanup = self._candidate(package_path, replacements)
         try:
             after = self._validate_feedpak(
-                candidate, package_name, deep_audio=bool(deep_audio)
+                candidate,
+                package_name,
+                deep_audio=bool(deep_audio and not reuse_deep_audio),
             )
+            if reuse_deep_audio:
+                after = self._reuse_unchanged_deep_audio(before, after)
             rule_codes = internal.get("rule_codes")
             if not isinstance(rule_codes, list) or not rule_codes:
                 rule_codes = [internal["rule_code"]]
             self._verify_validation(before, after, rule_codes)
+            if reuse_verified_before and not source_guard():
+                raise RepairPlanningError(
+                    "source_changed",
+                    "This Feedpak changed while its repaired candidate was being checked. Nothing was saved.",
+                )
             backup_id = self._create_backup(
                 package_name,
                 package_path,
@@ -961,13 +1380,69 @@ class RepairService:
         finally:
             cleanup()
 
+        backup_removed = False
+        recovery_bytes_freed = 0
+        backup_cleanup_error = ""
+        if not retain_recovery:
+            try:
+                recovery_bytes_freed = self._delete_backup(backup_id)
+                backup_removed = True
+            except RepairPlanningError as exc:
+                # The validated repair is already committed. Report the rare
+                # cleanup failure accurately without pretending the Feedpak
+                # transaction failed or deleting anything else.
+                backup_cleanup_error = str(exc)
+                self._log.warning(
+                    "Library Doctor completed preview repair for %s but could not remove temporary recovery backup %s: %s",
+                    package_name,
+                    backup_id,
+                    exc,
+                )
+
+        file_handling = dict(internal.get("file_handling") or {})
+        if file_handling:
+            file_handling.update({
+                "backup_created": True,
+                "backup_id": backup_id,
+                "undo_available": bool(retain_recovery or not backup_removed),
+                "backup_retained": not backup_removed,
+                "backup_removed": backup_removed,
+                "backup_cleanup_required": bool(backup_cleanup_error),
+                "backup_cleanup_error": backup_cleanup_error,
+                "backup_size_bytes": self._backup_size(backup_id) or 0,
+                "recovery_bytes_freed": recovery_bytes_freed,
+            })
+            if not retain_recovery:
+                file_handling["summary"] = (
+                    "Library Doctor created and validated a complete candidate before replacing the Feedpak at the same path. "
+                    "Its temporary recovery copy was then removed automatically, so no duplicate song or pending preview backup remains."
+                    if backup_removed else
+                    "The validated preview repair completed at the same Feedpak path, but Library Doctor could not remove its temporary recovery copy automatically. "
+                    "The repaired Feedpak remains active and the recovery copy is available for explicit cleanup."
+                )
+        else:
+            file_handling = self._file_handling(backup_id)
+            file_handling["backup_size_bytes"] = self._backup_size(backup_id) or 0
+        performance = {
+            "elapsed_seconds": round(
+                max(0.0, time.monotonic() - transaction_started), 6
+            ),
+            "deep_audio_requested": bool(deep_audio),
+            "verified_scan_report_reused": reuse_verified_before,
+            "deep_audio_reused": reuse_deep_audio,
+        }
         result = {
             **self._public_plan(internal),
             "applied": True,
             "outcome": "success",
             "backup_id": backup_id,
+            "undo_available": bool(retain_recovery or not backup_removed),
             "report": after,
-            "file_handling": self._file_handling(backup_id),
+            "deep_audio": bool(deep_audio),
+            "deep_audio_reused": reuse_deep_audio,
+            "verified_scan_report_reused": reuse_verified_before,
+            "performance": performance,
+            "file_handling": file_handling,
         }
         result["receipt_saved"] = self._record_history({
             "id": uuid.uuid4().hex,
@@ -988,9 +1463,83 @@ class RepairService:
             "item_name": internal["item_name"],
             "player_result": internal["player_result"],
             "user_value": internal["user_value"],
+            "media": internal.get("media"),
+            "performance": performance,
             "file_handling": result["file_handling"],
         })
         return result
+
+    def _can_reuse_verified_before_report(
+        self,
+        report: dict | None,
+        source_guard,
+    ) -> bool:
+        """Accept only a current-version Deep Audio report with a live guard."""
+        return bool(
+            isinstance(report, dict)
+            and report.get("validator_version") == self._validator_version
+            and isinstance(report.get("features"), dict)
+            and report["features"].get("deep_audio_checked") is True
+            and callable(source_guard)
+        )
+
+    @staticmethod
+    def _reuse_unchanged_deep_audio(before: dict, after: dict) -> dict:
+        """Carry forward Deep Audio facts when every audio byte is unchanged.
+
+        Candidate archive verification separately checks the CRC and size of
+        every untouched member. The standard candidate validation still
+        reparses all changed song data; only media findings and Deep Audio
+        coverage counters come from the signature-bound completed scan. This
+        path is deliberately limited to archives; unpacked directory packages
+        receive a fresh Deep Audio pass.
+        """
+        merged = copy.deepcopy(after)
+        before_findings = before.get("findings")
+        after_findings = after.get("findings")
+        if not isinstance(before_findings, list) or not isinstance(
+            after_findings, list
+        ):
+            return merged
+        media_before = [
+            copy.deepcopy(item)
+            for item in before_findings
+            if isinstance(item, dict)
+            and str(item.get("code") or "").startswith("media.")
+        ]
+        non_media_after = [
+            copy.deepcopy(item)
+            for item in after_findings
+            if not (
+                isinstance(item, dict)
+                and str(item.get("code") or "").startswith("media.")
+            )
+        ]
+        merged["findings"] = non_media_after + media_before
+        counts = {"error": 0, "warning": 0, "info": 0}
+        for finding in merged["findings"]:
+            severity = finding.get("severity") if isinstance(finding, dict) else None
+            if severity in counts:
+                counts[severity] += 1
+        merged["counts"] = counts
+        merged["status"] = (
+            "error" if counts["error"]
+            else "warning" if counts["warning"]
+            else "review" if counts["info"]
+            else "healthy"
+        )
+        before_features = before.get("features")
+        merged_features = merged.get("features")
+        if isinstance(before_features, dict) and isinstance(merged_features, dict):
+            merged_features["deep_audio_checked"] = True
+            merged_features["deep_audio_reused"] = True
+            for key in (
+                "deep_audio_files",
+                "deep_audio_skipped",
+                "deep_audio_unsupported",
+            ):
+                merged_features[key] = int(before_features.get(key) or 0)
+        return merged
 
     def history(self, limit: int = 5) -> dict:
         """Return a small, non-sensitive repair receipt history for the UI."""
@@ -1001,9 +1550,29 @@ class RepairService:
                 items = self._recover_legacy_receipts()
                 if items:
                     self._write_history(items)
+            public_items = []
+            for stored in reversed(items[-safe_limit:]):
+                item = dict(stored)
+                backup_id = item.get("backup_id")
+                if isinstance(backup_id, str) and _BACKUP_ID_RE.fullmatch(backup_id):
+                    backup_size = self._backup_size(backup_id)
+                    retained = backup_size is not None
+                    item["undo_available"] = bool(
+                        retained
+                        and item.get("action") == "repair"
+                        and item.get("outcome") == "success"
+                    )
+                    handling = item.get("file_handling")
+                    if isinstance(handling, dict):
+                        item["file_handling"] = {
+                            **handling,
+                            "backup_retained": retained,
+                            "backup_size_bytes": backup_size or 0,
+                        }
+                public_items.append(item)
             return {
                 "schema": HISTORY_SCHEMA,
-                "items": list(reversed(items[-safe_limit:])),
+                "items": public_items,
             }
 
     def _recover_legacy_receipts(self) -> list[dict]:
@@ -1101,10 +1670,27 @@ class RepairService:
             finally:
                 prepared["_cleanup"]()
 
+            backup_removed = False
+            recovery_bytes_freed = 0
+            try:
+                recovery_bytes_freed = self._delete_backup(backup_id)
+                backup_removed = True
+            except RepairPlanningError as exc:
+                # The exact original has already been restored and validated. A
+                # failed cleanup must not misreport that successful package
+                # transaction or encourage the user to run Undo a second time.
+                self._log.warning(
+                    "Library Doctor restored %s but could not remove redundant recovery backup %s: %s",
+                    prepared["package"],
+                    backup_id,
+                    exc,
+                )
+
             result = {
                 **self._public_restore_plan(prepared),
                 "outcome": "restored",
                 "restored": True,
+                "undo_available": False,
                 "change_kind": prepared["change_kind"],
                 "change_count": prepared["change_count"],
                 "restored_count": prepared["removed_count"],
@@ -1112,10 +1698,35 @@ class RepairService:
                 "file_handling": {
                     "package_replaced": True,
                     "duplicate_library_package_created": False,
-                    "backup_retained": True,
+                    "backup_retained": not backup_removed,
+                    "backup_removed": backup_removed,
+                    "backup_cleanup_failed": not backup_removed,
+                    "recovery_bytes_freed": recovery_bytes_freed,
                     "summary": (
+                        "The generated preview was removed and the exact original manifest was restored at the same Feedpak path. "
+                        "Every other package file was preserved, the redundant recovery copy was removed, "
+                        "and no second song package was added."
+                        if prepared["change_kind"] == "replace_media"
+                        and bool((prepared.get("media") or {}).get("creates_preview"))
+                        and backup_removed else
+                        "The generated preview was removed and the exact original manifest was restored at the same Feedpak path. "
+                        "Every other package file was preserved. The redundant recovery copy could not be removed automatically, "
+                        "but it is no longer needed for Undo."
+                        if prepared["change_kind"] == "replace_media"
+                        and bool((prepared.get("media") or {}).get("creates_preview")) else
+                        "The exact original preview was restored at the same Feedpak path. "
+                        "Every other package file was preserved, the redundant recovery copy was removed, "
+                        "and no second song package was added."
+                        if prepared["change_kind"] == "replace_media" and backup_removed else
+                        "The exact original preview was restored at the same Feedpak path. "
+                        "Every other package file was preserved. The redundant recovery copy could not be removed automatically, "
+                        "but it is no longer needed for Undo."
+                        if prepared["change_kind"] == "replace_media" else
                         "The saved original song data was restored at the same Feedpak path. "
-                        "The recovery backup was kept, and no second song package was added."
+                        "The redundant recovery copy was removed, and no second song package was added."
+                        if backup_removed else
+                        "The saved original song data was restored at the same Feedpak path. "
+                        "The redundant recovery copy could not be removed automatically, but it is no longer needed for Undo."
                     ),
                 },
             }
@@ -1139,9 +1750,137 @@ class RepairService:
                 "item_name": prepared["item_name"],
                 "player_result": prepared["player_result"],
                 "user_value": prepared["user_value"],
+                "media": prepared.get("media"),
                 "file_handling": result["file_handling"],
             })
             return result
+
+    def finalize_backup(self, package: str, backup_id: str) -> dict:
+        """Remove a verified recovery copy without changing the Feedpak.
+
+        A recovery copy can be finalized only while every affected package
+        member still matches either the repaired bytes or the exact restored
+        bytes recorded by that backup. This prevents cleanup from silently
+        discarding the only known original after an unrelated edit.
+        """
+        with self._lock:
+            prepared = self._prepare_finalize_backup(package, backup_id)
+            recovery_bytes_freed = self._delete_backup(backup_id)
+            summary = prepared["summary"]
+            package_state = prepared["package_state"]
+            result = {
+                "id": uuid.uuid4().hex,
+                "action": "finalize",
+                "outcome": "finalized",
+                "completed_at": time.time(),
+                "package": prepared["package"],
+                "title": summary.get("title") or prepared["package"],
+                "artist": summary.get("artist") or "",
+                "rule_code": prepared["rule_code"],
+                "rule_codes": prepared["rule_codes"],
+                "backup_id": backup_id,
+                "undo_available": False,
+                "package_state": package_state,
+                "change_kind": summary.get("change_kind", "repair"),
+                "change_count": int(summary.get("change_count", 0) or 0),
+                "removed_count": int(summary.get("removed_count", 0) or 0),
+                "item_name": summary.get("item_name", "item"),
+                "player_result": summary.get("player_result", ""),
+                "user_value": summary.get("user_value", ""),
+                "media": summary.get("media"),
+                "file_handling": {
+                    "package_replaced": False,
+                    "duplicate_library_package_created": False,
+                    "backup_retained": False,
+                    "backup_removed": True,
+                    "recovery_bytes_freed": recovery_bytes_freed,
+                    "summary": (
+                        "The repaired Feedpak was not changed. Its recovery copy was removed, so this repair can no longer be undone."
+                        if package_state == "repaired" else
+                        "The Feedpak was not changed. Its redundant recovery copy was removed because the original data is already restored."
+                    ),
+                },
+            }
+            result["receipt_saved"] = self._record_history(result)
+            return result
+
+    def preview_finalize_backup(self, package: str, backup_id: str) -> dict:
+        """Verify one recovery copy and report what finalization would remove."""
+        with self._lock:
+            prepared = self._prepare_finalize_backup(package, backup_id)
+            return {
+                key: value
+                for key, value in prepared.items()
+                if key != "summary"
+            }
+
+    def _prepare_finalize_backup(self, package: str, backup_id: str) -> dict:
+        """Verify current member bytes before any irreversible backup removal."""
+        if not isinstance(backup_id, str) or not _BACKUP_ID_RE.fullmatch(backup_id):
+            raise RepairPlanningError("invalid_backup", "The recovery backup is invalid.")
+        _root, package_path, package_name = self._resolve_package(package)
+        metadata, _originals = self._read_backup(backup_id, package_name)
+        states = set()
+        verified_members = []
+        for entry in metadata["members"]:
+            member_path = entry["member_path"]
+            present = self._member_exists(package_path, member_path)
+            current_hash = None
+            if present:
+                current = self._read_member(
+                    package_path,
+                    member_path,
+                    MAX_REPAIR_MEMBER_BYTES,
+                )
+                current_hash = hashlib.sha256(current).hexdigest()
+            if (
+                present == entry["repaired_present"]
+                and current_hash == entry["repaired_sha256"]
+            ):
+                states.add("repaired")
+            elif (
+                present == entry["original_present"]
+                and current_hash == entry["original_sha256"]
+            ):
+                states.add("restored")
+            else:
+                raise RepairPlanningError(
+                    "package_changed",
+                    "This song changed after the repair. Its recovery copy was kept so no saved original data is lost.",
+                )
+            verified_members.append({
+                "member_path": member_path,
+                "present": present,
+                "sha256": current_hash,
+            })
+        if len(states) > 1:
+            raise RepairPlanningError(
+                "package_changed",
+                "This song contains a mixture of repaired and original files. Its recovery copy was kept for manual review.",
+            )
+
+        summary = metadata.get("summary")
+        if not isinstance(summary, dict):
+            summary = {}
+        rule_codes = metadata.get("rule_codes")
+        if not isinstance(rule_codes, list):
+            rule_codes = []
+        unsigned = {
+            "schema": "library_doctor.finalize_plan.v1",
+            "package": package_name,
+            "backup_id": backup_id,
+            "package_state": next(iter(states), "restored"),
+            "members": verified_members,
+        }
+        return {
+            **unsigned,
+            "plan_id": _digest_json(unsigned),
+            "rule_code": metadata.get("rule_code"),
+            "rule_codes": rule_codes,
+            "member_count": len(verified_members),
+            "recovery_bytes": int(self._backup_size(backup_id) or 0),
+            "summary": summary,
+        }
 
     def preview_restore(
         self,
@@ -1178,18 +1917,31 @@ class RepairService:
         source_members = []
         for entry in metadata["members"]:
             member_path = entry["member_path"]
-            raw = self._read_member(package_path, member_path, MAX_REPAIR_TEXT_BYTES)
-            current_hash = hashlib.sha256(raw).hexdigest()
-            if current_hash != entry["repaired_sha256"]:
-                raise RepairPlanningError(
-                    "package_changed",
-                    "This song changed after the repair, so Library Doctor will not overwrite it. Scan it again and review it manually.",
+            if entry["repaired_present"]:
+                raw = self._read_member(
+                    package_path, member_path, MAX_REPAIR_MEMBER_BYTES
                 )
-            current[member_path] = raw
+                current_hash = hashlib.sha256(raw).hexdigest()
+                if current_hash != entry["repaired_sha256"]:
+                    raise RepairPlanningError(
+                        "package_changed",
+                        "This song changed after the repair, so Library Doctor will not overwrite it. Scan it again and review it manually.",
+                    )
+                current[member_path] = raw
+            else:
+                if self._member_exists(package_path, member_path):
+                    raise RepairPlanningError(
+                        "package_changed",
+                        "This song changed after the repair, so Library Doctor will not overwrite it. Scan it again and review it manually.",
+                    )
+                current_hash = None
+                current[member_path] = None
             source_members.append({
                 "member_path": member_path,
                 "repaired_sha256": current_hash,
                 "original_sha256": entry["original_sha256"],
+                "repaired_present": entry["repaired_present"],
+                "original_present": entry["original_present"],
             })
 
         before = self._validate_feedpak(
@@ -1229,6 +1981,12 @@ class RepairService:
             if not isinstance(backup_summary, dict):
                 backup_summary = {}
             combined_repair = rule_code == ALL_SAFE_RULE_CODE
+            media_repair = backup_summary.get("change_kind") == "replace_media"
+            media_summary = backup_summary.get("media")
+            created_preview = bool(
+                isinstance(media_summary, dict)
+                and media_summary.get("creates_preview")
+            )
             unsigned = {
                 "schema": "library_doctor.restore_plan.v1",
                 "package": package_name,
@@ -1260,6 +2018,10 @@ class RepairService:
                 "member_count": len(source_members),
                 "item_name": backup_summary.get("item_name", "item"),
                 "player_result": (
+                    "After Undo, the generated preview is removed and library browsing returns to having no embedded preview for this Feedpak."
+                    if media_repair and created_preview else
+                    "After Undo, library browsing uses the exact original preview again; the repaired preview recommendation is expected to return."
+                    if media_repair else
                     "After Undo, the package contains all original song data again; "
                     "the repaired findings and related findings may return in the refreshed report."
                     if combined_repair else
@@ -1267,13 +2029,24 @@ class RepairService:
                     "the repaired finding and related findings may return in the refreshed report."
                 ),
                 "user_value": (
+                    "This removes the newly created preview and restores the exact manifest that existed before the repair."
+                    if media_repair and created_preview else
+                    "This restores the exact preview saved before audio conversion if the proposed excerpt did not represent the song well."
+                    if media_repair else
                     "This returns the entire combined repair to its exact saved starting point if the song did not behave as expected."
                     if combined_repair else
                     "This returns the song to the exact data saved before the repair if the repaired song did not behave as expected."
                 ),
+                "media": media_summary,
                 "file_handling": (
+                    "The generated preview will be removed and the exact saved manifest will be restored at the same Feedpak path. "
+                    "Other package members are preserved. After validation, the redundant recovery copy is removed."
+                    if media_repair and created_preview else
+                    "The saved original preview will replace only the repaired preview at the same Feedpak path. "
+                    "Other package members are preserved. After the original is restored and validated, the redundant recovery copy is removed."
+                    if media_repair else
                     "The saved original song-data files will replace only the repaired files at the same Feedpak path. "
-                    "Other package members are preserved, the recovery backup is retained, and no duplicate song is created."
+                    "Other package members are preserved. After the original is restored and validated, the redundant recovery copy is removed."
                 ),
                 "_package_path": package_path,
                 "_candidate": candidate,
@@ -1418,6 +2191,9 @@ class RepairService:
         manifest: dict,
         source_kind: str,
         rule_code: str | None = None,
+        parsed_json_cache: dict[
+            str, tuple[str, object | None, str | None]
+        ] | None = None,
     ) -> list[str]:
         """Resolve the active files for one repair role.
 
@@ -1430,6 +2206,30 @@ class RepairService:
         """
         if source_kind != "timeline":
             return self._repair_member_paths(manifest, source_kind)
+
+        def load_json(
+            member_path: str,
+        ) -> tuple[str, object | None, str | None]:
+            if parsed_json_cache is not None and member_path in parsed_json_cache:
+                return parsed_json_cache[member_path]
+            try:
+                raw = self._read_member(
+                    package_path, member_path, MAX_REPAIR_TEXT_BYTES
+                )
+            except RepairPlanningError:
+                result = ("unavailable", None, None)
+            else:
+                source_sha256 = hashlib.sha256(raw).hexdigest()
+                try:
+                    data = _parse_json(raw)
+                    _inspect_structure(data)
+                except RepairPlanningError:
+                    result = ("invalid", None, source_sha256)
+                else:
+                    result = ("valid", data, source_sha256)
+            if parsed_json_cache is not None:
+                parsed_json_cache[member_path] = result
+            return result
 
         timeline_field = {
             "timeline.duplicate-beat": "beats",
@@ -1450,24 +2250,18 @@ class RepairService:
                 # the normal JSONC blocker instead of editing legacy data.
                 if member_path.lower().endswith(".jsonc"):
                     return [member_path]
-                try:
-                    raw = self._read_member(
-                        package_path, member_path, MAX_REPAIR_TEXT_BYTES
-                    )
-                except RepairPlanningError:
+                status, data, _source_sha256 = load_json(member_path)
+                if status == "unavailable":
                     # An unavailable or oversized sidecar cannot override the
                     # legacy grid in FeedBack, so continue to its fallback.
-                    raw = None
-                if raw is not None:
-                    try:
-                        data = _parse_json(raw)
-                        _inspect_structure(data)
-                    except RepairPlanningError:
-                        # The validator may be more permissive about a value
-                        # (for example duplicate keys or non-finite numbers).
-                        # Refuse this declared sidecar rather than risk editing
-                        # a legacy grid that FeedBack could consider inactive.
-                        return [member_path]
+                    data = None
+                elif status == "invalid":
+                    # The validator may be more permissive about a value
+                    # (for example duplicate keys or non-finite numbers).
+                    # Refuse this declared sidecar rather than risk editing
+                    # a legacy grid that FeedBack could consider inactive.
+                    return [member_path]
+                else:
                     if (
                         isinstance(data, dict)
                         and isinstance(data.get("beats"), list)
@@ -1494,16 +2288,10 @@ class RepairService:
                 # We cannot safely determine whether this is the active legacy
                 # grid without a comment-preserving parser/writer.
                 return [member_path]
-            try:
-                raw = self._read_member(
-                    package_path, member_path, MAX_REPAIR_TEXT_BYTES
-                )
-            except RepairPlanningError:
+            status, data, _source_sha256 = load_json(member_path)
+            if status == "unavailable":
                 continue
-            try:
-                data = _parse_json(raw)
-                _inspect_structure(data)
-            except RepairPlanningError:
+            if status == "invalid":
                 # Do not skip past a readable arrangement whose permissively
                 # parsed contents could be FeedBack's active legacy grid.
                 return [member_path]
@@ -1546,7 +2334,12 @@ class RepairService:
                 })
                 continue
             if plan["actions"]:
-                planned.append({"member_path": member_path, "raw": raw, "plan": plan})
+                planned.append({
+                    "member_path": member_path,
+                    "raw": raw,
+                    "plan": plan,
+                    "source_kind": definition["source_kind"],
+                })
 
         removed_count = sum(
             action["removed_count"]
@@ -1600,18 +2393,60 @@ class RepairService:
             "_members": planned,
         }
 
-    def _plan_all_package(self, package_path: Path, package_name: str) -> dict:
-        """Build one ordered plan for every supported safe repair in a package."""
+    @staticmethod
+    def _ordered_safe_rule_codes(
+        rule_codes: Iterable[str] | None,
+    ) -> tuple[str, ...]:
+        if rule_codes is None:
+            return _ALL_SAFE_RULE_ORDER
+        if isinstance(rule_codes, (str, bytes)):
+            raise RepairPlanningError(
+                "invalid_rule_selection",
+                "Choose one or more supported safe repair rules.",
+            )
+        try:
+            requested = set(rule_codes)
+        except TypeError as exc:
+            raise RepairPlanningError(
+                "invalid_rule_selection",
+                "Choose one or more supported safe repair rules.",
+            ) from exc
+        if not requested or not all(isinstance(code, str) for code in requested):
+            raise RepairPlanningError(
+                "invalid_rule_selection",
+                "Choose one or more supported safe repair rules.",
+            )
+        unsupported = requested.difference(_ALL_SAFE_RULE_ORDER)
+        if unsupported:
+            raise RepairPlanningError(
+                "unsupported_repair",
+                "The selected batch contains a rule without a safe automatic repair.",
+            )
+        return tuple(code for code in _ALL_SAFE_RULE_ORDER if code in requested)
+
+    def _plan_all_package(
+        self,
+        package_path: Path,
+        package_name: str,
+        *,
+        rule_codes: Iterable[str] | None = None,
+    ) -> dict:
+        """Build one dependency-ordered plan for the requested safe repairs."""
+        requested_rule_codes = self._ordered_safe_rule_codes(rule_codes)
         manifest = self._read_repair_manifest(package_path)
         member_sources: dict[str, set[str]] = {}
         member_rules: dict[str, set[str]] = {}
-        for rule_code in _ALL_SAFE_RULE_ORDER:
+        parsed_json_cache: dict[
+            str, tuple[str, object | None, str | None]
+        ] = {}
+        for rule_code in requested_rule_codes:
             definition = _REPAIR_BY_RULE[rule_code]
             for member_path in self._resolved_repair_member_paths(
                 package_path,
                 manifest,
                 definition.source_kind,
                 rule_code,
+                parsed_json_cache,
             ):
                 member_sources.setdefault(member_path, set()).add(
                     definition.source_kind
@@ -1628,7 +2463,7 @@ class RepairService:
                 "musical_positions": 0,
                 "members": set(),
             }
-            for rule_code in _ALL_SAFE_RULE_ORDER
+            for rule_code in requested_rule_codes
         }
         for member_path, source_kinds in member_sources.items():
             compatible_legacy_timeline = source_kinds == {"arrangement", "timeline"}
@@ -1652,22 +2487,50 @@ class RepairService:
                 original_raw = self._read_member(
                     package_path, member_path, MAX_REPAIR_TEXT_BYTES
                 )
-                candidate_raw = original_raw
+                safe_member_path = _validate_member_path(member_path)
+                if safe_member_path.lower().endswith(".jsonc"):
+                    raise RepairPlanningError(
+                        "jsonc_requires_lossless_writer",
+                        "Commented JSON cannot be repaired until comments can be preserved.",
+                    )
+                if not safe_member_path.lower().endswith(".json"):
+                    raise RepairPlanningError(
+                        "unsupported_text_format",
+                        "Automatic song-data repairs currently require an ordinary JSON file.",
+                    )
+                cached_status, cached_document, cached_sha256 = parsed_json_cache.get(
+                    member_path, ("unavailable", None, None)
+                )
+                if (
+                    cached_status == "valid"
+                    and cached_sha256 == hashlib.sha256(original_raw).hexdigest()
+                ):
+                    document = copy.deepcopy(cached_document)
+                else:
+                    document = _parse_json(original_raw)
+                    _inspect_structure(document)
+                expected_shape = list if source_kind == "lyrics" else dict
+                if not isinstance(document, expected_shape):
+                    raise RepairPlanningError(
+                        "invalid_document_shape",
+                        "The song file does not have the expected JSON structure for this repair.",
+                    )
                 steps = []
-                for rule_code in _ALL_SAFE_RULE_ORDER:
+                for rule_code in requested_rule_codes:
                     definition = _REPAIR_BY_RULE[rule_code]
                     if rule_code not in member_rules[member_path]:
                         continue
-                    plan = plan_json_member(
-                        candidate_raw,
-                        member_path=member_path,
+                    plan = _plan_json_document(
+                        document,
+                        raw=original_raw,
+                        safe_member_path=safe_member_path,
                         source_kind=definition.source_kind,
                         validator_version=self._validator_version,
-                        rule_code=rule_code,
+                        definition=definition,
                     )
                     if not plan["actions"]:
                         continue
-                    candidate_raw = apply_json_member(candidate_raw, plan)
+                    _apply_plan_actions_to_document(document, plan)
                     steps.append({"rule_code": rule_code, "plan": plan})
                     rule_total = totals[rule_code]
                     rule_total["members"].add(member_path)
@@ -1678,6 +2541,9 @@ class RepairService:
                         rule_total["removed_count"] += action["removed_count"]
                         rule_total["arrays_affected"] += action["arrays_affected"]
                         rule_total["musical_positions"] += action["musical_positions"]
+                candidate_raw = (
+                    _render_json(document, original_raw) if steps else original_raw
+                )
             except RepairPlanningError as exc:
                 blockers.append({
                     "member_path": member_path,
@@ -1696,7 +2562,7 @@ class RepairService:
                 })
 
         repair_summaries = []
-        for rule_code in _ALL_SAFE_RULE_ORDER:
+        for rule_code in requested_rule_codes:
             rule_total = totals[rule_code]
             if not rule_total["change_count"]:
                 continue
@@ -1720,6 +2586,7 @@ class RepairService:
             "validator_version": self._validator_version,
             "package": package_name,
             "rule_code": ALL_SAFE_RULE_CODE,
+            "requested_rule_codes": list(requested_rule_codes),
             "rule_codes": rule_codes,
             "member_plans": [
                 {
@@ -1775,13 +2642,68 @@ class RepairService:
             "duplicate_library_package_created": False,
             "backup_created": backup_id is not None,
             "backup_id": backup_id,
+            "undo_available": True,
+            "backup_retained": backup_id is not None,
             "backup_contents": "original_changed_song_data_files",
             "summary": (
                 "Library Doctor builds and validates a complete candidate first. Only then does it replace "
                 "the existing Feedpak at the same path. It does not add a second playable song to the library. "
-                "The original changed song-data files are kept in private recovery storage."
+                "The original changed package files are kept in private recovery storage."
             ),
         }
+
+    def _backup_size(self, backup_id: str) -> int | None:
+        if not _BACKUP_ID_RE.fullmatch(backup_id):
+            return None
+        backup_dir = self._config_dir / "library_doctor" / "repair_backups"
+        destination = backup_dir / f"{backup_id}.zip"
+        try:
+            destination.resolve(strict=True).relative_to(backup_dir.resolve(strict=True))
+            return destination.stat().st_size
+        except (OSError, ValueError):
+            return None
+
+    def _delete_backup(self, backup_id: str) -> int:
+        if not isinstance(backup_id, str) or not _BACKUP_ID_RE.fullmatch(backup_id):
+            raise RepairPlanningError("invalid_backup", "The recovery backup is invalid.")
+        backup_dir = self._config_dir / "library_doctor" / "repair_backups"
+        destination = backup_dir / f"{backup_id}.zip"
+        try:
+            destination.resolve(strict=True).relative_to(backup_dir.resolve(strict=True))
+            size = destination.stat().st_size
+            destination.unlink()
+            return size
+        except FileNotFoundError as exc:
+            raise RepairPlanningError(
+                "backup_unavailable", "The recovery backup no longer exists."
+            ) from exc
+        except (OSError, ValueError) as exc:
+            raise RepairPlanningError(
+                "backup_cleanup_failed",
+                "The recovery backup could not be removed. No Feedpak content was removed or restored.",
+            ) from exc
+
+    @staticmethod
+    def _member_exists(package_path: Path, member_path: str) -> bool:
+        safe_path = _validate_member_path(member_path)
+        if package_path.is_dir():
+            target = package_path.joinpath(*PurePosixPath(safe_path).parts)
+            try:
+                resolved = target.resolve(strict=False)
+                resolved.relative_to(package_path.resolve(strict=True))
+                return resolved.is_file() and not target.is_symlink()
+            except (OSError, ValueError):
+                return False
+        try:
+            with zipfile.ZipFile(package_path, "r") as archive:
+                info = archive.getinfo(safe_path)
+                return not info.is_dir()
+        except KeyError:
+            return False
+        except (OSError, RuntimeError, zipfile.BadZipFile, zipfile.LargeZipFile) as exc:
+            raise RepairPlanningError(
+                "package_unreadable", "The package archive cannot be read safely for repair."
+            ) from exc
 
     @staticmethod
     def _read_member(package_path: Path, member_path: str, limit: int) -> bytes:
@@ -1861,7 +2783,11 @@ class RepairService:
                 shutil.copytree(package_path, candidate, copy_function=link_or_copy, symlinks=True)
                 for member_path, raw in replacements.items():
                     target = candidate.joinpath(*PurePosixPath(member_path).parts)
-                    self._atomic_write(target, raw)
+                    if raw is None:
+                        target.unlink(missing_ok=True)
+                    else:
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        self._atomic_write(target, raw)
             except (OSError, shutil.Error) as exc:
                 shutil.rmtree(temporary_root, ignore_errors=True)
                 raise RepairPlanningError(
@@ -1881,15 +2807,24 @@ class RepairService:
                         target.comment = source.comment
                         for info in infos:
                             if info.filename in replacements:
-                                target.writestr(info, replacements[info.filename])
+                                replacement = replacements[info.filename]
+                                if replacement is not None:
+                                    target.writestr(info, replacement)
                             elif info.is_dir():
                                 target.writestr(info, b"")
                             else:
                                 with source.open(info, "r") as input_stream:
                                     with target.open(info, "w", force_zip64=True) as output_stream:
                                         shutil.copyfileobj(input_stream, output_stream, length=1024 * 1024)
+                        existing = set(names)
+                        for member_path, raw in replacements.items():
+                            if member_path in existing or raw is None:
+                                continue
+                            info = zipfile.ZipInfo(member_path)
+                            info.compress_type = zipfile.ZIP_DEFLATED
+                            target.writestr(info, raw)
                 shutil.copystat(package_path, candidate)
-                self._verify_archive_candidate(package_path, candidate, set(replacements))
+                self._verify_archive_candidate(package_path, candidate, replacements)
             except RepairPlanningError:
                 shutil.rmtree(temporary_root, ignore_errors=True)
                 raise
@@ -1908,7 +2843,7 @@ class RepairService:
     def _verify_archive_candidate(
         source_path: Path,
         candidate_path: Path,
-        changed_members: set[str],
+        replacements: dict[str, bytes | None],
     ) -> None:
         """Read every candidate member and verify unchanged archive payloads.
 
@@ -1922,16 +2857,26 @@ class RepairService:
             ) as candidate:
                 source_infos = source.infolist()
                 candidate_infos = candidate.infolist()
-                if [item.filename for item in source_infos] != [
-                    item.filename for item in candidate_infos
-                ]:
+                source_names = [item.filename for item in source_infos]
+                expected_names = [
+                    name for name in source_names
+                    if name not in replacements or replacements[name] is not None
+                ]
+                expected_names.extend(
+                    name for name, raw in replacements.items()
+                    if name not in source_names and raw is not None
+                )
+                candidate_names = [item.filename for item in candidate_infos]
+                if candidate_names != expected_names:
                     raise RepairPlanningError(
                         "candidate_integrity_failed",
-                        "The repaired candidate did not preserve every package member, so it was not saved.",
+                        "The repaired candidate did not preserve the expected package members, so it was not saved.",
                     )
-                for original, rebuilt in zip(source_infos, candidate_infos):
-                    if original.filename in changed_members:
+                candidate_by_name = {item.filename: item for item in candidate_infos}
+                for original in source_infos:
+                    if original.filename in replacements:
                         continue
+                    rebuilt = candidate_by_name[original.filename]
                     if (original.file_size, original.CRC) != (rebuilt.file_size, rebuilt.CRC):
                         raise RepairPlanningError(
                             "candidate_integrity_failed",
@@ -1958,7 +2903,31 @@ class RepairService:
         before_codes = _report_codes(before)
         after_codes = _report_codes(after)
         requested = {rule_codes} if isinstance(rule_codes, str) else set(rule_codes)
-        if not requested or not (requested & before_codes):
+        feature_verified = set()
+        if "media.preview-missing" in requested:
+            before_features = before.get("features") if isinstance(before, dict) else {}
+            after_features = after.get("features") if isinstance(after, dict) else {}
+            if (
+                isinstance(before_features, dict)
+                and isinstance(after_features, dict)
+                and not bool(before_features.get("preview_declared"))
+                and bool(after_features.get("preview_declared"))
+                and bool(after_features.get("preview_available"))
+            ):
+                feature_verified.add("media.preview-missing")
+        if "media.preview-regenerate" in requested:
+            before_features = before.get("features") if isinstance(before, dict) else {}
+            after_features = after.get("features") if isinstance(after, dict) else {}
+            if (
+                isinstance(before_features, dict)
+                and isinstance(after_features, dict)
+                and bool(before_features.get("preview_declared"))
+                and bool(before_features.get("preview_available"))
+                and bool(after_features.get("preview_declared"))
+                and bool(after_features.get("preview_available"))
+            ):
+                feature_verified.add("media.preview-regenerate")
+        if not requested or not ((requested & before_codes) | feature_verified):
             raise RepairPlanningError(
                 "nothing_to_repair",
                 "The selected safe issues are no longer present in this package.",
@@ -1967,6 +2936,14 @@ class RepairService:
             raise RepairPlanningError(
                 "verification_failed",
                 "The repaired candidate still contains a selected safe issue.",
+            )
+        if "media.preview-regenerate" in requested and after_codes & {
+            "media.preview-too-short",
+            "media.preview-too-long",
+        }:
+            raise RepairPlanningError(
+                "verification_failed",
+                "The replacement preview did not pass Library Doctor's preview checks.",
             )
         introduced = sorted(after_codes - before_codes)
         if introduced:
@@ -2015,16 +2992,26 @@ class RepairService:
                     "removed_count", "musical_positions",
                     "arrays_affected", "member_count", "rule_count",
                     "repair_summaries", "player_result", "user_value",
+                    "media", "artist",
                 )
             },
             "members": [],
         }
         for index, (member_path, raw) in enumerate(originals.items()):
+            replacement = replacements[member_path]
+            original_present = raw is not None
+            repaired_present = replacement is not None
             metadata["members"].append({
                 "member_path": member_path,
-                "backup_entry": f"original/{index}.bin",
-                "original_sha256": hashlib.sha256(raw).hexdigest(),
-                "repaired_sha256": hashlib.sha256(replacements[member_path]).hexdigest(),
+                "backup_entry": f"original/{index}.bin" if original_present else None,
+                "original_present": original_present,
+                "repaired_present": repaired_present,
+                "original_sha256": (
+                    hashlib.sha256(raw).hexdigest() if original_present else None
+                ),
+                "repaired_sha256": (
+                    hashlib.sha256(replacement).hexdigest() if repaired_present else None
+                ),
             })
         try:
             with zipfile.ZipFile(temporary, "w", compression=zipfile.ZIP_DEFLATED) as archive:
@@ -2033,7 +3020,8 @@ class RepairService:
                     json.dumps(metadata, ensure_ascii=False, indent=2).encode("utf-8"),
                 )
                 for entry, raw in zip(metadata["members"], originals.values()):
-                    archive.writestr(entry["backup_entry"], raw)
+                    if entry["original_present"]:
+                        archive.writestr(entry["backup_entry"], raw)
             with temporary.open("r+b") as stream:
                 os.fsync(stream.fileno())
             os.replace(temporary, destination)
@@ -2044,7 +3032,9 @@ class RepairService:
             ) from exc
         return backup_id
 
-    def _read_backup(self, backup_id: str, package_name: str) -> tuple[dict, dict[str, bytes]]:
+    def _read_backup(
+        self, backup_id: str, package_name: str
+    ) -> tuple[dict, dict[str, bytes | None]]:
         backup_dir = self._config_dir / "library_doctor" / "repair_backups"
         destination = backup_dir / f"{backup_id}.zip"
         try:
@@ -2068,6 +3058,7 @@ class RepairService:
                 metadata = json.loads(archive.read(info).decode("utf-8"))
                 if not isinstance(metadata, dict) or metadata.get("schema") not in {
                     "library_doctor.repair_backup.v1",
+                    "library_doctor.repair_backup.v2",
                     BACKUP_SCHEMA,
                     *self._legacy_backup_schemas,
                 }:
@@ -2084,26 +3075,50 @@ class RepairService:
                     if not isinstance(entry, dict):
                         raise RepairPlanningError("backup_unreadable", "The recovery backup is invalid.")
                     member_path = _validate_member_path(entry.get("member_path"))
-                    backup_entry = _validate_member_path(entry.get("backup_entry"))
+                    original_present = entry.get("original_present", True) is True
+                    repaired_present = entry.get("repaired_present", True) is True
+                    backup_entry = (
+                        _validate_member_path(entry.get("backup_entry"))
+                        if original_present else None
+                    )
                     original_hash = entry.get("original_sha256")
                     repaired_hash = entry.get("repaired_sha256")
                     if (
-                        not isinstance(original_hash, str)
-                        or not isinstance(repaired_hash, str)
-                        or not re.fullmatch(r"[0-9a-f]{64}", original_hash)
-                        or not re.fullmatch(r"[0-9a-f]{64}", repaired_hash)
+                        (
+                            original_present
+                            and (
+                                not isinstance(original_hash, str)
+                                or not re.fullmatch(r"[0-9a-f]{64}", original_hash)
+                            )
+                        )
+                        or (not original_present and original_hash is not None)
+                        or (
+                            repaired_present
+                            and (
+                                not isinstance(repaired_hash, str)
+                                or not re.fullmatch(r"[0-9a-f]{64}", repaired_hash)
+                            )
+                        )
+                        or (not repaired_present and repaired_hash is not None)
                         or member_path in originals
-                        or not backup_entry.startswith("original/")
+                        or (
+                            original_present
+                            and not backup_entry.startswith("original/")
+                        )
                     ):
                         raise RepairPlanningError("backup_unreadable", "The recovery backup is invalid.")
-                    member_info = archive.getinfo(backup_entry)
-                    if member_info.is_dir() or member_info.file_size > MAX_REPAIR_TEXT_BYTES:
-                        raise RepairPlanningError("backup_unreadable", "The recovery backup is invalid.")
-                    raw = archive.read(member_info)
-                    if hashlib.sha256(raw).hexdigest() != original_hash:
-                        raise RepairPlanningError(
-                            "backup_unreadable", "The recovery backup failed its integrity check."
-                        )
+                    raw = None
+                    if original_present:
+                        member_info = archive.getinfo(backup_entry)
+                        if member_info.is_dir() or member_info.file_size > MAX_REPAIR_MEMBER_BYTES:
+                            raise RepairPlanningError("backup_unreadable", "The recovery backup is invalid.")
+                        raw = archive.read(member_info)
+                        if hashlib.sha256(raw).hexdigest() != original_hash:
+                            raise RepairPlanningError(
+                                "backup_unreadable", "The recovery backup failed its integrity check."
+                            )
+                    entry["original_present"] = original_present
+                    entry["repaired_present"] = repaired_present
                     originals[member_path] = raw
                 return metadata, originals
         except RepairPlanningError:
@@ -2180,14 +3195,23 @@ class RepairService:
         try:
             for member_path, raw in replacements.items():
                 target = package_path.joinpath(*PurePosixPath(member_path).parts)
-                self._atomic_write(target, raw)
+                if raw is None:
+                    target.unlink(missing_ok=True)
+                else:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    self._atomic_write(target, raw)
                 committed.append(member_path)
         except (OSError, RepairPlanningError) as exc:
             rollback_failed = False
             for member_path in reversed(committed):
                 try:
                     target = package_path.joinpath(*PurePosixPath(member_path).parts)
-                    self._atomic_write(target, originals[member_path])
+                    original = originals[member_path]
+                    if original is None:
+                        target.unlink(missing_ok=True)
+                    else:
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        self._atomic_write(target, original)
                 except Exception:
                     rollback_failed = True
                     self._log.error(
@@ -2284,6 +3308,27 @@ def plan_json_member(
             "invalid_document_shape",
             "The song file does not have the expected JSON structure for this repair.",
         )
+
+    return _plan_json_document(
+        document,
+        raw=raw,
+        safe_member_path=safe_member_path,
+        source_kind=source_kind,
+        validator_version=validator_version,
+        definition=definition,
+    )
+
+
+def _plan_json_document(
+    document,
+    *,
+    raw: bytes,
+    safe_member_path: str,
+    source_kind: str,
+    validator_version: str,
+    definition: RepairDefinition,
+) -> dict:
+    """Plan one rule against an already parsed and structure-checked document."""
 
     if definition.rule_code == "chart.negative-muted-fret":
         operations = _plan_muted_negative_frets(document)
@@ -2624,79 +3669,37 @@ def _plan_redundant_handshapes(
 ) -> list[DeleteRedundantHandshapes]:
     if span_kind not in {"zero_length", "reversed"}:
         raise ValueError("unsupported redundant handshape span kind")
-    operations = []
-    unsafe_found = False
-    for parent_path, container in _arrangement_containers(document):
-        handshapes = container.get("handshapes")
-        if not isinstance(handshapes, list):
-            continue
-        chords = container.get("chords")
-        match_groups = []
-        for handshape_index, handshape in enumerate(handshapes):
-            if span_kind == "zero_length":
-                reported = _reported_zero_length_handshape(handshape)
-            else:
-                if not _reported_invalid_handshape_span(handshape):
-                    continue
-                reported = _reported_reversed_handshape(handshape)
-            if not reported:
-                if span_kind == "reversed":
-                    unsafe_found = True
-                continue
-            handshape_identity = _redundant_handshape_identity(
-                handshape, span_kind=span_kind
-            )
-            if handshape_identity is None or not isinstance(chords, list):
-                unsafe_found = True
-                continue
-            matching_chords = [
-                (chord_index, chord)
-                for chord_index, chord in enumerate(chords)
-                if _chord_matches_handshape(chord, handshape)
-            ]
-            if len(matching_chords) != 1:
-                unsafe_found = True
-                continue
-            chord_index, chord = matching_chords[0]
-            if span_kind == "reversed" and not _strict_reversed_handshape_context(
-                document, handshape, chord
-            ):
-                unsafe_found = True
-                continue
-            match_groups.append(RedundantHandshapeMatch(
-                handshape_index=handshape_index,
-                chord_index=chord_index,
-                handshape_sha256=hashlib.sha256(
-                    handshape_identity
-                ).hexdigest(),
-                chord_sha256=hashlib.sha256(
-                    _canonical_json(chord)
-                ).hexdigest(),
-            ))
-        if match_groups:
-            operations.append(DeleteRedundantHandshapes(
-                span_kind=span_kind,
-                handshape_array_path=parent_path + ("handshapes",),
-                chord_array_path=parent_path + ("chords",),
-                expected_handshape_length=len(handshapes),
-                expected_chord_length=len(chords),
-                match_groups=tuple(match_groups),
-            ))
-    if unsafe_found:
-        if span_kind == "reversed":
-            raise RepairPlanningError(
-                "reversed_handshape_requires_review",
-                "At least one invalid handshape has missing or negative timing, "
-                "could supply a chord or arpeggio, lacks one unique playable "
-                "matching chord, or contains additional authoring data. No invalid "
-                "handshapes in this arrangement file will be changed automatically.",
-            )
+    assessment = assess_redundant_handshapes(document, span_kind=span_kind)
+    if assessment["unsafe_count"]:
         raise RepairPlanningError(
-            "zero_length_handshape_requires_review",
-            "At least one zero-length handshape could supply a chord, arpeggio "
-            "intent, or additional authoring data. No zero-length handshapes in "
-            "this arrangement file will be changed automatically.",
+            assessment["blocker_code"], assessment["message"]
         )
+    grouped: dict[tuple[str | int, ...], list[dict]] = {}
+    for match in assessment["matches"]:
+        grouped.setdefault(match["parent_path"], []).append(match)
+    operations = []
+    for parent_path, matches in grouped.items():
+        first = matches[0]
+        operations.append(DeleteRedundantHandshapes(
+            span_kind=span_kind,
+            handshape_array_path=parent_path + ("handshapes",),
+            chord_array_path=parent_path + ("chords",),
+            expected_handshape_length=first["handshape_length"],
+            expected_chord_length=first["chord_length"],
+            match_groups=tuple(
+                RedundantHandshapeMatch(
+                    handshape_index=match["handshape_index"],
+                    chord_index=match["chord_index"],
+                    handshape_sha256=hashlib.sha256(
+                        _canonical_json(match["handshape"])
+                    ).hexdigest(),
+                    chord_sha256=hashlib.sha256(
+                        _canonical_json(match["chord"])
+                    ).hexdigest(),
+                )
+                for match in matches
+            ),
+        ))
     return operations
 
 
@@ -3056,36 +4059,15 @@ def _valid_handshape_identity(value) -> bytes | None:
 
 
 def _reported_zero_length_handshape(value) -> bool:
-    return (
-        isinstance(value, dict)
-        and _finite_number(value.get("start_time"))
-        and value["start_time"] >= 0
-        and _finite_number(value.get("end_time"))
-        and value["end_time"] == value["start_time"]
-    )
+    return _shared_reported_zero_length_handshape(value)
 
 
 def _reported_invalid_handshape_span(value) -> bool:
-    if not isinstance(value, dict):
-        return False
-    start = value.get("start_time")
-    end = value.get("end_time")
-    return (
-        not _finite_number(start)
-        or not _finite_number(end)
-        or start < 0
-        or end < start
-    )
+    return _shared_reported_invalid_handshape_span(value)
 
 
 def _reported_reversed_handshape(value) -> bool:
-    return (
-        isinstance(value, dict)
-        and _finite_number(value.get("start_time"))
-        and value["start_time"] >= 0
-        and _finite_number(value.get("end_time"))
-        and value["end_time"] < value["start_time"]
-    )
+    return _shared_reported_reversed_handshape(value)
 
 
 def _redundant_handshape_identity(value, *, span_kind: str) -> bytes | None:
@@ -3095,73 +4077,19 @@ def _redundant_handshape_identity(value, *, span_kind: str) -> bytes | None:
         reported = _reported_reversed_handshape(value)
     else:
         return None
-    if (
-        not reported
-        or not _integer(value.get("chord_id"))
-        or value["chord_id"] < 0
-        or value.get("arp", False) is not False
-        or not set(value).issubset({"chord_id", "start_time", "end_time", "arp"})
+    if not reported or not redundant_handshape_is_plain(
+        value, span_kind=span_kind
     ):
         return None
     return _canonical_json(value)
 
 
 def _chord_matches_handshape(chord, handshape) -> bool:
-    return (
-        isinstance(chord, dict)
-        and _finite_number(chord.get("t"))
-        and chord["t"] == handshape["start_time"]
-        and _integer(chord.get("id"))
-        and chord["id"] == handshape["chord_id"]
-    )
+    return _shared_chord_matches_handshape(chord, handshape)
 
 
 def _strict_reversed_handshape_context(document, handshape, chord) -> bool:
-    notes = chord.get("notes") if isinstance(chord, dict) else None
-    if not isinstance(notes, list) or not any(
-        isinstance(note, dict)
-        and _integer(note.get("s"))
-        and note["s"] >= 0
-        and _integer(note.get("f"))
-        and note["f"] >= 0
-        for note in notes
-    ):
-        return False
-
-    chord_id = handshape.get("chord_id")
-    templates = document.get("templates") if isinstance(document, dict) else None
-    if (
-        not _integer(chord_id)
-        or chord_id < 0
-        or not isinstance(templates, list)
-        or chord_id >= len(templates)
-        or not isinstance(templates[chord_id], dict)
-    ):
-        return False
-    template = templates[chord_id]
-    if _authoring_flag_enabled(template.get("arp")) or _authoring_flag_enabled(
-        template.get("arpeggio")
-    ):
-        return False
-    display_name = template.get("displayName")
-    if isinstance(display_name, str) and "-arp" in display_name.lower():
-        return False
-    name = template.get("name")
-    if isinstance(name, str):
-        normalized = name.lower()
-        if normalized.endswith("(arp)") or " arpeggio" in normalized:
-            return False
-    return True
-
-
-def _authoring_flag_enabled(value) -> bool:
-    if value is None or value is False or value == 0:
-        return False
-    if isinstance(value, str) and value.strip().lower() in {
-        "", "0", "false", "no", "off",
-    }:
-        return False
-    return True
+    return _shared_strict_reversed_handshape_context(document, handshape, chord)
 
 
 def _explicit_chord_note_identity(chord, chord_note) -> bytes | None:

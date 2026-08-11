@@ -1,3 +1,4 @@
+import concurrent.futures
 import importlib.util
 import json
 import logging
@@ -62,7 +63,7 @@ def _report(package, *, status="healthy", lyrics=False, preview=False):
     }
 
 
-def _make_scanner(scanner_module, tmp_path, validator):
+def _make_scanner(scanner_module, tmp_path, validator, **scanner_options):
     library = tmp_path / "library"
     library.mkdir(exist_ok=True)
     instance = scanner_module.LibraryScanner(
@@ -71,6 +72,7 @@ def _make_scanner(scanner_module, tmp_path, validator):
         validate_feedpak=validator,
         validator_version="test-v1",
         log=logging.getLogger("library-doctor-tests"),
+        **scanner_options,
     )
     return instance, library
 
@@ -81,6 +83,212 @@ def _run(instance, *, force=False, **target):
     status = instance.status()
     assert status["running"] is False
     return status
+
+
+def test_completed_scan_exposes_aggregate_performance_telemetry(
+    scanner_module, tmp_path,
+):
+    instance, library = _make_scanner(
+        scanner_module,
+        tmp_path,
+        lambda _path, package, **_kwargs: _report(package),
+    )
+    (library / "Song.feedpak").mkdir()
+
+    status = _run(instance, force=True)
+
+    expected = {
+        "discovery_seconds",
+        "signature_seconds",
+        "cache_lookup_seconds",
+        "validation_seconds",
+        "parallel_validation_wall_seconds",
+        "worker_validation_seconds",
+        "worker_queue_seconds",
+        "source_recheck_seconds",
+        "source_change_retries",
+        "parallel_fallbacks",
+        "cache_write_seconds",
+        "scope_update_seconds",
+    }
+    assert set(status["performance"]) == expected
+    assert all(value >= 0 for value in status["performance"].values())
+    assert status["last_scan"]["performance"] == status["performance"]
+
+
+def test_worker_policy_uses_cpu_memory_task_and_user_limits(scanner_module):
+    policy = scanner_module.choose_worker_policy(
+        200,
+        deep_audio=True,
+        requested_max=40,
+        logical_cpus=256,
+        physical_cpus=128,
+        total_memory=256 * 1024**3,
+        available_memory=200 * 1024**3,
+        platform="win32",
+        environment={"FEEDBACK_MAX_SCAN_WORKERS": "80"},
+    )
+
+    assert policy["mode"] == "custom"
+    assert policy["limits"]["packages"] == 200
+    assert policy["limits"]["physical_cpu"] == 128
+    assert policy["limits"]["platform"] == 61
+    assert policy["limits"]["feedback"] == 80
+    assert policy["limits"]["user"] == 40
+    assert policy["selected_workers"] == 40
+
+
+def test_worker_policy_stays_sequential_for_a_small_scope(scanner_module):
+    policy = scanner_module.choose_worker_policy(
+        2,
+        deep_audio=False,
+        logical_cpus=32,
+        physical_cpus=16,
+        total_memory=64 * 1024**3,
+        available_memory=48 * 1024**3,
+        platform="linux",
+        environment={},
+    )
+
+    assert policy["selected_workers"] == 1
+    assert policy["reason"] == "small_scope"
+
+
+def test_worker_policy_honors_memory_and_feedback_caps(scanner_module):
+    policy = scanner_module.choose_worker_policy(
+        100,
+        deep_audio=True,
+        logical_cpus=64,
+        physical_cpus=32,
+        total_memory=8 * 1024**3,
+        available_memory=3 * 1024**3,
+        platform="linux",
+        environment={"FEEDBACK_MAX_SCAN_WORKERS": "12"},
+    )
+
+    assert policy["limits"]["memory"] == 2
+    assert policy["selected_workers"] == 2
+
+
+def test_parallel_scanner_keeps_cache_writes_in_parent_and_reports_workers(
+    scanner_module, tmp_path,
+):
+    calls = []
+
+    def validate(_path, package, **_options):
+        calls.append((package, threading.get_ident()))
+        time.sleep(0.03)
+        return _report(package)
+
+    class ThreadValidationPool:
+        def __init__(self, workers):
+            self.executor = concurrent.futures.ThreadPoolExecutor(max_workers=workers)
+            self.cancelled = threading.Event()
+
+        def submit(self, path, package, deep_audio):
+            def run():
+                started = time.perf_counter()
+                if self.cancelled.is_set():
+                    return {"outcome": "cancelled", "elapsed_seconds": 0.0}
+                report = validate(path, package, deep_audio=deep_audio)
+                return {
+                    "outcome": "complete",
+                    "report": report,
+                    "elapsed_seconds": time.perf_counter() - started,
+                }
+
+            return self.executor.submit(run)
+
+        def set_paused(self, _paused):
+            pass
+
+        def cancel(self):
+            self.cancelled.set()
+
+        def shutdown(self):
+            self.executor.shutdown(wait=True, cancel_futures=True)
+
+    pools = []
+
+    def pool_factory(workers, _validator_version):
+        pool = ThreadValidationPool(workers)
+        pools.append(pool)
+        return pool
+
+    instance, library = _make_scanner(
+        scanner_module,
+        tmp_path,
+        validate,
+        worker_pool_factory=pool_factory,
+    )
+    for index in range(6):
+        (library / f"song-{index}.feedpak").write_bytes(str(index).encode())
+
+    status = _run(instance, force=True, max_workers=3)
+
+    assert status["stage"] == "complete"
+    assert status["scanned"] == 6
+    assert status["worker_policy"]["selected_workers"] == 3
+    assert status["performance"]["parallel_fallbacks"] == 0
+    assert status["performance"]["worker_validation_seconds"] > 0
+    assert len({thread_id for _package, thread_id in calls}) > 1
+    assert len(instance.results()["items"]) == 6
+    assert len(pools) == 1
+
+
+def test_parallel_pool_start_failure_falls_back_to_sequential_validation(
+    scanner_module, tmp_path,
+):
+    calls = []
+
+    def validate(_path, package, **_options):
+        calls.append(package)
+        return _report(package)
+
+    def unavailable_pool(*_args):
+        raise RuntimeError("processes unavailable")
+
+    instance, library = _make_scanner(
+        scanner_module,
+        tmp_path,
+        validate,
+        worker_pool_factory=unavailable_pool,
+    )
+    for index in range(3):
+        (library / f"song-{index}.feedpak").write_bytes(str(index).encode())
+
+    status = _run(instance, force=True, max_workers=3)
+
+    assert status["stage"] == "complete"
+    assert status["scanned"] == 3
+    assert status["performance"]["parallel_fallbacks"] == 1
+    assert sorted(calls) == [f"song-{index}.feedpak" for index in range(3)]
+
+
+def test_scan_retries_when_a_feedpak_changes_during_validation(
+    scanner_module, tmp_path,
+):
+    calls = []
+
+    def validate(path, package, **_options):
+        calls.append(path.read_bytes())
+        if len(calls) == 1:
+            path.write_bytes(b"second version")
+        report = _report(package)
+        report["title"] = path.read_bytes().decode()
+        return report
+
+    instance, library = _make_scanner(scanner_module, tmp_path, validate)
+    package = library / "song.feedpak"
+    package.write_bytes(b"first version")
+
+    status = _run(instance, force=True, max_workers=1)
+    report = instance.results()["items"][0]
+
+    assert status["stage"] == "complete"
+    assert status["performance"]["source_change_retries"] == 1
+    assert len(calls) == 2
+    assert report["title"] == "second version"
 
 
 def test_scan_discovers_zip_and_directory_packages(scanner_module, tmp_path):
@@ -105,7 +313,36 @@ def test_scan_discovers_zip_and_directory_packages(scanner_module, tmp_path):
     assert status["stage"] == "complete"
     assert status["total"] == 2
     assert status["scanned"] == 2
+    assert status["scan_current"] is True
+    assert status["scope_complete"] is True
     assert {item[1] for item in seen} == {"Artist/one.feedpak", "two.sloppak"}
+
+
+def test_old_rule_scan_stays_visible_but_is_not_current_for_repairs(
+    scanner_module, tmp_path,
+):
+    instance, library = _make_scanner(
+        scanner_module, tmp_path, lambda _path, package: _report(
+            package, status="warning"
+        )
+    )
+    (library / "one.feedpak").write_bytes(b"one")
+    _run(instance)
+
+    restarted = scanner_module.LibraryScanner(
+        config_dir=tmp_path / "config",
+        get_dlc_dir=lambda: library,
+        validate_feedpak=lambda *_args, **_kwargs: {},
+        validator_version="test-v2",
+        log=logging.getLogger("library-doctor-stale-scan-tests"),
+    )
+
+    status = restarted.status()
+    report = restarted.results()["items"][0]
+    assert status["last_scan"]["complete"] is True
+    assert status["scan_current"] is False
+    assert status["scope_complete"] is False
+    assert report["features"]["repair_scan_current"] is False
 
 
 def test_unchanged_packages_reuse_cached_reports(scanner_module, tmp_path):
@@ -437,10 +674,13 @@ def test_scan_pauses_at_checkpoint_inside_large_package(scanner_module, tmp_path
     assert instance.status()["playback_paused"] is True
     assert finished.is_set() is False
 
+    time.sleep(0.08)
     instance.set_playback_active(False)
     instance.join(5)
     assert finished.is_set() is True
-    assert instance.status()["stage"] == "complete"
+    status = instance.status()
+    assert status["stage"] == "complete"
+    assert status["elapsed_seconds"] - status["active_seconds"] >= 0.05
 
 
 def test_cancelling_a_playback_paused_scan_wakes_the_worker(scanner_module, tmp_path):
@@ -722,3 +962,84 @@ def test_deep_audio_cache_profile_and_progress_estimate(scanner_module, tmp_path
     assert standard["eta_seconds"] == 0
     assert deep["deep_audio"] is True
     assert reused_deep["reused"] == 1
+
+
+def test_current_deep_audio_repair_context_is_scope_and_scan_bound(
+    scanner_module, tmp_path,
+):
+    def validate(_path, package, *, deep_audio=False):
+        report = _report(package)
+        report["features"]["deep_audio_checked"] = deep_audio
+        return report
+
+    instance, library = _make_scanner(scanner_module, tmp_path, validate)
+    package = library / "one.feedpak"
+    package.write_bytes(b"one")
+
+    _run(instance, deep_audio=True)
+    context = instance.current_deep_audio_repair_context("one.feedpak")
+
+    assert context is not None
+    assert context["report"]["features"]["deep_audio_checked"] is True
+    assert instance.package_matches_signature(
+        "one.feedpak", context["signature"]
+    ) is True
+
+    package.write_bytes(b"changed")
+    assert instance.package_matches_signature(
+        "one.feedpak", context["signature"]
+    ) is False
+
+    _run(instance, force=True, deep_audio=False)
+    assert instance.current_deep_audio_repair_context("one.feedpak") is None
+
+
+def test_repair_scope_excludes_scan_findings_that_are_not_automatic(
+    scanner_module, tmp_path,
+):
+    def validate(_path, package):
+        report = _report(package, status="warning")
+        report["findings"] = [{
+            "severity": "warning",
+            "code": "chart.zero-length-handshape",
+            "message": "Conditional handshape",
+            "category": "validation",
+            "affected_count": 1,
+            "rule": {"title": "Zero-length handshape"},
+        }]
+        status = "automatic" if package.startswith("Safe") else "author_review"
+        report["features"].update({
+            "preview_source_available": False,
+            "repair_eligibility": {
+                "chart.zero-length-handshape": {
+                    "status": status,
+                    "reason_code": (
+                        None if status == "automatic"
+                        else "zero_length_handshape_requires_review"
+                    ),
+                },
+                "media.preview-missing": {
+                    "status": "unavailable",
+                    "reason_code": "full_mix_unavailable",
+                },
+            },
+        })
+        return report
+
+    instance, library = _make_scanner(scanner_module, tmp_path, validate)
+    (library / "Safe.feedpak").write_bytes(b"safe")
+    (library / "Review.feedpak").write_bytes(b"review")
+    _run(instance)
+
+    snapshot = instance.repair_scope_snapshot(
+        ["chart.zero-length-handshape"],
+        ["media.preview-missing"],
+    )
+
+    assert [item["package"] for item in snapshot["candidates"]] == [
+        "Safe.feedpak"
+    ]
+    assert snapshot["candidates"][0]["rule_codes"] == [
+        "chart.zero-length-handshape"
+    ]
+    assert snapshot["candidates"][0]["preview_rule_code"] is None

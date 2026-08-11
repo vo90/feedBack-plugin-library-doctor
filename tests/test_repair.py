@@ -71,8 +71,14 @@ def test_catalog_is_an_explicit_allowlist(repair):
         "timeline.duplicate-section",
         "timeline.sections-out-of-order",
         "drums.duplicate-hit",
+        "media.preview-missing",
+        "media.preview-too-short",
+        "media.preview-too-long",
+        "media.preview-regenerate",
     ]
-    assert {item["safety"] for item in catalog} == {"safe_automatic"}
+    assert {item["safety"] for item in catalog} == {
+        "safe_automatic", "review_required",
+    }
     mute_repair = repair.repair_for_rule("chart.negative-muted-fret")
     assert mute_repair["source_kind"] == "arrangement"
     assert mute_repair["item_name"] == "muted note fret"
@@ -121,6 +127,10 @@ def test_catalog_is_an_explicit_allowlist(repair):
     assert section_order_repair["item_name"] == "section timeline"
     assert section_order_repair["change_kind"] == "reorder"
     assert repair.repair_for_rule("drums.duplicate-hit")["item_name"] == "drum hit"
+    preview_repair = repair.repair_for_rule("media.preview-too-long")
+    assert preview_repair["source_kind"] == "full_mix"
+    assert preview_repair["change_kind"] == "replace_media"
+    assert preview_repair["safety"] == "review_required"
     assert repair.repair_for_rule("chart.string-conflict") is None
 
 
@@ -1489,6 +1499,377 @@ def test_ambiguous_declared_timeline_blocks_instead_of_editing_legacy_grid(
         ),
     }]
     assert legacy_path.read_bytes() == legacy_original
+
+
+def test_batch_planning_recalculates_only_scan_reported_safe_rules(
+    repair, tmp_path,
+):
+    library = tmp_path / "library"
+    package = library / "Song.feedpak"
+    arrangement_dir = package / "arrangements"
+    arrangement_dir.mkdir(parents=True)
+    (package / "manifest.yaml").write_text(
+        "arrangements:\n"
+        "  - id: lead\n"
+        "    file: arrangements/lead.json\n",
+        encoding="utf-8",
+    )
+    note = {"t": 1.0, "s": 0, "f": 3}
+    anchor = {"time": 0.0, "fret": 1, "width": 4}
+    source_raw = _raw({
+        "notes": [note, dict(note)],
+        "chords": [],
+        "anchors": [anchor, dict(anchor)],
+    })
+    (arrangement_dir / "lead.json").write_bytes(source_raw)
+    validation_reports = iter([
+        {"findings": [{"code": "chart.duplicate-anchor"}]},
+        {"findings": []},
+    ])
+    service = repair.RepairService(
+        config_dir=tmp_path / "config",
+        get_dlc_dir=lambda: library,
+        validate_feedpak=lambda *_args, **_kwargs: next(validation_reports),
+        validator_version="rules-test",
+        log=logging.getLogger("library-doctor-selected-batch-plan-tests"),
+    )
+
+    selected = service.preview_selected(
+        "Song.feedpak", ["chart.duplicate-anchor"]
+    )
+    complete = service.preview_all("Song.feedpak")
+
+    assert selected["requested_rule_codes"] == ["chart.duplicate-anchor"]
+    assert selected["rule_codes"] == ["chart.duplicate-anchor"]
+    assert selected["removed_count"] == 1
+    assert "chart.duplicate-note" in complete["rule_codes"]
+    assert complete["removed_count"] == 2
+    with pytest.raises(repair.RepairPlanningError) as unsupported:
+        service.preview_selected("Song.feedpak", ["chart.string-conflict"])
+    assert unsupported.value.code == "unsupported_repair"
+
+    result = service.apply_selected(
+        "Song.feedpak", ["chart.duplicate-anchor"]
+    )
+    repaired = json.loads(
+        (arrangement_dir / "lead.json").read_text(encoding="utf-8")
+    )
+    assert result["rule_codes"] == ["chart.duplicate-anchor"]
+    assert len(repaired["anchors"]) == 1
+    assert len(repaired["notes"]) == 2
+
+
+def test_combined_repair_parses_and_renders_each_member_once(
+    repair, tmp_path, monkeypatch,
+):
+    library = tmp_path / "library"
+    package = library / "Song.feedpak"
+    arrangement_dir = package / "arrangements"
+    arrangement_dir.mkdir(parents=True)
+    (package / "manifest.yaml").write_text(
+        "arrangements:\n"
+        "  - id: lead\n"
+        "    file: arrangements/lead.json\n",
+        encoding="utf-8",
+    )
+    note = {"t": 1.0, "s": 0, "f": 3}
+    anchor = {"time": 0.0, "fret": 1, "width": 4}
+    source_raw = _raw({
+        "notes": [note, dict(note)],
+        "chords": [],
+        "anchors": [anchor, dict(anchor)],
+    })
+    (arrangement_dir / "lead.json").write_bytes(source_raw)
+    sequential = source_raw
+    for rule_code in ("chart.duplicate-note", "chart.duplicate-anchor"):
+        step = repair.plan_json_member(
+            sequential,
+            member_path="arrangements/lead.json",
+            source_kind="arrangement",
+            validator_version="rules-test",
+            rule_code=rule_code,
+        )
+        sequential = repair.apply_json_member(sequential, step)
+    calls = {"parse": 0, "render": 0}
+    original_parse = repair._parse_json
+    original_render = repair._render_json
+
+    def counted_parse(raw):
+        calls["parse"] += 1
+        return original_parse(raw)
+
+    def counted_render(document, raw):
+        calls["render"] += 1
+        return original_render(document, raw)
+
+    monkeypatch.setattr(repair, "_parse_json", counted_parse)
+    monkeypatch.setattr(repair, "_render_json", counted_render)
+    service = repair.RepairService(
+        config_dir=tmp_path / "config",
+        get_dlc_dir=lambda: library,
+        validate_feedpak=lambda *_args, **_kwargs: {},
+        validator_version="rules-test",
+        log=logging.getLogger("library-doctor-single-parse-tests"),
+    )
+
+    internal = service._plan_all_package(package, "Song.feedpak")
+
+    assert internal["rule_codes"] == [
+        "chart.duplicate-note",
+        "chart.duplicate-anchor",
+    ]
+    assert internal["_members"][0]["replacement"] == sequential
+    assert calls == {"parse": 1, "render": 1}
+
+
+@pytest.mark.parametrize("entrypoint", ["selected", "all", "single"])
+def test_song_data_repair_reuses_signature_bound_deep_audio_findings(
+    repair, tmp_path, entrypoint,
+):
+    library = tmp_path / "library"
+    package = library / "Song.feedpak"
+    source = tmp_path / "source"
+    arrangement_dir = source / "arrangements"
+    arrangement_dir.mkdir(parents=True)
+    (source / "manifest.yaml").write_text(
+        "arrangements:\n"
+        "  - id: lead\n"
+        "    file: arrangements/lead.json\n",
+        encoding="utf-8",
+    )
+    anchor = {"time": 0.0, "fret": 1, "width": 4}
+    (arrangement_dir / "lead.json").write_bytes(_raw({
+        "notes": [],
+        "chords": [],
+        "anchors": [anchor, dict(anchor)],
+    }))
+    library.mkdir()
+    with zipfile.ZipFile(package, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.write(source / "manifest.yaml", "manifest.yaml")
+        archive.write(arrangement_dir / "lead.json", "arrangements/lead.json")
+    validated = []
+
+    def validate(_path, _package, *, deep_audio=False):
+        validated.append(deep_audio)
+        return {
+            "validator_version": "rules-test",
+            "features": {
+                "deep_audio_checked": deep_audio,
+                "deep_audio_files": 0,
+                "deep_audio_skipped": 0,
+                "deep_audio_unsupported": 0,
+            },
+            "findings": [],
+            "counts": {"error": 0, "warning": 0, "info": 0},
+            "status": "healthy",
+            "title": "Song",
+            "artist": "Artist",
+        }
+
+    before = {
+        "validator_version": "rules-test",
+        "features": {
+            "deep_audio_checked": True,
+            "deep_audio_files": 2,
+            "deep_audio_skipped": 0,
+            "deep_audio_unsupported": 0,
+        },
+        "findings": [
+            {"code": "chart.duplicate-anchor", "severity": "warning"},
+            {"code": "media.audio-longer-than-manifest", "severity": "warning"},
+        ],
+        "counts": {"error": 0, "warning": 2, "info": 0},
+        "status": "warning",
+    }
+    guard_calls = []
+    service = repair.RepairService(
+        config_dir=tmp_path / "config",
+        get_dlc_dir=lambda: library,
+        validate_feedpak=validate,
+        validator_version="rules-test",
+        log=logging.getLogger("library-doctor-deep-reuse-tests"),
+    )
+
+    options = {
+        "deep_audio": True,
+        "verified_before_report": before,
+        "source_guard": lambda: guard_calls.append(True) or True,
+    }
+    if entrypoint == "selected":
+        result = service.apply_selected(
+            "Song.feedpak",
+            ["chart.duplicate-anchor"],
+            **options,
+        )
+    elif entrypoint == "all":
+        plan = service.preview_all("Song.feedpak")
+        result = service.apply_all(
+            "Song.feedpak",
+            plan["plan_id"],
+            **options,
+        )
+    else:
+        plan = service.preview("Song.feedpak", "chart.duplicate-anchor")
+        result = service.apply(
+            "Song.feedpak",
+            "chart.duplicate-anchor",
+            plan["plan_id"],
+            **options,
+        )
+
+    with zipfile.ZipFile(package, "r") as archive:
+        repaired = json.loads(archive.read("arrangements/lead.json"))
+    assert len(repaired["anchors"]) == 1
+    assert validated == [False]
+    assert len(guard_calls) == 2
+    assert result["deep_audio_reused"] is True
+    assert result["verified_scan_report_reused"] is True
+    assert result["performance"] == {
+        "elapsed_seconds": result["performance"]["elapsed_seconds"],
+        "deep_audio_requested": True,
+        "verified_scan_report_reused": True,
+        "deep_audio_reused": True,
+    }
+    assert result["performance"]["elapsed_seconds"] >= 0
+    assert service.history(limit=1)["items"][0]["performance"] == (
+        result["performance"]
+    )
+    assert result["report"]["features"]["deep_audio_checked"] is True
+    assert result["report"]["features"]["deep_audio_files"] == 2
+    assert {
+        finding["code"] for finding in result["report"]["findings"]
+    } == {"media.audio-longer-than-manifest"}
+
+
+def test_single_repair_rejects_stale_verified_report_without_changing_package(
+    repair, tmp_path,
+):
+    library = tmp_path / "library"
+    package = library / "Song.feedpak"
+    source = tmp_path / "source"
+    arrangement_dir = source / "arrangements"
+    arrangement_dir.mkdir(parents=True)
+    (source / "manifest.yaml").write_text(
+        "arrangements:\n"
+        "  - id: lead\n"
+        "    file: arrangements/lead.json\n",
+        encoding="utf-8",
+    )
+    anchor = {"time": 0.0, "fret": 1, "width": 4}
+    (arrangement_dir / "lead.json").write_bytes(_raw({
+        "notes": [],
+        "chords": [],
+        "anchors": [anchor, dict(anchor)],
+    }))
+    library.mkdir()
+    with zipfile.ZipFile(package, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.write(source / "manifest.yaml", "manifest.yaml")
+        archive.write(arrangement_dir / "lead.json", "arrangements/lead.json")
+    original = package.read_bytes()
+    service = repair.RepairService(
+        config_dir=tmp_path / "config",
+        get_dlc_dir=lambda: library,
+        validate_feedpak=lambda *_args, **_kwargs: {},
+        validator_version="rules-test",
+        log=logging.getLogger("library-doctor-stale-deep-reuse-tests"),
+    )
+    plan = service.preview("Song.feedpak", "chart.duplicate-anchor")
+
+    with pytest.raises(repair.RepairPlanningError) as raised:
+        service.apply(
+            "Song.feedpak",
+            "chart.duplicate-anchor",
+            plan["plan_id"],
+            deep_audio=True,
+            verified_before_report={
+                "validator_version": "rules-test",
+                "features": {"deep_audio_checked": True},
+                "findings": [],
+            },
+            source_guard=lambda: False,
+        )
+
+    assert raised.value.code == "source_changed"
+    assert package.read_bytes() == original
+    assert not (tmp_path / "config" / "library_doctor" / "repair_backups").exists()
+
+
+def test_unpacked_song_data_repair_runs_fresh_deep_audio_validation(
+    repair, tmp_path,
+):
+    library = tmp_path / "library"
+    package = library / "Song.feedpak"
+    arrangement_dir = package / "arrangements"
+    arrangement_dir.mkdir(parents=True)
+    (package / "manifest.yaml").write_text(
+        "arrangements:\n"
+        "  - id: lead\n"
+        "    file: arrangements/lead.json\n",
+        encoding="utf-8",
+    )
+    anchor = {"time": 0.0, "fret": 1, "width": 4}
+    (arrangement_dir / "lead.json").write_bytes(_raw({
+        "notes": [],
+        "chords": [],
+        "anchors": [anchor, dict(anchor)],
+    }))
+    validated = []
+
+    validation_count = 0
+
+    def validate(_path, _package, *, deep_audio=False):
+        nonlocal validation_count
+        validation_count += 1
+        validated.append(deep_audio)
+        return {
+            "validator_version": "rules-test",
+            "features": {
+                "deep_audio_checked": deep_audio,
+                "deep_audio_files": 0,
+                "deep_audio_skipped": 0,
+                "deep_audio_unsupported": 0,
+            },
+            "findings": (
+                [{"code": "chart.duplicate-anchor", "severity": "warning"}]
+                if validation_count == 1 else []
+            ),
+            "counts": {
+                "error": 0,
+                "warning": 1 if validation_count == 1 else 0,
+                "info": 0,
+            },
+            "status": "warning" if validation_count == 1 else "healthy",
+            "title": "Song",
+            "artist": "Artist",
+        }
+
+    cached = {
+        "validator_version": "rules-test",
+        "features": {"deep_audio_checked": True},
+        "findings": [],
+    }
+    service = repair.RepairService(
+        config_dir=tmp_path / "config",
+        get_dlc_dir=lambda: library,
+        validate_feedpak=validate,
+        validator_version="rules-test",
+        log=logging.getLogger("library-doctor-directory-deep-tests"),
+    )
+
+    result = service.apply_selected(
+        "Song.feedpak",
+        ["chart.duplicate-anchor"],
+        deep_audio=True,
+        verified_before_report=cached,
+        source_guard=lambda: True,
+    )
+
+    assert validated == [True, True]
+    assert result["deep_audio_reused"] is False
+    assert result["performance"]["deep_audio_requested"] is True
+    assert result["performance"]["verified_scan_report_reused"] is False
+    assert result["performance"]["deep_audio_reused"] is False
+    assert result["performance"]["elapsed_seconds"] >= 0
 
 
 def test_history_reader_preserves_pre_rename_receipts(repair, tmp_path):

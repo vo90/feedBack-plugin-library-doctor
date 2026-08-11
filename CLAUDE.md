@@ -15,18 +15,26 @@ standalone plugin even if it is later bundled with FeedBack.
 - Do not import FeedBack's private Python modules. Use documented plugin
   context functions instead.
 - Keep validation rules named, deterministic, bounded, and directly tested.
+- Keep conditional automatic-repair eligibility in `repair_eligibility.py` so
+  scan results and the authoritative repair planner use the same predicates.
 - Bump the `rules-N` component of `validator.VALIDATOR_VERSION` whenever a
   validation result can change. The scanner uses it to invalidate cached
   reports; schema revision changes are already part of the value.
 - Treat missing optional content as coverage information, not an error.
 - Never include library paths or song identities in FeedBack support bundles.
 - Frontend code is vanilla JavaScript with no build step or remote assets.
+- Song Tools may read FeedBack's documented `/api/library?provider=local`
+  endpoint, but its repair eligibility and writes must remain inside Library
+  Doctor's guarded backend. Do not couple Song Tools availability to scan cache.
+- Preview repair must validate a complete candidate and use temporary recovery
+  during the write. After a validated preview commit, remove that recovery copy
+  automatically; chart/tab repairs retain their explicit Undo recovery.
 
 ## Verification
 
 ```bash
 python -m pytest
-python -m py_compile validator.py scanner.py repair.py batch_repair.py migration.py routes.py
+python -m py_compile validator.py scanner.py library_doctor_scan_worker.py repair.py repair_eligibility.py preview_repair.py batch_repair.py migration.py routes.py
 node --check screen.js
 ```
 

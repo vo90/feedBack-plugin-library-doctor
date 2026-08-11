@@ -5,11 +5,20 @@
       <h2 id="lh-title">Library Doctor</h2>
       <p class="lh-lead">
         Scan Feedpak and Sloppak packages, understand what problems mean in game, and safely
-        repair deterministic issues. Scans are read-only; repairs always require confirmation.
+        repair deterministic issues. Or use Song Tools for an optional change to any indexed
+        local song. Scans are read-only; every file change requires confirmation.
       </p>
     </div>
   </header>
 
+  <nav id="lh-workspace-tabs" class="lh-workspace-tabs" aria-label="Library Doctor workspace">
+    <button type="button" data-workspace="health" aria-selected="true">Health Scan</button>
+    <button type="button" data-workspace="tools" aria-selected="false">Song Tools</button>
+  </nav>
+
+  <section id="lh-repair-result" class="lh-repair-result" aria-live="polite" hidden></section>
+
+  <div id="lh-health-workspace">
   <section class="lh-target-panel" aria-labelledby="lh-target-title">
     <div>
       <h3 id="lh-target-title">Choose what to scan</h3>
@@ -38,6 +47,30 @@
       <input id="lh-deep-audio" type="checkbox">
       <span><strong>Deep audio checks</strong><small>Also inspect supported Ogg audio structure and duration. Run a normal scan first; deep scans read much more data and a large library can take a long time.</small></span>
     </label>
+    <details class="lh-worker-settings">
+      <summary>Scan performance <span id="lh-worker-summary">Automatic</span></summary>
+      <p class="lh-muted">
+        Automatic uses several CPU cores when enough uncached Feedpaks need checking, while
+        reserving memory for FeedBack and Windows. Small and fully cached scans stay single-worker.
+      </p>
+      <div class="lh-worker-controls">
+        <label>
+          <span>Worker selection</span>
+          <select id="lh-worker-mode">
+            <option value="automatic">Automatic (recommended)</option>
+            <option value="custom">Custom maximum</option>
+          </select>
+        </label>
+        <label id="lh-worker-limit-wrap" hidden>
+          <span>Maximum validation workers</span>
+          <input id="lh-worker-limit" type="number" min="1" step="1" inputmode="numeric" value="1">
+        </label>
+      </div>
+      <small class="lh-muted">
+        A custom value is a ceiling, not a forced count. Library Doctor may use fewer workers
+        when the scan, available memory, or operating system requires it.
+      </small>
+    </details>
     <div class="lh-target-footer">
       <div class="lh-target-selection">
         <span class="lh-muted">Selected target</span>
@@ -66,8 +99,6 @@
     <p id="lh-error" class="lh-inline-error" role="alert" hidden></p>
   </section>
 
-  <section id="lh-repair-result" class="lh-repair-result" aria-live="polite" hidden></section>
-
   <section id="lh-batch-section" class="lh-batch-section" aria-labelledby="lh-batch-title" hidden>
     <div class="lh-batch-heading">
       <div>
@@ -82,10 +113,21 @@
         <button id="lh-batch-cancel" class="lh-button lh-button-danger" type="button" hidden>Stop batch</button>
       </div>
     </div>
+    <label class="lh-batch-preview-option">
+      <input id="lh-batch-preview-media" type="checkbox">
+      <span>
+        <strong>Also repair flagged audio previews automatically</strong>
+        <small>
+          Create a standard 30-second preview only when one is missing, shorter than
+          20 seconds, or longer than 35 seconds. Valid previews are untouched.
+        </small>
+      </span>
+    </label>
     <div id="lh-batch-progress" class="lh-batch-progress" aria-live="polite" hidden>
       <div>
         <strong id="lh-batch-status">Preparing batch previewâ€¦</strong>
         <span id="lh-batch-count" class="lh-muted"></span>
+        <span id="lh-batch-live-counts" class="lh-batch-live-counts" hidden></span>
       </div>
       <progress id="lh-batch-progress-bar" max="1" value="0" aria-label="Batch repair progress"></progress>
     </div>
@@ -132,16 +174,18 @@
     Summary cards can overlap: for example, a package without lyrics can also contain an error.
     FeedBack compatibility means valid package data that the current game may not display
     or play as intended. Authoring review highlights unusual but potentially intentional tab data. Lyrics and
-    previews are optional. Partial deep audio means one or more files use a format this
+    previews are optional; the Without previews view can still create a standard preview if you want one. Partial deep audio means one or more files use a format this
     validator cannot inspect deeply or exceeded its safety limit. Coverage does not make
     a package unhealthy. When a deterministic safe repair is available, Library Doctor
     shows a preview and requires confirmation before changing the package. If a Feedpak
     has multiple safe repair types, they can also be reviewed and applied together in one
-    transaction. A recovery
-    backup is created first; the existing package is replaced only after a complete repaired
+    transaction. Recovery data is created first; the existing package is replaced only after a complete repaired
     candidate passes validation and archive integrity checks. No duplicate song is added to
-    the library, and an Undo option can restore the saved original song data. Findings that
-    require musical judgment remain report-only.
+    the library. Chart repairs retain an Undo copy. Preview repairs offer either listen-first
+    review or confirmed automatic creation, then remove their temporary recovery data after
+    success so the repair is fully finished. Song Tools can also replace an existing valid
+    preview without requiring a scan finding. Findings that require
+    musical judgment and have no guarded workflow remain report-only.
   </p>
 
   <section class="lh-rule-section" aria-labelledby="lh-rule-title">
@@ -193,5 +237,39 @@
       <span id="lh-page-label" class="lh-muted"></span>
       <button id="lh-next" class="lh-button" type="button">Next</button>
     </nav>
+  </section>
+  </div>
+
+  <section id="lh-song-tools-workspace" class="lh-song-tools" aria-labelledby="lh-song-tools-title" hidden>
+    <header class="lh-song-tools-heading">
+      <div>
+        <p class="lh-eyebrow">Optional changes for any local song</p>
+        <h3 id="lh-song-tools-title">Song Tools</h3>
+        <p class="lh-muted">
+          Choose a song directly from FeedBack's indexed local library. Song Tools do not require
+          a Library Doctor scan or a warning. Each change still uses the same review, validation,
+          and Feedpak safety checks as a repair.
+        </p>
+      </div>
+    </header>
+
+    <div class="lh-song-tool-browser">
+      <label class="lh-song-tool-search">
+        <span>Find a local song</span>
+        <input id="lh-song-tool-search" type="search"
+               placeholder="Search title, artist, or package..." autocomplete="off">
+      </label>
+      <p id="lh-song-tool-count" class="lh-muted" aria-live="polite">Loading local songs...</p>
+      <div id="lh-song-tool-results" class="lh-song-tool-results" role="list"></div>
+      <p id="lh-song-tool-error" class="lh-inline-error" role="alert" hidden></p>
+      <nav id="lh-song-tool-pagination" class="lh-pagination" aria-label="Song Tool library pages" hidden>
+        <button id="lh-song-tool-prev" class="lh-button" type="button">Previous</button>
+        <span id="lh-song-tool-page" class="lh-muted"></span>
+        <button id="lh-song-tool-next" class="lh-button" type="button">Next</button>
+      </nav>
+    </div>
+
+    <section id="lh-song-tool-selection" class="lh-song-tool-selection"
+             aria-live="polite" hidden></section>
   </section>
 </main>
