@@ -67,6 +67,29 @@ def test_spawned_workers_match_the_in_process_validator(tmp_path):
     assert all(result["elapsed_seconds"] >= 0 for result in results)
 
 
+def test_worker_pool_exposes_best_effort_rss_for_budget_enforcement(tmp_path):
+    root = Path(__file__).parents[1]
+    validator = _load(root / "validator.py", "library_doctor_worker_rss_validator")
+    worker = _load(
+        root / "library_doctor_scan_worker.py",
+        "library_doctor_worker_rss_backend",
+    )
+    package = _valid_package(tmp_path, 7)
+    pool = worker.ValidationProcessPool(
+        max_workers=1,
+        validator_version=validator.VALIDATOR_VERSION,
+    )
+    try:
+        future = pool.submit(package, package.name, False)
+        future.result(timeout=30)
+        usage = pool.memory_usage()
+    finally:
+        pool.shutdown()
+
+    assert usage
+    assert all(pid > 0 and rss > 0 for pid, rss in usage.items())
+
+
 def test_spawned_workers_honor_pause_before_reading_a_package(tmp_path):
     root = Path(__file__).parents[1]
     validator = _load(root / "validator.py", "library_doctor_worker_pause_validator")
@@ -186,6 +209,42 @@ def test_direct_worker_task_reports_success_cancellation_and_isolated_errors():
         worker._cancel_event = None
 
 
+def test_validation_worker_write_guard_denies_package_mutation(tmp_path):
+    root = Path(__file__).parents[1]
+    worker = _load(
+        root / "library_doctor_scan_worker.py",
+        "library_doctor_worker_write_guard_backend",
+    )
+    package = tmp_path / "Song.feedpak"
+    package.mkdir()
+    manifest = package / "manifest.yaml"
+    manifest.write_bytes(b"original")
+    outside = tmp_path / "worker-diagnostic.txt"
+
+    def attempts_write(path, package_name, **_options):
+        outside.write_text(package_name, encoding="utf-8")
+        (path / "manifest.yaml").write_text("mutated", encoding="utf-8")
+        return {"package": package_name}
+
+    try:
+        worker._install_write_guard()
+        worker._pause_event = threading.Event()
+        worker._cancel_event = threading.Event()
+        worker._validator = SimpleNamespace(validate_feedpak=attempts_write)
+
+        result = worker._validate_task((str(package), "Song.feedpak", False))
+
+        assert result["outcome"] == "error"
+        assert result["error_type"] == "PermissionError"
+        assert manifest.read_bytes() == b"original"
+        assert outside.read_text(encoding="utf-8") == "Song.feedpak"
+        assert worker._protected_package_path is None
+    finally:
+        worker._validator = None
+        worker._pause_event = None
+        worker._cancel_event = None
+
+
 def test_worker_initialization_and_paused_checkpoint_share_control_events(
     monkeypatch,
 ):
@@ -221,3 +280,56 @@ def test_worker_initialization_and_paused_checkpoint_share_control_events(
 
     worker._pause_event = None
     worker._cancel_event = None
+
+
+def test_pool_shutdown_forcibly_terminates_a_non_cooperative_process():
+    root = Path(__file__).parents[1]
+    worker = _load(
+        root / "library_doctor_scan_worker.py",
+        "library_doctor_worker_shutdown_backend",
+    )
+
+    class StuckProcess:
+        def __init__(self):
+            self.alive = True
+            self.terminated = False
+            self.killed = False
+
+        def join(self, _timeout):
+            pass
+
+        def is_alive(self):
+            return self.alive
+
+        def terminate(self):
+            self.terminated = True
+            self.alive = False
+
+        def kill(self):
+            self.killed = True
+            self.alive = False
+
+    process = StuckProcess()
+
+    class Executor:
+        def __init__(self):
+            self._processes = {1: process}
+            self.shutdown_call = None
+
+        def shutdown(self, **options):
+            self.shutdown_call = options
+
+    pool = object.__new__(worker.ValidationProcessPool)
+    pool._pause_event = threading.Event()
+    pool._cancel_event = threading.Event()
+    pool._executor = Executor()
+
+    pool.shutdown(force=True, timeout_seconds=0.01)
+
+    assert pool._cancel_event.is_set()
+    assert pool._executor.shutdown_call == {
+        "wait": False,
+        "cancel_futures": True,
+    }
+    assert process.terminated is True
+    assert process.killed is False

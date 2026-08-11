@@ -3,8 +3,14 @@ __pycache__/
 .pytest_cache/
 .tmp-pytest-*/
 .test-temp-*/
+.test-artifacts/
+.test-cache/
 .coverage
 .tmp-coverage-*.xml
 htmlcov/
 .venv/
 library_health.db*
+node_modules/
+playwright-report/
+test-results/
+blob-report/

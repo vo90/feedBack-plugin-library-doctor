@@ -20,9 +20,77 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
       - run: python -m pip install --upgrade pip
       - run: python -m pip install -r requirements-test.txt
-      - run: python -m ruff check validator.py scanner.py library_doctor_scan_worker.py repair.py repair_eligibility.py preview_repair.py batch_repair.py migration.py routes.py tests
+      - run: python -m pip check
+      - run: npm ci
+      - run: python -m ruff check validator.py scanner.py library_doctor_scan_worker.py repair.py repair_eligibility.py preview_repair.py batch_repair.py migration.py privacy.py diagnostics.py api_contracts.py mutation_receipts.py routes.py tools tests
       - run: python -m pytest --cov --cov-report=term
-      - run: python -m py_compile validator.py scanner.py library_doctor_scan_worker.py repair.py repair_eligibility.py preview_repair.py batch_repair.py migration.py routes.py
-      - run: node --check screen.js
+      - run: python -m py_compile validator.py scanner.py library_doctor_scan_worker.py repair.py repair_eligibility.py preview_repair.py batch_repair.py migration.py privacy.py diagnostics.py api_contracts.py mutation_receipts.py routes.py tools/verify_host_contract.py
+      - run: npm run check:frontend
+      - run: npm run lint:frontend
+      - run: npm run test:frontend
+      - run: npm run test:browser:list
+
+  constrained-scan:
+    runs-on: ubuntu-latest
+    env:
+      FEEDBACK_MAX_SCAN_WORKERS: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: python -m pip install --upgrade pip
+      - run: python -m pip install -r requirements-test.txt
+      - name: Run scanner and measured corpus with a 2 GiB virtual-memory ceiling
+        shell: bash
+        run: |
+          ulimit -Sv 2097152
+          python -m pytest tests/test_scanner.py tests/test_scan_worker.py
+          python -m pytest -s tests/test_adversarial_corpus.py
+
+  host-contract:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: minimum-module-capable
+            ref: 950e3483573e458cc2aa7bc255d9590808947faa
+          - name: latest-main
+            ref: main
+    name: Host contract (${{ matrix.name }})
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: got-feedBack/feedBack
+          ref: ${{ matrix.ref }}
+          path: feedback-host
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python tools/verify_host_contract.py feedback-host
+
+  dependency-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: python -m pip install --upgrade pip pip-audit
+      - run: python -m pip_audit -r requirements.txt
+      - run: npm ci
+      - run: npm run audit:dependencies

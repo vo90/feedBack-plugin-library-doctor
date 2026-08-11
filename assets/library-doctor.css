@@ -10,6 +10,7 @@
   --lh-bad: rgb(var(--fb-bad, 248 113 113));
   --lh-review: rgb(var(--fb-review, 96 165 250));
   box-sizing: border-box;
+  width: 100%;
   max-width: 78rem;
   margin: 0 auto;
   padding: 2rem clamp(1rem, 4vw, 3rem) 4rem;
@@ -17,8 +18,12 @@
 }
 
 .lh-shell *, .lh-shell *::before, .lh-shell *::after { box-sizing: border-box; }
+.lh-shell * { min-width: 0; }
 .lh-shell [hidden] { display: none !important; }
-.lh-shell button, .lh-shell input { font: inherit; }
+.lh-shell button, .lh-shell input, .lh-shell select { font: inherit; }
+.lh-shell p, .lh-shell li, .lh-shell button, .lh-shell label, .lh-shell strong, .lh-shell span {
+  overflow-wrap: anywhere;
+}
 
 .lh-header { margin-bottom: 1.5rem; }
 
@@ -38,21 +43,21 @@
   cursor: pointer;
 }
 .lh-workspace-tabs button:hover { color: var(--lh-text); }
-.lh-workspace-tabs button[aria-selected="true"] {
+.lh-workspace-tabs button[aria-pressed="true"] {
   border-bottom-color: var(--lh-accent);
   color: var(--lh-text);
 }
 
 .lh-eyebrow {
   margin: 0 0 .35rem;
-  color: var(--lh-accent);
+  color: var(--lh-text);
   font-size: .75rem;
   font-weight: 700;
   letter-spacing: .09em;
   text-transform: uppercase;
 }
 
-.lh-header h2, .lh-target-panel h3, .lh-results-heading h3, .lh-rule-heading h3 { margin: 0; color: var(--lh-text); }
+.lh-header h2, .lh-guidance h3, .lh-target-panel h3, .lh-results-heading h3, .lh-rule-heading h3 { margin: 0; color: var(--lh-text); }
 .lh-header h2 { font-size: clamp(1.8rem, 4vw, 2.5rem); line-height: 1.15; }
 .lh-target-panel h3,
 .lh-results-heading h3,
@@ -65,15 +70,46 @@
   line-height: 1.6;
 }
 
+.lh-safety-note { max-width: 48rem; margin-top: .65rem; color: var(--lh-dim); font-size: .82rem; }
+.lh-safety-note > summary { width: max-content; cursor: pointer; color: var(--lh-text); font-weight: 700; }
+.lh-safety-note > p { margin: .5rem 0 0; line-height: 1.5; }
+
 .lh-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: .65rem; }
+
+.lh-guidance {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1rem;
+  border: 1px solid color-mix(in srgb, var(--lh-accent) 55%, var(--lh-border));
+  border-radius: .8rem;
+  padding: 1.15rem;
+  background: color-mix(in srgb, var(--lh-accent) 8%, var(--lh-card));
+}
+.lh-guidance h3 { font-size: clamp(1.2rem, 3vw, 1.55rem); }
+.lh-guidance .lh-muted { max-width: 46rem; line-height: 1.5; }
 
 .lh-target-panel {
   margin-bottom: 1rem;
   border: 1px solid var(--lh-border);
   border-radius: .8rem;
-  padding: 1rem 1.1rem;
+  padding: 0;
   background: color-mix(in srgb, var(--lh-card) 88%, transparent);
 }
+.lh-target-panel > summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: .85rem 1.1rem;
+  color: var(--lh-text);
+  cursor: pointer;
+  list-style-position: inside;
+}
+.lh-target-panel > summary span { font-weight: 750; }
+.lh-target-panel > summary strong { color: var(--lh-dim); font-size: .78rem; font-weight: 600; text-align: right; }
+.lh-target-panel-body { border-top: 1px solid var(--lh-border); padding: 1rem 1.1rem; }
 
 .lh-playback-help { max-width: 54rem; }
 
@@ -160,7 +196,7 @@
   background: color-mix(in srgb, var(--lh-card) 72%, transparent);
 }
 .lh-worker-settings > summary { cursor: pointer; color: var(--lh-text); font-size: .82rem; font-weight: 700; }
-.lh-worker-settings > summary span { margin-left: .35rem; color: var(--lh-accent); font-weight: 600; }
+.lh-worker-settings > summary span { margin-left: .35rem; color: var(--lh-text); font-weight: 600; }
 .lh-worker-settings > p { margin: .55rem 0; font-size: .76rem; line-height: 1.45; }
 .lh-worker-settings > small { display: block; margin-top: .55rem; font-size: .72rem; line-height: 1.4; }
 .lh-worker-controls { display: flex; flex-wrap: wrap; align-items: flex-end; gap: .65rem; }
@@ -205,14 +241,14 @@
 .lh-button:disabled { opacity: .45; cursor: default; }
 .lh-button-primary {
   border-color: var(--lh-accent);
-  background: var(--lh-accent);
+  background: color-mix(in srgb, var(--lh-accent) 78%, black);
   color: rgb(var(--fb-on-accent, 255 255 255));
   font-weight: 700;
 }
 .lh-button-danger { border-color: color-mix(in srgb, var(--lh-bad) 70%, transparent); color: var(--lh-bad); }
 .lh-button-safe { border-color: color-mix(in srgb, var(--lh-good) 65%, var(--lh-border)); color: var(--lh-good); }
 
-.lh-progress-panel, .lh-rule-section, .lh-results-section, .lh-batch-section {
+.lh-progress-panel, .lh-rule-section, .lh-results-section, .lh-batch-section, .lh-activity-section, .lh-scan-details {
   border: 1px solid var(--lh-border);
   border-radius: .8rem;
   background: color-mix(in srgb, var(--lh-card) 88%, transparent);
@@ -340,10 +376,9 @@
   background: var(--lh-card);
   color: var(--lh-text);
   text-align: left;
-  cursor: pointer;
+  cursor: default;
 }
 
-.lh-summary-card:hover { border-color: var(--lh-accent); }
 .lh-summary-value { font-size: 1.65rem; font-weight: 750; line-height: 1; }
 .lh-summary-label { color: var(--lh-dim); font-size: .78rem; line-height: 1.3; }
 .lh-tone-error .lh-summary-value { color: var(--lh-bad); }
@@ -352,7 +387,7 @@
 .lh-tone-good .lh-summary-value { color: var(--lh-good); }
 .lh-tone-info .lh-summary-value { color: var(--lh-accent); }
 
-.lh-coverage-note { margin: .8rem .1rem 1rem; color: var(--lh-dim); font-size: .83rem; line-height: 1.5; }
+.lh-coverage-note { margin: .75rem 0 0; color: var(--lh-dim); font-size: .83rem; line-height: 1.5; }
 .lh-rule-section { margin-bottom: 1rem; padding: 1.15rem; }
 .lh-rule-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 1rem; }
 .lh-export-actions { display: flex; flex-wrap: wrap; gap: .5rem; }
@@ -417,6 +452,25 @@
 }
 .lh-filters button:hover { color: var(--lh-text); }
 .lh-filters button[aria-pressed="true"] { border-color: var(--lh-accent); background: color-mix(in srgb, var(--lh-accent) 18%, transparent); color: var(--lh-text); }
+
+.lh-more-filters { margin: -.35rem 0 1rem; color: var(--lh-dim); font-size: .8rem; }
+.lh-more-filters > summary { width: max-content; cursor: pointer; color: var(--lh-text); font-weight: 700; }
+.lh-more-filters > .lh-filters { margin: .65rem 0 0; }
+
+.lh-activity-section, .lh-scan-details { margin-top: 1rem; overflow: hidden; }
+.lh-activity-section > summary, .lh-scan-details > summary {
+  padding: .85rem 1.1rem;
+  color: var(--lh-text);
+  cursor: pointer;
+  font-weight: 750;
+}
+.lh-activity-section[open] > summary, .lh-scan-details[open] > summary { border-bottom: 1px solid var(--lh-border); }
+.lh-activity-section .lh-repair-result { margin: 1rem; }
+.lh-scan-details > .lh-scan-provenance,
+.lh-scan-details > .lh-coverage-note { margin-right: 1.1rem; margin-left: 1.1rem; }
+.lh-scan-details > .lh-rule-section { margin: 1rem; }
+
+.lh-legacy-layout .lh-target-panel > summary strong { display: none; }
 
 .lh-results { display: grid; gap: .65rem; }
 .lh-package {
@@ -609,10 +663,15 @@
 .lh-song-tool-card .lh-repair-buttons { margin-top: .75rem; }
 .lh-visually-hidden { position: absolute !important; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 
-.lh-shell button:focus-visible, .lh-shell input:focus-visible { outline: 2px solid var(--lh-accent); outline-offset: 2px; }
+.lh-shell :is(button, input, select, summary, audio, [tabindex]):focus-visible {
+  outline: 3px solid var(--lh-accent);
+  outline-offset: 3px;
+}
 
 @media (max-width: 1050px) { .lh-summary { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 @media (max-width: 700px) {
+  .lh-guidance { align-items: stretch; flex-direction: column; }
+  .lh-target-panel > summary { align-items: flex-start; flex-direction: column; gap: .25rem; }
   .lh-target-grid { grid-template-columns: 1fr; }
   .lh-target-footer, .lh-results-heading, .lh-rule-heading { flex-direction: column; align-items: stretch; }
   .lh-actions { justify-content: flex-start; }
@@ -629,6 +688,54 @@
   .lh-song-tool-selection-header { flex-direction: column; }
   .lh-song-tool-item { grid-template-columns: minmax(0, 1fr); }
   .lh-song-tool-item .lh-song-tool-format { grid-column: 1; grid-row: auto; }
+}
+
+@media (max-width: 420px) {
+  .lh-shell { padding-right: .75rem; padding-left: .75rem; }
+  .lh-workspace-tabs { align-items: stretch; flex-direction: column; border-bottom: 0; }
+  .lh-workspace-tabs button { border: 1px solid var(--lh-border); border-radius: .45rem; }
+  .lh-workspace-tabs button[aria-pressed="true"] { border-color: var(--lh-accent); }
+  .lh-summary { grid-template-columns: 1fr; }
+  .lh-package summary { flex-wrap: wrap; }
+  .lh-package-badges { width: 100%; max-width: none; justify-content: flex-start; }
+  .lh-actions > *, .lh-repair-buttons > *, .lh-export-actions > * { width: 100%; }
+  .lh-pagination { flex-wrap: wrap; gap: .5rem; }
+  .lh-media-preview-player { width: 100%; }
+}
+
+@media (forced-colors: active) {
+  .lh-shell {
+    --lh-surface: Canvas;
+    --lh-card: Canvas;
+    --lh-border: CanvasText;
+    --lh-text: CanvasText;
+    --lh-dim: CanvasText;
+    --lh-accent: Highlight;
+    --lh-good: CanvasText;
+    --lh-warn: CanvasText;
+    --lh-bad: CanvasText;
+    --lh-review: CanvasText;
+    forced-color-adjust: auto;
+  }
+  .lh-shell :is(button, input, select, summary, audio, [tabindex]):focus-visible {
+    outline-color: Highlight;
+  }
+  .lh-shell :is(button, input, select, .lh-package, .lh-badge, .lh-guidance,
+    .lh-target-panel, .lh-target-option, .lh-summary-card, .lh-repair-card,
+    .lh-song-tools-heading, .lh-song-tool-browser, .lh-song-tool-selection,
+    .lh-song-tool-card) {
+    border-color: CanvasText;
+  }
+  .lh-shell :is(button[aria-pressed="true"], button[aria-current="true"],
+    button[aria-expanded="true"], .lh-target-option:has(input:checked)) {
+    border-color: Highlight;
+  }
+  .lh-shell :is(button[aria-pressed="true"], button[aria-current="true"],
+    button[aria-expanded="true"]) {
+    color: HighlightText;
+    background: Highlight;
+  }
+  .lh-shell .lh-workspace-tabs button[aria-pressed="true"] { border-bottom-color: Highlight; }
 }
 
 @media (prefers-reduced-motion: reduce) { .lh-package summary::before { transition: none; } }

@@ -1,3 +1,4 @@
+import concurrent.futures
 import importlib.util
 import json
 import logging
@@ -50,6 +51,8 @@ def _client(
     with_library=True,
     validator_hook=None,
     preview_hook=None,
+    repair_hook=None,
+    scanner_hook=None,
 ):
     root = Path(__file__).parents[1]
     loaded = {}
@@ -61,8 +64,57 @@ def _client(
             )
             if name == "validator" and validator_hook is not None:
                 validator_hook(loaded[name])
+            if name == "library_doctor_scan_worker" and validator_hook is not None:
+                validator = loaded["validator"]
+
+                class ThreadValidationPool:
+                    def __init__(self, *, max_workers, validator_version):
+                        assert validator_version == validator.VALIDATOR_VERSION
+                        self.executor = concurrent.futures.ThreadPoolExecutor(
+                            max_workers=max_workers
+                        )
+                        self.cancelled = threading.Event()
+
+                    def submit(self, path, package, deep_audio):
+                        def run():
+                            started = time.perf_counter()
+                            if self.cancelled.is_set():
+                                return {
+                                    "outcome": "cancelled",
+                                    "elapsed_seconds": 0.0,
+                                }
+                            options = {"scan_checkpoint": lambda: None}
+                            if deep_audio:
+                                options["deep_audio"] = True
+                            report = validator.validate_feedpak(
+                                path, package, **options
+                            )
+                            return {
+                                "outcome": "complete",
+                                "report": report,
+                                "elapsed_seconds": max(
+                                    0.0, time.perf_counter() - started
+                                ),
+                            }
+
+                        return self.executor.submit(run)
+
+                    def set_paused(self, _paused):
+                        pass
+
+                    def cancel(self):
+                        self.cancelled.set()
+
+                    def shutdown(self, **_options):
+                        self.executor.shutdown(wait=True, cancel_futures=True)
+
+                loaded[name].ValidationProcessPool = ThreadValidationPool
             if name == "preview_repair" and preview_hook is not None:
                 preview_hook(loaded[name])
+            if name == "repair" and repair_hook is not None:
+                repair_hook(loaded[name])
+            if name == "scanner" and scanner_hook is not None:
+                scanner_hook(loaded[name])
         return loaded[name]
 
     library = tmp_path / "library"
@@ -298,7 +350,8 @@ def test_playback_state_pauses_and_resumes_scan(tmp_path):
         status = client.get("/api/plugins/library_doctor/status").json()
         time.sleep(0.01)
 
-    assert invalid.status_code == 400
+    assert invalid.status_code == 422
+    assert invalid.json()["detail"]["code"] == "invalid_request"
     assert held.status_code == 200
     assert status["running"] is True
     assert status["playback_active"] is True
@@ -400,7 +453,10 @@ def test_scan_rejects_targets_outside_the_configured_library(tmp_path):
     )
 
     assert response.status_code == 400
-    assert "inside the configured song library" in response.json()["detail"]
+    assert (
+        "inside the configured song library"
+        in response.json()["detail"]["message"]
+    )
     assert str(outside) not in response.text
     client.close()
 
@@ -411,7 +467,93 @@ def test_unknown_result_filter_is_rejected(tmp_path):
     response = client.get("/api/plugins/library_doctor/results?filter=unknown")
 
     assert response.status_code == 400
-    assert "Unknown result filter" in response.json()["detail"]
+    assert "Unknown result filter" in response.json()["detail"]["message"]
+    client.close()
+
+
+def test_core_route_payloads_match_the_phase2_typed_contracts(tmp_path):
+    root = Path(__file__).parents[1]
+    contracts = _load(
+        root / "api_contracts.py", f"library_doctor_api_contracts_{id(tmp_path)}"
+    )
+    client, _library = _client(tmp_path)
+
+    status = client.get("/api/plugins/library_doctor/status")
+    results = client.get("/api/plugins/library_doctor/results")
+    repairs = client.get("/api/plugins/library_doctor/repairs")
+    error = client.get("/api/plugins/library_doctor/results?filter=not-a-filter")
+
+    assert status.status_code == results.status_code == repairs.status_code == 200
+    contracts.StatusContract.model_validate(status.json())
+    contracts.ResultsContract.model_validate(results.json())
+    catalog = contracts.RepairCatalogContract.model_validate(repairs.json())
+    assert catalog.items
+    assert error.status_code == 400
+    contracts.ErrorEnvelopeContract.model_validate(error.json())
+    client.close()
+
+
+def test_openapi_exposes_typed_mutations_and_one_error_contract(tmp_path):
+    client, _library = _client(tmp_path)
+    document = client.app.openapi()
+    paths = {
+        path: operations
+        for path, operations in document["paths"].items()
+        if path.startswith("/api/plugins/library_doctor")
+    }
+
+    expected_requests = {
+        "/api/plugins/library_doctor/playback": "PlaybackStateRequestContract",
+        "/api/plugins/library_doctor/repair/apply": "RepairApplyRequestContract",
+        "/api/plugins/library_doctor/repair/media/automatic": (
+            "AutomaticPreviewRequestContract"
+        ),
+        "/api/plugins/library_doctor/repair/all/apply": "AllSafeApplyRequestContract",
+        "/api/plugins/library_doctor/repair/restore": "RecoveryMutationRequestContract",
+        "/api/plugins/library_doctor/repair/recovery/finalize": (
+            "RecoveryMutationRequestContract"
+        ),
+    }
+    for path, schema_name in expected_requests.items():
+        schema = paths[path]["post" if path != "/api/plugins/library_doctor/playback" else "put"][
+            "requestBody"
+        ]["content"]["application/json"]["schema"]
+        assert schema["$ref"].endswith(f"/{schema_name}")
+
+    for operations in paths.values():
+        for operation in operations.values():
+            if not isinstance(operation, dict) or "responses" not in operation:
+                continue
+            for status in ("400", "404", "409", "422", "500", "503"):
+                schema = operation["responses"][status]["content"]["application/json"][
+                    "schema"
+                ]
+                assert schema["$ref"].endswith("/ErrorEnvelopeContract")
+    client.close()
+
+
+def test_unexpected_database_fault_stays_inside_the_error_contract(tmp_path):
+    private_detail = "C:/Private Artist/Unreleased Song.feedpak database malformed"
+
+    def scanner_hook(module):
+        def fail_status(_scanner):
+            raise module.sqlite3.DatabaseError(private_detail)
+
+        module.LibraryScanner.status = fail_status
+
+    client, _library = _client(tmp_path, scanner_hook=scanner_hook)
+
+    response = client.get("/api/plugins/library_doctor/status")
+
+    assert response.status_code == 500
+    assert response.json()["detail"] == {
+        "code": "internal_plugin_error",
+        "message": "Library Doctor could not complete the request safely.",
+        "file_state": "unchanged",
+        "retryable": True,
+        "next_action": "retry_later",
+    }
+    assert private_detail not in response.text
     client.close()
 
 
@@ -756,8 +898,8 @@ def test_scan_accepts_a_custom_worker_ceiling_and_rejects_invalid_values(tmp_pat
     )
     status = _wait_for_scan(client)
 
-    assert invalid.status_code == 400
-    assert "positive whole number" in invalid.json()["detail"]
+    assert invalid.status_code == 422
+    assert invalid.json()["detail"]["code"] == "invalid_request"
     assert accepted.status_code == 202
     assert status["worker_policy"]["mode"] == "custom"
     assert status["worker_policy"]["limits"]["user"] == 8
@@ -821,6 +963,183 @@ def test_recovery_finalization_keeps_repaired_feedpak_and_removes_undo_copy(tmp_
     history = client.get("/api/plugins/library_doctor/repair/history?limit=1").json()
     assert history["items"][0]["outcome"] == "finalized"
     assert history["items"][0]["undo_available"] is False
+    client.close()
+
+
+def test_mutation_request_id_replays_apply_and_restore_receipts(tmp_path):
+    client, library = _client(tmp_path)
+    package = _valid_package(library)
+    arrangement = package / "arrangements" / "lead.json"
+    note = {"t": 2.0, "s": 1, "f": 5}
+    arrangement.write_text(
+        json.dumps({"notes": [note, dict(note)], "chords": []}),
+        encoding="utf-8",
+    )
+    plan = client.post(
+        "/api/plugins/library_doctor/repair/preview",
+        json={"package": "Artist/Song.feedpak", "rule_code": "chart.duplicate-note"},
+    ).json()
+    apply_body = {
+        "package": "Artist/Song.feedpak",
+        "rule_code": "chart.duplicate-note",
+        "plan_id": plan["plan_id"],
+        "request_id": "phase4-route-apply-0001",
+    }
+
+    first = client.post("/api/plugins/library_doctor/repair/apply", json=apply_body)
+    replay = client.post("/api/plugins/library_doctor/repair/apply", json=apply_body)
+
+    assert first.status_code == replay.status_code == 200
+    assert first.json()["idempotent_replay"] is False
+    assert replay.json()["idempotent_replay"] is True
+    assert replay.json()["backup_id"] == first.json()["backup_id"]
+    assert len(json.loads(arrangement.read_text(encoding="utf-8"))["notes"]) == 1
+    lookup = client.get(
+        "/api/plugins/library_doctor/repair/receipt/phase4-route-apply-0001"
+    )
+    assert lookup.status_code == 200
+    assert lookup.json()["state"] == "complete"
+    assert lookup.json()["operation"] == "repair.apply"
+
+    reused = client.post(
+        "/api/plugins/library_doctor/repair/apply",
+        json={**apply_body, "plan_id": "0" * 64},
+    )
+    mismatch = client.post(
+        "/api/plugins/library_doctor/repair/apply",
+        headers={"Idempotency-Key": "phase4-route-apply-other"},
+        json=apply_body,
+    )
+    assert reused.status_code == 409
+    assert reused.json()["detail"]["code"] == "idempotency_key_reused"
+    assert mismatch.status_code == 409
+    assert mismatch.json()["detail"]["code"] == "idempotency_key_mismatch"
+
+    restore_body = {
+        "package": "Artist/Song.feedpak",
+        "backup_id": first.json()["backup_id"],
+        "request_id": "phase4-route-restore-0001",
+    }
+    restored = client.post(
+        "/api/plugins/library_doctor/repair/restore",
+        json=restore_body,
+    )
+    restored_replay = client.post(
+        "/api/plugins/library_doctor/repair/restore",
+        json=restore_body,
+    )
+    assert restored.status_code == restored_replay.status_code == 200
+    assert restored_replay.json()["idempotent_replay"] is True
+    assert restored_replay.json()["outcome"] == "restored"
+    assert len(json.loads(arrangement.read_text(encoding="utf-8"))["notes"]) == 2
+    client.close()
+
+
+def test_finalization_reserves_mutation_lane_and_replays_after_backup_removal(tmp_path):
+    finalize_entered = threading.Event()
+    allow_finalize = threading.Event()
+
+    def repair_hook(module):
+        original = module.RepairService.finalize_backup
+
+        def blocked_finalize(service, *args, **kwargs):
+            finalize_entered.set()
+            assert allow_finalize.wait(5)
+            return original(service, *args, **kwargs)
+
+        module.RepairService.finalize_backup = blocked_finalize
+
+    client, library = _client(tmp_path, repair_hook=repair_hook)
+    package = _valid_package(library)
+    arrangement = package / "arrangements" / "lead.json"
+    note = {"t": 2.0, "s": 1, "f": 5}
+    arrangement.write_text(
+        json.dumps({"notes": [note, dict(note)], "chords": []}),
+        encoding="utf-8",
+    )
+    plan = client.post(
+        "/api/plugins/library_doctor/repair/preview",
+        json={"package": "Artist/Song.feedpak", "rule_code": "chart.duplicate-note"},
+    ).json()
+    applied = client.post(
+        "/api/plugins/library_doctor/repair/apply",
+        json={
+            "package": "Artist/Song.feedpak",
+            "rule_code": "chart.duplicate-note",
+            "plan_id": plan["plan_id"],
+        },
+    ).json()
+    finalize_body = {
+        "package": "Artist/Song.feedpak",
+        "backup_id": applied["backup_id"],
+        "request_id": "phase4-route-finalize-0001",
+    }
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(
+            client.post,
+            "/api/plugins/library_doctor/repair/recovery/finalize",
+            json=finalize_body,
+        )
+        assert finalize_entered.wait(3)
+        try:
+            concurrent_undo = client.post(
+                "/api/plugins/library_doctor/repair/restore",
+                json={
+                    "package": "Artist/Song.feedpak",
+                    "backup_id": applied["backup_id"],
+                },
+            )
+            assert concurrent_undo.status_code == 409
+            assert concurrent_undo.json()["detail"]["code"] == "operation_busy"
+            assert concurrent_undo.json()["detail"]["retryable"] is True
+        finally:
+            allow_finalize.set()
+        finalized = future.result(timeout=5)
+
+    assert finalized.status_code == 200
+    assert finalized.json()["idempotent_replay"] is False
+    replay = client.post(
+        "/api/plugins/library_doctor/repair/recovery/finalize",
+        json=finalize_body,
+    )
+    assert replay.status_code == 200
+    assert replay.json()["idempotent_replay"] is True
+    assert replay.json()["backup_id"] == applied["backup_id"]
+    client.close()
+
+
+@pytest.mark.parametrize(
+    ("path", "payload"),
+    (
+        ("/repair/apply", {"package": "Song.feedpak", "unexpected": True}),
+        ("/repair/restore", {"package": "Song.feedpak", "backup_id": 123}),
+        ("/scan", {"scope": "library", "max_workers": True}),
+    ),
+)
+def test_request_validation_uses_the_uniform_error_envelope(tmp_path, path, payload):
+    root = Path(__file__).parents[1]
+    contracts = _load(
+        root / "api_contracts.py", f"library_doctor_phase4_contracts_{id(payload)}"
+    )
+    client, _library = _client(tmp_path)
+
+    response = client.post(f"/api/plugins/library_doctor{path}", json=payload)
+
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert set(detail) == {
+        "code",
+        "message",
+        "file_state",
+        "retryable",
+        "next_action",
+    }
+    assert detail["code"] == "invalid_request"
+    assert detail["file_state"] == "unchanged"
+    assert detail["retryable"] is False
+    assert detail["next_action"] == "correct_request"
+    contracts.ErrorEnvelopeContract.model_validate(response.json())
     client.close()
 
 
@@ -2486,8 +2805,8 @@ def test_batch_undo_requires_a_result_and_a_reviewed_plan(tmp_path):
 
     assert no_result.status_code == 409
     assert no_result.json()["detail"]["code"] == "batch_result_unavailable"
-    assert missing_plan.status_code == 400
-    assert "Review Undo all" in missing_plan.json()["detail"]
+    assert missing_plan.status_code == 422
+    assert missing_plan.json()["detail"]["code"] == "invalid_request"
     assert invalid_plan.status_code == 409
     assert invalid_plan.json()["detail"]["code"] == "invalid_undo_plan"
     client.close()
@@ -2566,7 +2885,7 @@ def test_batch_preview_requires_a_complete_current_scan(tmp_path):
     response = client.post("/api/plugins/library_doctor/repair/batch/preview")
 
     assert response.status_code == 409
-    assert "Complete the current scan scope" in response.json()["detail"]
+    assert "Complete the current scan scope" in response.json()["detail"]["message"]
     client.close()
 
 
@@ -2847,7 +3166,7 @@ def test_repair_is_blocked_while_playback_has_priority(tmp_path):
     )
 
     assert response.status_code == 409
-    assert "Exit the song player" in response.json()["detail"]
+    assert "Exit the song player" in response.json()["detail"]["message"]
     assert len(json.loads(arrangement.read_text(encoding="utf-8"))["notes"]) == 2
     client.close()
 
@@ -2965,5 +3284,5 @@ def test_missing_library_is_reported_in_status(tmp_path):
     response = client.post("/api/plugins/library_doctor/scan")
 
     assert response.status_code == 400
-    assert "configured" in response.json()["detail"].lower()
+    assert "configured" in response.json()["detail"]["message"].lower()
     client.close()

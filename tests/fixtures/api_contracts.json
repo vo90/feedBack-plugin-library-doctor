@@ -1,0 +1,84 @@
+{
+  "requests": {
+    "scan": {
+      "scope": "folder",
+      "path": "C:/Synthetic Library/Contract Set",
+      "deep_audio": true,
+      "max_workers": 2
+    },
+    "repair_preview": {
+      "package": "synthetic/contract-song.feedpak",
+      "rule_code": "chart.duplicate-note"
+    },
+    "repair_apply": {
+      "package": "synthetic/contract-song.feedpak",
+      "rule_code": "chart.duplicate-note",
+      "plan_id": "synthetic-plan-0001"
+    },
+    "batch_preview": {
+      "include_preview_repairs": false
+    }
+  },
+  "responses": {
+    "status": {
+      "stage": "complete",
+      "running": false,
+      "scan_current": true,
+      "summary": {"total": 1, "errors": 1, "warnings": 0, "reviews": 0},
+      "last_scan": {"complete": true, "target": {"label": "Synthetic library"}},
+      "batch": {"phase": "idle", "running": false}
+    },
+    "results": {
+      "total": 1,
+      "limit": 50,
+      "offset": 0,
+      "items": [
+        {
+          "package": "synthetic/contract-song.feedpak",
+          "title": "Contract Song",
+          "artist": "Synthetic Artist",
+          "features": {"repair_scan_current": true},
+          "findings": [
+            {
+              "code": "chart.duplicate-note",
+              "severity": "error",
+              "category": "validation",
+              "message": "Synthetic duplicate note.",
+              "affected_count": 1
+            }
+          ]
+        }
+      ]
+    },
+    "repair_catalog": {
+      "schema": "library_doctor.repair_catalog.v1",
+      "catalog_version": "synthetic-contract-v1",
+      "items": [
+        {
+          "rule_code": "chart.duplicate-note",
+          "action_kind": "remove_exact_duplicate_notes",
+          "source_kind": "arrangement",
+          "item_name": "note",
+          "safety": "safe_automatic",
+          "title": "Remove exact duplicate notes",
+          "description": "Keep the first exact note and remove only exact copies.",
+          "player_result": "One stored instruction remains.",
+          "user_value": "The highway receives one unambiguous note.",
+          "change_kind": "remove_duplicates"
+        }
+      ],
+      "combined": {"rule_code": "package.all-safe", "safety": "safe_automatic"}
+    }
+  },
+  "errors": {
+    "structured": {
+      "detail": {
+        "code": "stale_preview",
+        "message": "The reviewed repair no longer matches the current package.",
+        "file_state": "unchanged",
+        "retryable": true,
+        "next_action": "review_repair"
+      }
+    }
+  }
+}

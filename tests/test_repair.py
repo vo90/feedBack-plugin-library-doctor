@@ -3,6 +3,9 @@ import hashlib
 import importlib.util
 import json
 import logging
+import os
+import shutil
+import subprocess
 import sys
 import zipfile
 from pathlib import Path
@@ -1988,3 +1991,598 @@ def test_apply_json_member_rejects_tampered_or_stale_plans(repair):
     with pytest.raises(repair.RepairPlanningError) as stale:
         repair.apply_json_member(raw + b" ", plan)
     assert stale.value.code == "source_changed"
+
+
+def _phase0_directory_service(repair, tmp_path, *, barrier=None):
+    library = tmp_path / "library"
+    package = library / "Song.feedpak"
+    arrangements = package / "arrangements"
+    arrangements.mkdir(parents=True, exist_ok=True)
+    (package / "manifest.yaml").write_text(
+        "arrangements:\n"
+        "  - id: lead\n"
+        "    file: arrangements/lead.json\n"
+        "  - id: rhythm\n"
+        "    file: arrangements/rhythm.json\n",
+        encoding="utf-8",
+    )
+    anchor = {"time": 0.0, "fret": 1, "width": 4}
+    original = _raw({
+        "notes": [],
+        "chords": [],
+        "anchors": [anchor, dict(anchor)],
+    })
+    for name in ("lead.json", "rhythm.json"):
+        target = arrangements / name
+        if not target.exists():
+            target.write_bytes(original)
+
+    def validate(path, package_name, *, deep_audio=False):
+        duplicate = False
+        for name in ("lead.json", "rhythm.json"):
+            document = json.loads((path / "arrangements" / name).read_bytes())
+            duplicate = duplicate or len(document.get("anchors", [])) > 1
+        findings = (
+            [{"code": "chart.duplicate-anchor", "severity": "warning"}]
+            if duplicate else []
+        )
+        return {
+            "schema": "library_doctor.package.v1",
+            "validator_version": "rules-test",
+            "package": package_name,
+            "title": "Song",
+            "artist": "Artist",
+            "status": "warning" if findings else "healthy",
+            "counts": {"error": 0, "warning": len(findings), "info": 0},
+            "features": {"deep_audio_checked": bool(deep_audio)},
+            "findings": findings,
+        }
+
+    service = repair.RepairService(
+        config_dir=tmp_path / "config",
+        get_dlc_dir=lambda: library,
+        validate_feedpak=validate,
+        validator_version="rules-test",
+        log=logging.getLogger("library-doctor-phase0-transaction-tests"),
+        transaction_barrier=barrier,
+    )
+    return service, package, original, validate
+
+
+def _phase6_archive_service(repair, tmp_path):
+    library = tmp_path / "library"
+    library.mkdir()
+    package = library / "Song.feedpak"
+    anchor = {"time": 0.0, "fret": 1, "width": 4}
+    arrangement = _raw({
+        "notes": [],
+        "chords": [],
+        "anchors": [anchor, dict(anchor)],
+    })
+    with zipfile.ZipFile(package, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(
+            "manifest.yaml",
+            "arrangements:\n"
+            "  - id: lead\n"
+            "    file: arrangements/lead.json\n",
+        )
+        archive.writestr("arrangements/lead.json", arrangement)
+        archive.writestr("cover.bin", b"unchanged-cover" * 64)
+
+    def validate(path, package_name, *, deep_audio=False):
+        with zipfile.ZipFile(path) as archive:
+            document = json.loads(archive.read("arrangements/lead.json"))
+        findings = (
+            [{"code": "chart.duplicate-anchor", "severity": "warning"}]
+            if len(document["anchors"]) > 1 else []
+        )
+        return {
+            "schema": "library_doctor.package.v1",
+            "validator_version": "rules-test",
+            "package": package_name,
+            "title": "Song",
+            "artist": "Artist",
+            "status": "warning" if findings else "healthy",
+            "counts": {"error": 0, "warning": len(findings), "info": 0},
+            "features": {"deep_audio_checked": bool(deep_audio)},
+            "findings": findings,
+        }
+
+    service = repair.RepairService(
+        config_dir=tmp_path / "config",
+        get_dlc_dir=lambda: library,
+        validate_feedpak=validate,
+        validator_version="rules-test",
+        log=logging.getLogger("library-doctor-phase6-archive-fault-tests"),
+    )
+    return service, package
+
+
+def _link_directory_for_containment_test(link: Path, target: Path):
+    if os.name == "nt":
+        completed = subprocess.run(
+            ["cmd.exe", "/d", "/c", "mklink", "/J", str(link), str(target)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if completed.returncode == 0:
+            return
+    else:
+        try:
+            link.symlink_to(target, target_is_directory=True)
+            return
+        except OSError:
+            pass
+    pytest.skip("This platform cannot create a temporary directory link.")
+
+
+def test_final_source_guard_preserves_an_external_edit_after_backup(
+    repair, tmp_path,
+):
+    edited = _raw({"notes": [], "chords": [], "anchors": [], "external": True})
+    package_holder = {}
+
+    def barrier(name, context):
+        if name == "before_member_replace" and context["member_index"] == 2:
+            (package_holder["path"] / "arrangements" / "rhythm.json").write_bytes(
+                edited
+            )
+
+    service, package, original, _validate = _phase0_directory_service(
+        repair, tmp_path, barrier=barrier
+    )
+    package_holder["path"] = package
+    plan = service.preview_all("Song.feedpak")
+
+    with pytest.raises(repair.RepairPlanningError) as raised:
+        service.apply_all("Song.feedpak", plan["plan_id"])
+
+    assert raised.value.code == "source_changed"
+    assert (package / "arrangements" / "lead.json").read_bytes() == original
+    assert (package / "arrangements" / "rhythm.json").read_bytes() == edited
+    backup_dir = tmp_path / "config" / "library_doctor" / "repair_backups"
+    assert not list(backup_dir.glob("*.zip"))
+    transaction_dir = (
+        tmp_path / "config" / "library_doctor" / "repair_transactions"
+    )
+    assert not list(transaction_dir.glob("*.json"))
+
+
+def test_repair_reopens_and_rejects_a_corrupted_durable_backup(
+    repair, tmp_path,
+):
+    config_dir = tmp_path / "config"
+
+    def barrier(name, context):
+        if name != "backup_durable":
+            return
+        backup = (
+            config_dir
+            / "library_doctor"
+            / "repair_backups"
+            / f"{context['backup_id']}.zip"
+        )
+        backup.write_bytes(b"corrupted-after-durable-rename")
+
+    service, package, original, _validate = _phase0_directory_service(
+        repair, tmp_path, barrier=barrier
+    )
+    plan = service.preview_all("Song.feedpak")
+
+    with pytest.raises(repair.RepairPlanningError) as raised:
+        service.apply_all("Song.feedpak", plan["plan_id"])
+
+    assert raised.value.code == "backup_failed"
+    assert raised.value.file_state == "unchanged"
+    assert (package / "arrangements" / "lead.json").read_bytes() == original
+    assert (package / "arrangements" / "rhythm.json").read_bytes() == original
+    assert not list(
+        (config_dir / "library_doctor" / "repair_backups").glob("*.zip")
+    )
+    assert not list(
+        (config_dir / "library_doctor" / "repair_transactions").glob("*.json")
+    )
+
+
+def test_archive_final_source_guard_binds_the_complete_package_bytes(
+    repair, tmp_path,
+):
+    library = tmp_path / "library"
+    library.mkdir()
+    package = library / "Song.feedpak"
+    anchor = {"time": 0.0, "fret": 1, "width": 4}
+    arrangement = _raw({
+        "notes": [],
+        "chords": [],
+        "anchors": [anchor, dict(anchor)],
+    })
+    with zipfile.ZipFile(package, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(
+            "manifest.yaml",
+            "arrangements:\n"
+            "  - id: lead\n"
+            "    file: arrangements/lead.json\n",
+        )
+        archive.writestr("arrangements/lead.json", arrangement)
+
+    def validate(path, package_name, *, deep_audio=False):
+        with zipfile.ZipFile(path) as archive:
+            document = json.loads(archive.read("arrangements/lead.json"))
+        findings = (
+            [{"code": "chart.duplicate-anchor", "severity": "warning"}]
+            if len(document["anchors"]) > 1 else []
+        )
+        return {
+            "validator_version": "rules-test",
+            "package": package_name,
+            "title": "Song",
+            "artist": "Artist",
+            "status": "warning" if findings else "healthy",
+            "counts": {"error": 0, "warning": len(findings), "info": 0},
+            "features": {"deep_audio_checked": bool(deep_audio)},
+            "findings": findings,
+        }
+
+    def barrier(name, _context):
+        if name == "before_archive_replace":
+            with zipfile.ZipFile(package, "a", zipfile.ZIP_DEFLATED) as archive:
+                archive.writestr("external-edit.txt", b"preserve me")
+
+    service = repair.RepairService(
+        config_dir=tmp_path / "config",
+        get_dlc_dir=lambda: library,
+        validate_feedpak=validate,
+        validator_version="rules-test",
+        log=logging.getLogger("library-doctor-phase0-archive-guard-tests"),
+        transaction_barrier=barrier,
+    )
+    plan = service.preview_all("Song.feedpak")
+
+    with pytest.raises(repair.RepairPlanningError) as raised:
+        service.apply_all("Song.feedpak", plan["plan_id"])
+
+    assert raised.value.code == "source_changed"
+    with zipfile.ZipFile(package) as archive:
+        assert archive.read("external-edit.txt") == b"preserve me"
+        assert archive.read("arrangements/lead.json") == arrangement
+    assert not list(
+        (tmp_path / "config" / "library_doctor" / "repair_backups").glob(
+            "*.zip"
+        )
+    )
+
+
+def test_archive_candidate_short_read_is_detected_before_backup_or_commit(
+    repair, tmp_path, monkeypatch,
+):
+    service, package = _phase6_archive_service(repair, tmp_path)
+    original = package.read_bytes()
+    plan = service.preview_all("Song.feedpak")
+
+    def short_copy(source, destination, length=0):
+        del length
+        destination.write(source.read(2))
+
+    monkeypatch.setattr(repair.shutil, "copyfileobj", short_copy)
+    with pytest.raises(repair.RepairPlanningError) as raised:
+        service.apply_all("Song.feedpak", plan["plan_id"])
+
+    assert raised.value.code == "candidate_integrity_failed"
+    assert package.read_bytes() == original
+    assert not (tmp_path / "config" / "library_doctor" / "repair_backups").exists()
+
+
+def test_archive_candidate_disk_full_is_fail_closed_before_backup_or_commit(
+    repair, tmp_path, monkeypatch,
+):
+    service, package = _phase6_archive_service(repair, tmp_path)
+    original = package.read_bytes()
+    plan = service.preview_all("Song.feedpak")
+
+    def disk_full(_source, _destination, length=0):
+        del length
+        raise OSError("simulated disk full")
+
+    monkeypatch.setattr(repair.shutil, "copyfileobj", disk_full)
+    with pytest.raises(repair.RepairPlanningError) as raised:
+        service.apply_all("Song.feedpak", plan["plan_id"])
+
+    assert raised.value.code == "candidate_failed"
+    assert package.read_bytes() == original
+    assert not (tmp_path / "config" / "library_doctor" / "repair_backups").exists()
+
+
+def test_directory_containment_guard_does_not_rollback_into_a_replaced_path(
+    repair, tmp_path,
+):
+    paths = {}
+
+    def barrier(name, context):
+        if name != "member_committed" or context["member_index"] != 1:
+            return
+        package = paths["package"]
+        package.rename(paths["interrupted"])
+        paths["replacement"].rename(package)
+
+    service, package, _original, _validate = _phase0_directory_service(
+        repair, tmp_path, barrier=barrier
+    )
+    replacement = tmp_path / "library" / "replacement-package"
+    shutil.copytree(package, replacement)
+    external = _raw({
+        "notes": [],
+        "chords": [],
+        "anchors": [],
+        "external_package": True,
+    })
+    (replacement / "arrangements" / "lead.json").write_bytes(external)
+    (replacement / "arrangements" / "rhythm.json").write_bytes(external)
+    paths.update({
+        "package": package,
+        "interrupted": tmp_path / "library" / "interrupted-package",
+        "replacement": replacement,
+    })
+    plan = service.preview_all("Song.feedpak")
+
+    with pytest.raises(repair.RepairPlanningError) as raised:
+        service.apply_all("Song.feedpak", plan["plan_id"])
+
+    assert raised.value.code == "save_failed"
+    assert raised.value.file_state == "recovery_required"
+    assert (package / "arrangements" / "lead.json").read_bytes() == external
+    assert (package / "arrangements" / "rhythm.json").read_bytes() == external
+    receipt = service.history(limit=1)["items"][0]
+    assert receipt["file_state"] == "recovery_required"
+
+
+def test_commit_refuses_a_parent_junction_swap_outside_the_library(
+    repair, tmp_path,
+):
+    library = tmp_path / "library"
+    artist = library / "Artist"
+    package = artist / "Song.feedpak"
+    arrangements = package / "arrangements"
+    arrangements.mkdir(parents=True)
+    (package / "manifest.yaml").write_text(
+        "arrangements:\n"
+        "  - id: lead\n"
+        "    file: arrangements/lead.json\n",
+        encoding="utf-8",
+    )
+    anchor = {"time": 0.0, "fret": 1, "width": 4}
+    original = _raw({
+        "notes": [],
+        "chords": [],
+        "anchors": [anchor, dict(anchor)],
+    })
+    (arrangements / "lead.json").write_bytes(original)
+
+    outside_artist = tmp_path / "outside" / "Artist"
+    outside_package = outside_artist / "Song.feedpak"
+    shutil.copytree(package, outside_package)
+    outside_chart = outside_package / "arrangements" / "lead.json"
+    external = _raw({"anchors": [], "external": "must survive"})
+    outside_chart.write_bytes(external)
+    held_artist = tmp_path / "held-artist"
+
+    def validate(path, package_name, *, deep_audio=False):
+        document = json.loads(
+            (path / "arrangements" / "lead.json").read_bytes()
+        )
+        findings = (
+            [{"code": "chart.duplicate-anchor", "severity": "warning"}]
+            if len(document.get("anchors", [])) > 1 else []
+        )
+        return {
+            "schema": "library_doctor.package.v1",
+            "validator_version": "rules-test",
+            "package": package_name,
+            "title": "Song",
+            "artist": "Artist",
+            "status": "warning" if findings else "healthy",
+            "counts": {"error": 0, "warning": len(findings), "info": 0},
+            "features": {"deep_audio_checked": bool(deep_audio)},
+            "findings": findings,
+        }
+
+    def barrier(name, _context):
+        if name != "before_member_replace":
+            return
+        artist.rename(held_artist)
+        _link_directory_for_containment_test(artist, outside_artist)
+
+    service = repair.RepairService(
+        config_dir=tmp_path / "config",
+        get_dlc_dir=lambda: library,
+        validate_feedpak=validate,
+        validator_version="rules-test",
+        log=logging.getLogger("library-doctor-parent-junction-tests"),
+        transaction_barrier=barrier,
+    )
+    plan = service.preview_all("Artist/Song.feedpak")
+    try:
+        with pytest.raises(repair.RepairPlanningError) as raised:
+            service.apply_all("Artist/Song.feedpak", plan["plan_id"])
+        assert raised.value.file_state == "unchanged"
+        assert outside_chart.read_bytes() == external
+        assert (
+            held_artist / "Song.feedpak" / "arrangements" / "lead.json"
+        ).read_bytes() == original
+        assert not list(
+            (tmp_path / "config" / "library_doctor" / "repair_backups").glob(
+                "*.zip"
+            )
+        )
+    finally:
+        if artist.is_symlink():
+            artist.unlink()
+        elif artist.exists() or getattr(artist, "is_junction", lambda: False)():
+            os.rmdir(artist)
+        if held_artist.exists():
+            held_artist.rename(artist)
+
+
+def test_rollback_preserves_an_external_edit_to_an_already_committed_member(
+    repair, tmp_path,
+):
+    paths = {}
+    external = _raw({
+        "notes": [],
+        "chords": [],
+        "anchors": [],
+        "external_during_commit": True,
+    })
+
+    def barrier(name, context):
+        if name == "member_committed" and context["member_index"] == 1:
+            target = paths["package"].joinpath(
+                *Path(context["member_path"]).parts
+            )
+            target.write_bytes(external)
+
+    service, package, original, _validate = _phase0_directory_service(
+        repair, tmp_path, barrier=barrier
+    )
+    paths["package"] = package
+    plan = service.preview_all("Song.feedpak")
+
+    with pytest.raises(repair.RepairPlanningError) as raised:
+        service.apply_all("Song.feedpak", plan["plan_id"])
+
+    assert raised.value.code == "save_failed"
+    assert raised.value.file_state == "recovery_required"
+    assert (package / "arrangements" / "lead.json").read_bytes() == external
+    assert (package / "arrangements" / "rhythm.json").read_bytes() == original
+
+
+@pytest.mark.parametrize(
+    ("crash_barrier", "crash_after_member"),
+    [
+        ("member_replaced", 1),
+        ("member_committed", 1),
+        ("member_committed", 2),
+    ],
+)
+def test_startup_reconciles_a_forced_stop_after_each_directory_member(
+    repair, tmp_path, crash_barrier, crash_after_member,
+):
+    class SimulatedProcessDeath(BaseException):
+        pass
+
+    def barrier(name, context):
+        if (
+            name == crash_barrier
+            and context["member_index"] == crash_after_member
+        ):
+            raise SimulatedProcessDeath
+
+    service, package, _original, validate = _phase0_directory_service(
+        repair, tmp_path, barrier=barrier
+    )
+    plan = service.preview_all("Song.feedpak")
+    with pytest.raises(SimulatedProcessDeath):
+        service.apply_all("Song.feedpak", plan["plan_id"])
+
+    transaction_dir = (
+        tmp_path / "config" / "library_doctor" / "repair_transactions"
+    )
+    assert len(list(transaction_dir.glob("*.json"))) == 1
+
+    restarted = repair.RepairService(
+        config_dir=tmp_path / "config",
+        get_dlc_dir=lambda: tmp_path / "library",
+        validate_feedpak=validate,
+        validator_version="rules-test",
+        log=logging.getLogger("library-doctor-phase0-restart-tests"),
+    )
+
+    assert not list(transaction_dir.glob("*.json"))
+    documents = [
+        json.loads((package / "arrangements" / name).read_bytes())
+        for name in ("lead.json", "rhythm.json")
+    ]
+    history = restarted.history(limit=1)["items"][0]
+    if crash_after_member == 1:
+        assert all(len(document["anchors"]) == 2 for document in documents)
+        assert history["outcome"] == "restored"
+        assert history["recovered_transaction"] is True
+        assert not list(
+            (tmp_path / "config" / "library_doctor" / "repair_backups").glob(
+                "*.zip"
+            )
+        )
+    else:
+        assert all(len(document["anchors"]) == 1 for document in documents)
+        assert history["outcome"] == "success"
+        assert history["undo_available"] is True
+
+
+def test_startup_recovery_never_overwrites_an_unknown_external_edit(
+    repair, tmp_path,
+):
+    class SimulatedProcessDeath(BaseException):
+        pass
+
+    def barrier(name, context):
+        if name == "member_committed" and context["member_index"] == 1:
+            raise SimulatedProcessDeath
+
+    service, package, _original, validate = _phase0_directory_service(
+        repair, tmp_path, barrier=barrier
+    )
+    plan = service.preview_all("Song.feedpak")
+    with pytest.raises(SimulatedProcessDeath):
+        service.apply_all("Song.feedpak", plan["plan_id"])
+
+    external = _raw({
+        "notes": [],
+        "chords": [],
+        "anchors": [],
+        "external_after_crash": True,
+    })
+    target = package / "arrangements" / "rhythm.json"
+    target.write_bytes(external)
+    restarted = repair.RepairService(
+        config_dir=tmp_path / "config",
+        get_dlc_dir=lambda: tmp_path / "library",
+        validate_feedpak=validate,
+        validator_version="rules-test",
+        log=logging.getLogger("library-doctor-phase0-external-recovery-tests"),
+    )
+
+    assert target.read_bytes() == external
+    transaction_dir = (
+        tmp_path / "config" / "library_doctor" / "repair_transactions"
+    )
+    assert len(list(transaction_dir.glob("*.json"))) == 1
+    receipt = restarted.history(limit=1)["items"][0]
+    assert receipt["outcome"] == "failure"
+    assert receipt["file_state"] == "recovery_required"
+    assert receipt["undo_available"] is False
+
+
+def test_directory_repair_refuses_to_write_without_a_durable_journal(
+    repair, tmp_path, monkeypatch,
+):
+    service, package, original, _validate = _phase0_directory_service(
+        repair, tmp_path
+    )
+    plan = service.preview_all("Song.feedpak")
+
+    def fail_journal(_transaction):
+        raise OSError("simulated durable storage failure")
+
+    monkeypatch.setattr(service, "_write_transaction", fail_journal)
+    with pytest.raises(repair.RepairPlanningError) as raised:
+        service.apply_all("Song.feedpak", plan["plan_id"])
+
+    assert raised.value.code == "journal_failed"
+    assert raised.value.file_state == "unchanged"
+    assert (package / "arrangements" / "lead.json").read_bytes() == original
+    assert (package / "arrangements" / "rhythm.json").read_bytes() == original
+    assert not list(
+        (tmp_path / "config" / "library_doctor" / "repair_backups").glob(
+            "*.zip"
+        )
+    )

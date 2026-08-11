@@ -68,8 +68,12 @@ PACKAGE_SUFFIXES = (".feedpak", ".sloppak")
 PACKAGE_REPAIR_SCHEMA = "library_doctor.package_repair.v1"
 BACKUP_SCHEMA = "library_doctor.repair_backup.v3"
 HISTORY_SCHEMA = "library_doctor.repair_history.v1"
+TRANSACTION_SCHEMA = "library_doctor.repair_transaction.v1"
 MAX_REPAIR_HISTORY = 50
+MAX_PENDING_TRANSACTIONS = 100
 _BACKUP_ID_RE = re.compile(r"^[0-9]{8}-[0-9]{6}-[0-9a-f]{12}$")
+_REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$")
+_REQUEST_FINGERPRINT_RE = re.compile(r"^[0-9a-f]{64}$")
 ALL_SAFE_RULE_CODE = "package.all-safe"
 
 
@@ -938,6 +942,7 @@ class RepairService:
         log,
         legacy_schemas: dict | None = None,
         preview_repair=None,
+        transaction_barrier=None,
     ) -> None:
         self._config_dir = Path(config_dir)
         self._get_dlc_dir = get_dlc_dir
@@ -945,6 +950,9 @@ class RepairService:
         self._validator_version = validator_version
         self._log = log
         self._preview_repair = preview_repair
+        self._transaction_barrier = (
+            transaction_barrier if callable(transaction_barrier) else None
+        )
         compatibility = legacy_schemas if isinstance(legacy_schemas, dict) else {}
         self._legacy_backup_schemas = frozenset(
             item
@@ -957,6 +965,7 @@ class RepairService:
             if isinstance(item, str)
         )
         self._lock = threading.Lock()
+        self._reconcile_transactions()
 
     def preview(
         self,
@@ -1021,6 +1030,8 @@ class RepairService:
         deep_audio: bool = False,
         verified_before_report: dict | None = None,
         source_guard=None,
+        request_id: str | None = None,
+        request_fingerprint: str | None = None,
     ) -> dict:
         """Rebuild, validate, back up, and atomically commit one package repair."""
         if not isinstance(plan_id, str) or len(plan_id) != 64:
@@ -1060,6 +1071,9 @@ class RepairService:
                 verified_before_report=verified_before_report,
                 source_guard=source_guard,
                 transaction_started=transaction_started,
+                request_id=request_id,
+                request_operation="repair.apply",
+                request_fingerprint=request_fingerprint,
             )
             if media_repair:
                 self._preview_repair.discard(plan_id)
@@ -1128,6 +1142,8 @@ class RepairService:
         *,
         verified_before_report: dict | None = None,
         source_guard=None,
+        request_id: str | None = None,
+        request_fingerprint: str | None = None,
     ) -> dict:
         """Select, validate, and apply one temporary-recovery-protected preview."""
         if not self._is_preview_repair(rule_code):
@@ -1185,6 +1201,9 @@ class RepairService:
                     ),
                     source_guard=source_guard if use_verified_report else None,
                     transaction_started=transaction_started,
+                    request_id=request_id,
+                    request_operation="repair.automatic",
+                    request_fingerprint=request_fingerprint,
                 )
             finally:
                 self._preview_repair.discard(plan_id)
@@ -1204,6 +1223,8 @@ class RepairService:
         rule_codes: Iterable[str] | None = None,
         verified_before_report: dict | None = None,
         source_guard=None,
+        request_id: str | None = None,
+        request_fingerprint: str | None = None,
     ) -> dict:
         """Apply all available safe repairs as one package transaction."""
         if not isinstance(plan_id, str) or len(plan_id) != 64:
@@ -1237,6 +1258,9 @@ class RepairService:
                 verified_before_report=verified_before_report,
                 source_guard=source_guard,
                 transaction_started=transaction_started,
+                request_id=request_id,
+                request_operation="repair.all.apply",
+                request_fingerprint=request_fingerprint,
             )
 
     def apply_selected(
@@ -1298,6 +1322,9 @@ class RepairService:
         verified_before_report: dict | None = None,
         source_guard=None,
         transaction_started: float | None = None,
+        request_id: str | None = None,
+        request_operation: str | None = None,
+        request_fingerprint: str | None = None,
     ) -> dict:
         """Validate and commit one already-recalculated package plan."""
         if (
@@ -1316,6 +1343,10 @@ class RepairService:
             )
             for item in internal["_members"]
         }
+        source_token = self._capture_package_token(package_path)
+        self._emit_transaction_barrier(
+            "source_captured", package=package_name, operation="repair"
+        )
         song_data_only = all(
             item.get("source_kind") in {
                 "arrangement", "timeline", "lyrics", "drum_tab"
@@ -1362,6 +1393,9 @@ class RepairService:
             if not isinstance(rule_codes, list) or not rule_codes:
                 rule_codes = [internal["rule_code"]]
             self._verify_validation(before, after, rule_codes)
+            self._emit_transaction_barrier(
+                "candidate_validated", package=package_name, operation="repair"
+            )
             if reuse_verified_before and not source_guard():
                 raise RepairPlanningError(
                     "source_changed",
@@ -1376,7 +1410,66 @@ class RepairService:
                 internal["rule_code"],
                 self._public_plan(internal),
             )
-            self._commit(package_path, candidate, replacements, originals)
+            transaction = None
+            try:
+                if package_path.is_dir():
+                    transaction = self._begin_transaction(
+                        package_name,
+                        backup_id,
+                        operation="repair",
+                        target_state="repaired",
+                    )
+                self._emit_transaction_barrier(
+                    "backup_durable",
+                    package=package_name,
+                    operation="repair",
+                    backup_id=backup_id,
+                )
+                try:
+                    self._verify_backup_durable(
+                        backup_id,
+                        package_name,
+                        originals,
+                    )
+                except RepairPlanningError as verify_exc:
+                    raise RepairPlanningError(
+                        "backup_failed",
+                        "The recovery backup could not be verified, so nothing was changed.",
+                    ) from verify_exc
+                self._assert_source_state(
+                    package_name,
+                    package_path,
+                    originals,
+                    source_token,
+                )
+                self._emit_transaction_barrier(
+                    "source_guarded",
+                    package=package_name,
+                    operation="repair",
+                    backup_id=backup_id,
+                )
+                self._commit(
+                    package_name,
+                    package_path,
+                    candidate,
+                    replacements,
+                    originals,
+                    source_token=source_token,
+                    transaction=transaction,
+                )
+            except RepairPlanningError as exc:
+                if exc.file_state == "unchanged":
+                    if transaction is not None:
+                        self._finish_transaction(transaction)
+                    try:
+                        self._delete_backup(backup_id)
+                    except RepairPlanningError as cleanup_exc:
+                        self._log.warning(
+                            "Library Doctor could not remove an unused recovery backup %s: %s",
+                            backup_id,
+                            cleanup_exc,
+                        )
+                raise
         finally:
             cleanup()
 
@@ -1443,6 +1536,11 @@ class RepairService:
             "verified_scan_report_reused": reuse_verified_before,
             "performance": performance,
             "file_handling": file_handling,
+            **self._request_metadata(
+                request_id,
+                request_operation,
+                request_fingerprint,
+            ),
         }
         result["receipt_saved"] = self._record_history({
             "id": uuid.uuid4().hex,
@@ -1466,6 +1564,11 @@ class RepairService:
             "media": internal.get("media"),
             "performance": performance,
             "file_handling": result["file_handling"],
+            **self._request_metadata(
+                request_id,
+                request_operation,
+                request_fingerprint,
+            ),
         })
         return result
 
@@ -1545,11 +1648,16 @@ class RepairService:
         """Return a small, non-sensitive repair receipt history for the UI."""
         safe_limit = max(1, min(int(limit), 20))
         with self._lock:
+            self._reconcile_transactions()
             items = self._read_history()
             if not items:
                 items = self._recover_legacy_receipts()
                 if items:
                     self._write_history(items)
+            pending = self._pending_transaction_receipts()
+            pending_ids = {item["id"] for item in pending}
+            items = [item for item in items if item.get("id") not in pending_ids]
+            items.extend(pending)
             public_items = []
             for stored in reversed(items[-safe_limit:]):
                 item = dict(stored)
@@ -1647,6 +1755,8 @@ class RepairService:
         backup_id: str,
         *,
         deep_audio: bool = False,
+        request_id: str | None = None,
+        request_fingerprint: str | None = None,
     ) -> dict:
         """Restore the song-data members saved before a successful repair.
 
@@ -1661,11 +1771,23 @@ class RepairService:
                 deep_audio=deep_audio,
             )
             try:
+                transaction = None
+                if prepared["_package_path"].is_dir():
+                    transaction = self._begin_transaction(
+                        prepared["package"],
+                        backup_id,
+                        operation="restore",
+                        target_state="original",
+                    )
                 self._commit(
+                    prepared["package"],
                     prepared["_package_path"],
                     prepared["_candidate"],
                     prepared["_originals"],
                     prepared["_current"],
+                    source_token=prepared["_source_token"],
+                    transaction=transaction,
+                    operation="restore",
                 )
             finally:
                 prepared["_cleanup"]()
@@ -1729,6 +1851,11 @@ class RepairService:
                         "The redundant recovery copy could not be removed automatically, but it is no longer needed for Undo."
                     ),
                 },
+                **self._request_metadata(
+                    request_id,
+                    "repair.restore",
+                    request_fingerprint,
+                ),
             }
             result["receipt_saved"] = self._record_history({
                 "id": uuid.uuid4().hex,
@@ -1752,10 +1879,22 @@ class RepairService:
                 "user_value": prepared["user_value"],
                 "media": prepared.get("media"),
                 "file_handling": result["file_handling"],
+                **self._request_metadata(
+                    request_id,
+                    "repair.restore",
+                    request_fingerprint,
+                ),
             })
             return result
 
-    def finalize_backup(self, package: str, backup_id: str) -> dict:
+    def finalize_backup(
+        self,
+        package: str,
+        backup_id: str,
+        *,
+        request_id: str | None = None,
+        request_fingerprint: str | None = None,
+    ) -> dict:
         """Remove a verified recovery copy without changing the Feedpak.
 
         A recovery copy can be finalized only while every affected package
@@ -1800,6 +1939,11 @@ class RepairService:
                         "The Feedpak was not changed. Its redundant recovery copy was removed because the original data is already restored."
                     ),
                 },
+                **self._request_metadata(
+                    request_id,
+                    "repair.finalize",
+                    request_fingerprint,
+                ),
             }
             result["receipt_saved"] = self._record_history(result)
             return result
@@ -1917,25 +2061,26 @@ class RepairService:
         source_members = []
         for entry in metadata["members"]:
             member_path = entry["member_path"]
-            if entry["repaired_present"]:
-                raw = self._read_member(
-                    package_path, member_path, MAX_REPAIR_MEMBER_BYTES
+            present = self._member_exists(package_path, member_path)
+            raw = (
+                self._read_member(package_path, member_path, MAX_REPAIR_MEMBER_BYTES)
+                if present else None
+            )
+            current_hash = hashlib.sha256(raw).hexdigest() if raw is not None else None
+            repaired_match = (
+                present == entry["repaired_present"]
+                and current_hash == entry["repaired_sha256"]
+            )
+            original_match = (
+                present == entry["original_present"]
+                and current_hash == entry["original_sha256"]
+            )
+            if not (repaired_match or original_match):
+                raise RepairPlanningError(
+                    "package_changed",
+                    "This song changed after the repair, so Library Doctor will not overwrite it. Scan it again and review it manually.",
                 )
-                current_hash = hashlib.sha256(raw).hexdigest()
-                if current_hash != entry["repaired_sha256"]:
-                    raise RepairPlanningError(
-                        "package_changed",
-                        "This song changed after the repair, so Library Doctor will not overwrite it. Scan it again and review it manually.",
-                    )
-                current[member_path] = raw
-            else:
-                if self._member_exists(package_path, member_path):
-                    raise RepairPlanningError(
-                        "package_changed",
-                        "This song changed after the repair, so Library Doctor will not overwrite it. Scan it again and review it manually.",
-                    )
-                current_hash = None
-                current[member_path] = None
+            current[member_path] = raw
             source_members.append({
                 "member_path": member_path,
                 "repaired_sha256": current_hash,
@@ -1948,6 +2093,7 @@ class RepairService:
             package_path, package_name, deep_audio=bool(deep_audio)
         )
         candidate, cleanup = self._candidate(package_path, originals)
+        source_token = self._capture_package_token(package_path)
         try:
             after = self._validate_feedpak(
                 candidate, package_name, deep_audio=bool(deep_audio)
@@ -2053,6 +2199,7 @@ class RepairService:
                 "_cleanup": cleanup,
                 "_originals": originals,
                 "_current": current,
+                "_source_token": source_token,
                 "_after": after,
             }
         except Exception:
@@ -2062,6 +2209,101 @@ class RepairService:
     @staticmethod
     def _public_restore_plan(prepared: dict) -> dict:
         return {key: value for key, value in prepared.items() if not key.startswith("_")}
+
+    def _emit_transaction_barrier(self, name: str, **context) -> None:
+        """Expose stable fault-injection points without affecting production."""
+        if self._transaction_barrier is not None:
+            self._transaction_barrier(name, dict(context))
+
+    @staticmethod
+    def _capture_package_token(package_path: Path) -> dict:
+        """Bind a commit to the same package object and, for archives, bytes."""
+        try:
+            stat = package_path.stat()
+            token = {
+                "kind": "directory" if package_path.is_dir() else "archive",
+                "device": int(stat.st_dev),
+                "inode": int(stat.st_ino),
+            }
+            if package_path.is_file():
+                digest = hashlib.sha256()
+                with package_path.open("rb") as stream:
+                    for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                        digest.update(chunk)
+                token["sha256"] = digest.hexdigest()
+            return token
+        except OSError as exc:
+            raise RepairPlanningError(
+                "source_changed",
+                "The selected package changed before it could be saved. Nothing was overwritten.",
+            ) from exc
+
+    def _assert_source_state(
+        self,
+        package_name: str,
+        package_path: Path,
+        originals: dict[str, bytes | None],
+        source_token: dict | None,
+    ) -> None:
+        """Recheck containment, identity, and affected bytes at commit time."""
+        self._assert_package_identity(package_name, package_path, source_token)
+        for member_path, raw in originals.items():
+            self._assert_member_state(package_path, member_path, raw)
+
+    def _assert_package_identity(
+        self,
+        package_name: str,
+        package_path: Path,
+        source_token: dict | None,
+    ) -> None:
+        _root, current_path, current_name = self._resolve_package(package_name)
+        if current_name != package_name or current_path != package_path:
+            raise RepairPlanningError(
+                "source_changed",
+                "The selected package moved or changed before it could be saved. Nothing was overwritten.",
+            )
+        if source_token is not None:
+            current_token = self._capture_package_token(package_path)
+            expected_identity = (
+                source_token.get("kind"),
+                source_token.get("device"),
+                source_token.get("inode"),
+            )
+            current_identity = (
+                current_token.get("kind"),
+                current_token.get("device"),
+                current_token.get("inode"),
+            )
+            if expected_identity != current_identity or (
+                source_token.get("kind") == "archive"
+                and source_token.get("sha256") != current_token.get("sha256")
+            ):
+                raise RepairPlanningError(
+                    "source_changed",
+                    "The selected package changed while its candidate was being checked. Nothing was overwritten.",
+                )
+
+    def _assert_member_state(
+        self,
+        package_path: Path,
+        member_path: str,
+        expected: bytes | None,
+    ) -> None:
+        present = self._member_exists(package_path, member_path)
+        if expected is None:
+            matches = not present
+        elif not present:
+            matches = False
+        else:
+            current = self._read_member(
+                package_path, member_path, MAX_REPAIR_MEMBER_BYTES
+            )
+            matches = hashlib.sha256(current).digest() == hashlib.sha256(expected).digest()
+        if not matches:
+            raise RepairPlanningError(
+                "source_changed",
+                "A song file changed while the repaired candidate was being checked. The newer file was not overwritten.",
+            )
 
     def _resolve_package(self, package: str) -> tuple[Path, Path, str]:
         if not isinstance(package, str) or not package or len(package) > 4_096:
@@ -3025,12 +3267,38 @@ class RepairService:
             with temporary.open("r+b") as stream:
                 os.fsync(stream.fileno())
             os.replace(temporary, destination)
+            self._sync_directory(destination.parent)
         except (OSError, RuntimeError, zipfile.LargeZipFile) as exc:
             temporary.unlink(missing_ok=True)
             raise RepairPlanningError(
                 "backup_failed", "A recovery backup could not be created, so nothing was changed."
             ) from exc
+        try:
+            self._verify_backup_durable(backup_id, package_name, originals)
+        except RepairPlanningError as exc:
+            destination.unlink(missing_ok=True)
+            raise RepairPlanningError(
+                "backup_failed",
+                "The recovery backup could not be verified, so nothing was changed.",
+            ) from exc
         return backup_id
+
+    def _verify_backup_durable(
+        self,
+        backup_id: str,
+        package_name: str,
+        originals: dict[str, bytes | None],
+    ) -> None:
+        """Reopen a durable backup and prove every original byte is readable."""
+        _metadata, recovered = self._read_backup(backup_id, package_name)
+        if recovered.keys() != originals.keys() or any(
+            recovered[member_path] != raw
+            for member_path, raw in originals.items()
+        ):
+            raise RepairPlanningError(
+                "backup_unreadable",
+                "The recovery backup failed its byte-for-byte verification.",
+            )
 
     def _read_backup(
         self, backup_id: str, package_name: str
@@ -3133,6 +3401,402 @@ class RepairService:
     def _history_path(self) -> Path:
         return self._config_dir / "library_doctor" / "repair_history.json"
 
+    @property
+    def _transaction_dir(self) -> Path:
+        return self._config_dir / "library_doctor" / "repair_transactions"
+
+    def _begin_transaction(
+        self,
+        package: str,
+        backup_id: str,
+        *,
+        operation: str,
+        target_state: str,
+    ) -> dict:
+        transaction = {
+            "schema": TRANSACTION_SCHEMA,
+            "transaction_id": backup_id,
+            "backup_id": backup_id,
+            "package": package,
+            "package_kind": "directory",
+            "operation": operation,
+            "target_state": target_state,
+            "phase": "prepared",
+            "committed_members": [],
+            "created_at": time.time(),
+            "updated_at": time.time(),
+        }
+        try:
+            self._write_transaction(transaction)
+        except OSError as exc:
+            raise RepairPlanningError(
+                "journal_failed",
+                "The package transaction could not be recorded durably, so nothing was changed.",
+            ) from exc
+        self._emit_transaction_barrier(
+            "journal_durable",
+            package=package,
+            operation=operation,
+            backup_id=backup_id,
+        )
+        return transaction
+
+    def _update_transaction(self, transaction: dict, **updates) -> None:
+        transaction.update(updates)
+        transaction["updated_at"] = time.time()
+        self._write_transaction(transaction)
+
+    def _write_transaction(self, transaction: dict) -> None:
+        backup_id = transaction.get("transaction_id")
+        if not isinstance(backup_id, str) or not _BACKUP_ID_RE.fullmatch(backup_id):
+            raise OSError("invalid repair transaction id")
+        path = self._transaction_dir / f"{backup_id}.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self._atomic_write(
+            path,
+            json.dumps(transaction, ensure_ascii=False, indent=2).encode("utf-8"),
+        )
+        self._sync_directory(path.parent)
+
+    def _finish_transaction(self, transaction: dict) -> None:
+        backup_id = transaction.get("transaction_id")
+        if not isinstance(backup_id, str) or not _BACKUP_ID_RE.fullmatch(backup_id):
+            return
+        path = self._transaction_dir / f"{backup_id}.json"
+        try:
+            path.unlink(missing_ok=True)
+            self._sync_directory(path.parent)
+        except OSError as exc:
+            self._log.warning(
+                "Library Doctor could not clear completed repair transaction %s: %s",
+                backup_id,
+                exc,
+            )
+
+    @staticmethod
+    def _sync_directory(path: Path) -> None:
+        if os.name == "nt":
+            return
+        descriptor = None
+        try:
+            descriptor = os.open(path, os.O_RDONLY)
+            os.fsync(descriptor)
+        except OSError:
+            pass
+        finally:
+            if descriptor is not None:
+                os.close(descriptor)
+
+    def _read_transactions(self) -> list[dict]:
+        try:
+            paths = sorted(self._transaction_dir.glob("*.json"))[
+                -MAX_PENDING_TRANSACTIONS:
+            ]
+        except OSError:
+            return []
+        transactions = []
+        for path in paths:
+            if not _BACKUP_ID_RE.fullmatch(path.stem):
+                continue
+            try:
+                raw = path.read_bytes()
+                if len(raw) > MAX_REPAIR_MANIFEST_BYTES:
+                    continue
+                item = json.loads(raw.decode("utf-8"))
+                if (
+                    not isinstance(item, dict)
+                    or item.get("schema") != TRANSACTION_SCHEMA
+                    or item.get("transaction_id") != path.stem
+                    or item.get("backup_id") != path.stem
+                    or item.get("operation") not in {"repair", "restore"}
+                    or item.get("target_state") not in {"repaired", "original"}
+                    or not isinstance(item.get("package"), str)
+                ):
+                    continue
+                transactions.append(item)
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+                continue
+        return transactions
+
+    @staticmethod
+    def _matches_backup_state(
+        present: bool,
+        current_hash: str | None,
+        entry: dict,
+        state: str,
+    ) -> bool:
+        prefix = "repaired" if state == "repaired" else "original"
+        return (
+            present == entry[f"{prefix}_present"]
+            and current_hash == entry[f"{prefix}_sha256"]
+        )
+
+    def _reconcile_transactions(self) -> None:
+        """Resolve interrupted directory writes before accepting new repairs."""
+        for transaction in self._read_transactions():
+            try:
+                self._reconcile_transaction(transaction)
+            except Exception as exc:
+                self._log.error(
+                    "Library Doctor could not reconcile interrupted transaction %s: %s",
+                    transaction.get("transaction_id"),
+                    exc,
+                )
+                try:
+                    self._update_transaction(transaction, phase="recovery_required")
+                except OSError:
+                    pass
+
+    def _reconcile_transaction(self, transaction: dict) -> None:
+        package = transaction["package"]
+        backup_id = transaction["backup_id"]
+        for receipt in self._read_history():
+            if receipt.get("backup_id") != backup_id:
+                continue
+            completed_repair = (
+                transaction["operation"] == "repair"
+                and receipt.get("action") == "repair"
+                and receipt.get("outcome") == "success"
+            )
+            completed_restore = (
+                transaction["operation"] == "restore"
+                and receipt.get("action") == "restore"
+                and receipt.get("outcome") == "restored"
+            )
+            if completed_repair or completed_restore:
+                self._finish_transaction(transaction)
+                return
+        _root, package_path, package_name = self._resolve_package(package)
+        if not package_path.is_dir():
+            raise RepairPlanningError(
+                "recovery_required", "The interrupted package is no longer a directory."
+            )
+        metadata, originals = self._read_backup(backup_id, package_name)
+        member_states = []
+        current = {}
+        for entry in metadata["members"]:
+            member_path = entry["member_path"]
+            present = self._member_exists(package_path, member_path)
+            raw = (
+                self._read_member(package_path, member_path, MAX_REPAIR_MEMBER_BYTES)
+                if present else None
+            )
+            current_hash = hashlib.sha256(raw).hexdigest() if raw is not None else None
+            states = {
+                state
+                for state in ("original", "repaired")
+                if self._matches_backup_state(present, current_hash, entry, state)
+            }
+            if not states:
+                self._update_transaction(transaction, phase="recovery_required")
+                return
+            member_states.append(states)
+            current[member_path] = raw
+
+        target_state = transaction["target_state"]
+        source_state = "original" if target_state == "repaired" else "repaired"
+        if all(target_state in states for states in member_states):
+            if not self._record_recovered_transaction(transaction, metadata, committed=True):
+                return
+            if transaction["operation"] == "restore":
+                try:
+                    self._delete_backup(backup_id)
+                except RepairPlanningError as exc:
+                    self._log.warning(
+                        "Library Doctor completed interrupted Undo but could not remove backup %s: %s",
+                        backup_id,
+                        exc,
+                    )
+            self._finish_transaction(transaction)
+            return
+
+        if all(source_state in states for states in member_states):
+            if transaction["operation"] == "repair":
+                try:
+                    self._delete_backup(backup_id)
+                except RepairPlanningError as exc:
+                    self._log.warning(
+                        "Library Doctor found an unchanged interrupted repair but could not remove backup %s: %s",
+                        backup_id,
+                        exc,
+                    )
+            self._finish_transaction(transaction)
+            return
+
+        # A process died between member commits. Restoring originals is safe for
+        # an interrupted repair and completes the requested target for Undo.
+        candidate, cleanup = self._candidate(package_path, originals)
+        try:
+            self._validate_feedpak(candidate, package_name, deep_audio=False)
+            source_token = self._capture_package_token(package_path)
+            self._commit(
+                package_name,
+                package_path,
+                candidate,
+                originals,
+                current,
+                source_token=source_token,
+                transaction=None,
+                operation=transaction["operation"],
+            )
+        finally:
+            cleanup()
+        if not self._record_recovered_transaction(transaction, metadata, committed=False):
+            return
+        try:
+            self._delete_backup(backup_id)
+        except RepairPlanningError as exc:
+            self._log.warning(
+                "Library Doctor recovered interrupted transaction %s but could not remove backup: %s",
+                backup_id,
+                exc,
+            )
+        self._finish_transaction(transaction)
+
+    def _record_recovered_transaction(
+        self,
+        transaction: dict,
+        metadata: dict,
+        *,
+        committed: bool,
+    ) -> bool:
+        history = self._read_history()
+        backup_id = transaction["backup_id"]
+        summary = metadata.get("summary")
+        if not isinstance(summary, dict):
+            summary = {}
+        operation = transaction["operation"]
+        repair_committed = operation == "repair" and committed
+        expected_action = "repair" if repair_committed else "restore"
+        expected_outcome = "success" if repair_committed else "restored"
+        if any(
+            item.get("backup_id") == backup_id
+            and item.get("action") == expected_action
+            and item.get("outcome") == expected_outcome
+            for item in history
+        ):
+            return True
+        item = {
+            "id": f"recovered-{backup_id}",
+            "action": expected_action,
+            "outcome": expected_outcome,
+            "completed_at": time.time(),
+            "package": transaction["package"],
+            "title": summary.get("title") or transaction["package"],
+            "artist": summary.get("artist") or "",
+            "rule_code": metadata.get("rule_code"),
+            "rule_codes": metadata.get("rule_codes", []),
+            "repair_summaries": summary.get("repair_summaries", []),
+            "backup_id": backup_id,
+            "change_kind": summary.get("change_kind", "repair"),
+            "change_count": int(summary.get("change_count", 0) or 0),
+            "removed_count": int(summary.get("removed_count", 0) or 0),
+            "item_name": summary.get("item_name", "item"),
+            "player_result": summary.get("player_result", ""),
+            "user_value": summary.get("user_value", ""),
+            "recovered_transaction": True,
+            "recovery_summary": (
+                "Library Doctor verified and completed a repair that had reached disk before the app stopped."
+                if repair_committed else
+                "Library Doctor restored the verified original files after an interrupted package transaction."
+            ),
+            "file_handling": self._file_handling(backup_id),
+        }
+        history.append(item)
+        return self._write_history(history)
+
+    def _pending_transaction_receipts(self) -> list[dict]:
+        receipts = []
+        for transaction in self._read_transactions():
+            if transaction.get("phase") != "recovery_required":
+                continue
+            backup_id = transaction["backup_id"]
+            summary = {}
+            try:
+                metadata, _originals = self._read_backup(
+                    backup_id, transaction["package"]
+                )
+                candidate_summary = metadata.get("summary")
+                if isinstance(candidate_summary, dict):
+                    summary = candidate_summary
+            except RepairPlanningError:
+                pass
+            receipts.append({
+                "id": f"recovery-required-{backup_id}",
+                "action": "recovery",
+                "outcome": "failure",
+                "completed_at": float(
+                    transaction.get("updated_at")
+                    or transaction.get("created_at")
+                    or time.time()
+                ),
+                "package": transaction["package"],
+                "title": summary.get("title") or transaction["package"],
+                "artist": summary.get("artist") or "",
+                "backup_id": backup_id,
+                "file_state": "recovery_required",
+                "message": (
+                    "Library Doctor found an external change while reconciling an interrupted directory transaction. "
+                    "It preserved both the current package and the verified recovery backup for manual review."
+                ),
+                "undo_available": False,
+                "recovered_transaction": False,
+                "file_handling": self._file_handling(backup_id),
+            })
+        return receipts
+
+    @staticmethod
+    def _request_metadata(
+        request_id: str | None,
+        operation: str | None,
+        fingerprint: str | None,
+    ) -> dict:
+        # Service callers always provide their fixed operation name, even when
+        # the HTTP client did not opt into idempotency. In that case there is
+        # no request identity to persist.
+        if request_id is None and fingerprint is None:
+            return {}
+        if (
+            not isinstance(request_id, str)
+            or not _REQUEST_ID_RE.fullmatch(request_id)
+            or not isinstance(operation, str)
+            or not operation
+            or len(operation) > 100
+            or not isinstance(fingerprint, str)
+            or not _REQUEST_FINGERPRINT_RE.fullmatch(fingerprint)
+        ):
+            raise RepairPlanningError(
+                "invalid_request_id",
+                "The mutation retry identity is invalid.",
+            )
+        return {
+            "request_id": request_id,
+            "request_operation": operation,
+            "request_fingerprint": fingerprint,
+        }
+
+    def receipt_for_request(
+        self,
+        request_id: str,
+        operation: str,
+        fingerprint: str,
+    ) -> dict | None:
+        """Recover a successful mutation receipt after an interrupted response."""
+        expected = self._request_metadata(request_id, operation, fingerprint)
+        with self._lock:
+            for item in reversed(self._read_history()):
+                if item.get("request_id") != request_id:
+                    continue
+                if any(item.get(key) != value for key, value in expected.items()):
+                    raise RepairPlanningError(
+                        "idempotency_key_reused",
+                        "This mutation request ID was already used for different inputs.",
+                    )
+                receipt = copy.deepcopy(item)
+                receipt["idempotent_replay"] = True
+                return receipt
+        return None
+
     def _read_history(self) -> list[dict]:
         try:
             raw = self._history_path.read_bytes()
@@ -3175,35 +3839,168 @@ class RepairService:
 
     def _commit(
         self,
+        package_name: str,
         package_path: Path,
         candidate: Path,
         replacements: dict[str, bytes],
         originals: dict[str, bytes],
+        *,
+        source_token: dict | None = None,
+        transaction: dict | None = None,
+        operation: str = "repair",
     ) -> None:
+        try:
+            self._assert_source_state(
+                package_name,
+                package_path,
+                originals,
+                source_token,
+            )
+        except RepairPlanningError:
+            if transaction is not None:
+                self._finish_transaction(transaction)
+            raise
+
         if package_path.is_file():
             try:
                 with candidate.open("r+b") as stream:
                     os.fsync(stream.fileno())
+                self._assert_source_state(
+                    package_name,
+                    package_path,
+                    originals,
+                    source_token,
+                )
+                self._emit_transaction_barrier(
+                    "before_archive_replace",
+                    package=package_name,
+                    operation=operation,
+                )
+                self._assert_source_state(
+                    package_name,
+                    package_path,
+                    originals,
+                    source_token,
+                )
                 os.replace(candidate, package_path)
             except OSError as exc:
                 raise RepairPlanningError(
                     "save_failed", "The repaired package could not replace the original."
                 ) from exc
+            self._emit_transaction_barrier(
+                "package_committed", package=package_name, operation=operation
+            )
             return
 
         committed = []
         try:
+            if transaction is not None:
+                self._update_transaction(transaction, phase="committing")
             for member_path, raw in replacements.items():
+                self._assert_package_identity(
+                    package_name,
+                    package_path,
+                    source_token,
+                )
+                self._assert_member_state(
+                    package_path,
+                    member_path,
+                    originals[member_path],
+                )
+                self._emit_transaction_barrier(
+                    "before_member_replace",
+                    package=package_name,
+                    operation=operation,
+                    member_path=member_path,
+                    member_index=len(committed) + 1,
+                )
+                self._assert_package_identity(
+                    package_name,
+                    package_path,
+                    source_token,
+                )
+                self._assert_member_state(
+                    package_path,
+                    member_path,
+                    originals[member_path],
+                )
                 target = package_path.joinpath(*PurePosixPath(member_path).parts)
                 if raw is None:
                     target.unlink(missing_ok=True)
                 else:
                     target.parent.mkdir(parents=True, exist_ok=True)
                     self._atomic_write(target, raw)
+                self._emit_transaction_barrier(
+                    "member_replaced",
+                    package=package_name,
+                    operation=operation,
+                    member_path=member_path,
+                    member_index=len(committed) + 1,
+                )
                 committed.append(member_path)
+                if transaction is not None:
+                    self._update_transaction(
+                        transaction,
+                        phase="committing",
+                        committed_members=committed,
+                    )
+                self._emit_transaction_barrier(
+                    "member_committed",
+                    package=package_name,
+                    operation=operation,
+                    member_path=member_path,
+                    member_index=len(committed),
+                )
+            self._assert_package_identity(
+                package_name,
+                package_path,
+                source_token,
+            )
+            for member_path, raw in replacements.items():
+                self._assert_member_state(package_path, member_path, raw)
+            if transaction is not None:
+                self._update_transaction(
+                    transaction,
+                    phase="package_committed",
+                    committed_members=committed,
+                )
+            self._emit_transaction_barrier(
+                "package_committed",
+                package=package_name,
+                operation=operation,
+            )
+            if transaction is not None:
+                self._finish_transaction(transaction)
         except (OSError, RepairPlanningError) as exc:
             rollback_failed = False
-            for member_path in reversed(committed):
+            try:
+                self._assert_package_identity(
+                    package_name,
+                    package_path,
+                    source_token,
+                )
+            except RepairPlanningError:
+                rollback_failed = bool(committed)
+                rollback_members = []
+            else:
+                rollback_members = []
+                for member_path in reversed(committed):
+                    try:
+                        self._assert_member_state(
+                            package_path,
+                            member_path,
+                            replacements[member_path],
+                        )
+                    except RepairPlanningError:
+                        rollback_failed = True
+                        self._log.error(
+                            "Library Doctor preserved an external edit to %s in %s during rollback",
+                            member_path,
+                            package_path.name,
+                        )
+                    else:
+                        rollback_members.append(member_path)
+            for member_path in rollback_members:
                 try:
                     target = package_path.joinpath(*PurePosixPath(member_path).parts)
                     original = originals[member_path]
@@ -3219,6 +4016,18 @@ class RepairService:
                         member_path,
                         package_path.name,
                     )
+            if transaction is not None:
+                if rollback_failed:
+                    try:
+                        self._update_transaction(
+                            transaction,
+                            phase="recovery_required",
+                            committed_members=committed,
+                        )
+                    except OSError:
+                        pass
+                else:
+                    self._finish_transaction(transaction)
             if isinstance(exc, RepairPlanningError) and not rollback_failed:
                 raise
             raise RepairPlanningError(
@@ -3232,8 +4041,7 @@ class RepairService:
                 file_state="recovery_required" if rollback_failed else "unchanged",
             ) from exc
 
-    @staticmethod
-    def _atomic_write(path: Path, raw: bytes) -> None:
+    def _atomic_write(self, path: Path, raw: bytes) -> None:
         handle, temporary_name = tempfile.mkstemp(prefix=f".{path.name}-", dir=path.parent)
         temporary = Path(temporary_name)
         try:
@@ -3244,6 +4052,7 @@ class RepairService:
             if path.exists():
                 shutil.copystat(path, temporary)
             os.replace(temporary, path)
+            self._sync_directory(path.parent)
         except Exception:
             temporary.unlink(missing_ok=True)
             raise

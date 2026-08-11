@@ -1,275 +1,282 @@
-<main class="lh-shell" aria-labelledby="lh-title">
+<section class="lh-shell" aria-labelledby="lh-title">
+  <p id="lh-module-status" class="lh-inline-error" role="status">
+    Loading Library Doctor. If this message remains, update FeedBack to a build that supports
+    native plugin modules (the 2026-07-08 module-capable nightly or newer);
+    Library Doctor has not activated.
+  </p>
   <header class="lh-header">
-    <div>
-      <p class="lh-eyebrow">Song library diagnosis and repair</p>
-      <h2 id="lh-title">Library Doctor</h2>
-      <p class="lh-lead">
-        Scan Feedpak and Sloppak packages, understand what problems mean in game, and safely
-        repair deterministic issues. Or use Song Tools for an optional change to any indexed
-        local song. Scans are read-only; every file change requires confirmation.
+    <p class="lh-eyebrow">Song library check and repair</p>
+    <h2 id="lh-title">Library Doctor</h2>
+    <p class="lh-lead">Check your song library for problems. Scanning never changes songs.</p>
+    <details class="lh-safety-note">
+      <summary>How safety works</summary>
+      <p>
+        Repairs are always reviewed and confirmed. Library Doctor validates a complete replacement
+        before it changes a Feedpak, and supported song-data repairs keep an Undo copy.
       </p>
-    </div>
+    </details>
   </header>
 
   <nav id="lh-workspace-tabs" class="lh-workspace-tabs" aria-label="Library Doctor workspace">
-    <button type="button" data-workspace="health" aria-selected="true">Health Scan</button>
-    <button type="button" data-workspace="tools" aria-selected="false">Song Tools</button>
+    <button type="button" data-workspace="health" aria-pressed="true">Library check</button>
+    <button type="button" data-workspace="tools" aria-pressed="false">Song tools</button>
   </nav>
 
-  <section id="lh-repair-result" class="lh-repair-result" aria-live="polite" hidden></section>
-
-  <div id="lh-health-workspace">
-  <section class="lh-target-panel" aria-labelledby="lh-target-title">
-    <div>
-      <h3 id="lh-target-title">Choose what to scan</h3>
-      <p class="lh-muted">Folder scans include every Feedpak and Sloppak in their subfolders.</p>
-      <p class="lh-muted lh-playback-help">
-        You can keep playing while a scan is running. Library Doctor pauses automatically
-        while a song is open and resumes when you exit the player.
-      </p>
-    </div>
-    <fieldset id="lh-targets" class="lh-target-grid">
-      <legend class="lh-visually-hidden">Scan target</legend>
-      <label class="lh-target-option">
-        <input type="radio" name="lh-target" value="library" checked>
-        <span><strong>Whole library</strong><small>Check every song package in the configured library.</small></span>
-      </label>
-      <label class="lh-target-option">
-        <input type="radio" name="lh-target" value="folder">
-        <span><strong>Selected folder</strong><small>Check one folder and all of its subfolders.</small></span>
-      </label>
-      <label class="lh-target-option">
-        <input type="radio" name="lh-target" value="file">
-        <span><strong>Single Feedpak</strong><small>Check one .feedpak or legacy .sloppak file.</small></span>
-      </label>
-    </fieldset>
-    <label class="lh-deep-option">
-      <input id="lh-deep-audio" type="checkbox">
-      <span><strong>Deep audio checks</strong><small>Also inspect supported Ogg audio structure and duration. Run a normal scan first; deep scans read much more data and a large library can take a long time.</small></span>
-    </label>
-    <details class="lh-worker-settings">
-      <summary>Scan performance <span id="lh-worker-summary">Automatic</span></summary>
-      <p class="lh-muted">
-        Automatic uses several CPU cores when enough uncached Feedpaks need checking, while
-        reserving memory for FeedBack and Windows. Small and fully cached scans stay single-worker.
-      </p>
-      <div class="lh-worker-controls">
-        <label>
-          <span>Worker selection</span>
-          <select id="lh-worker-mode">
-            <option value="automatic">Automatic (recommended)</option>
-            <option value="custom">Custom maximum</option>
-          </select>
-        </label>
-        <label id="lh-worker-limit-wrap" hidden>
-          <span>Maximum validation workers</span>
-          <input id="lh-worker-limit" type="number" min="1" step="1" inputmode="numeric" value="1">
-        </label>
-      </div>
-      <small class="lh-muted">
-        A custom value is a ceiling, not a forced count. Library Doctor may use fewer workers
-        when the scan, available memory, or operating system requires it.
-      </small>
-    </details>
-    <div class="lh-target-footer">
-      <div class="lh-target-selection">
-        <span class="lh-muted">Selected target</span>
-        <strong id="lh-target-path">Configured song library</strong>
-        <span id="lh-picker-note" class="lh-muted" hidden></span>
+  <div id="lh-health-workspace" data-view-state="first_run">
+    <section id="lh-guidance" class="lh-guidance" aria-labelledby="lh-guidance-title">
+      <div>
+        <p class="lh-eyebrow">Recommended next step</p>
+        <h3 id="lh-guidance-title">Check your library</h3>
+        <p id="lh-guidance-copy" class="lh-muted">
+          Start with the recommended scan. It reads song packages but never changes them.
+        </p>
       </div>
       <div class="lh-actions">
-        <button id="lh-choose-target" class="lh-button" type="button" hidden>Choose folder</button>
         <button id="lh-scan" class="lh-button lh-button-primary" type="button"
-                title="Validate new and changed packages">Scan whole library</button>
+                title="Validate new and changed packages">Scan my library</button>
         <button id="lh-scan-all" class="lh-button" type="button" hidden
                 title="Ignore cached reports and validate the selected target again">Recheck without cache</button>
         <button id="lh-cancel" class="lh-button lh-button-danger" type="button" hidden>Cancel scan</button>
       </div>
-    </div>
-  </section>
+    </section>
 
-  <section class="lh-progress-panel">
-    <div class="lh-progress-copy">
-      <span id="lh-status" role="status" aria-live="polite">Library Doctor has not scanned this library yet.</span>
-      <span id="lh-progress-count"></span>
-    </div>
-    <progress id="lh-progress" max="1" value="0" aria-label="Library scan progress" hidden></progress>
-    <p id="lh-scan-warning" class="lh-scan-warning" role="alert" hidden></p>
-    <p id="lh-scan-provenance" class="lh-scan-provenance lh-muted" hidden></p>
-    <p id="lh-error" class="lh-inline-error" role="alert" hidden></p>
-  </section>
+    <details id="lh-scan-options" class="lh-target-panel" open>
+      <summary>
+        <span>Scan options</span>
+        <strong id="lh-scan-options-summary">All songs · recommended settings</strong>
+      </summary>
+      <div class="lh-target-panel-body">
+        <div>
+          <h3 id="lh-target-title">Choose what to scan</h3>
+          <p class="lh-muted">Folder scans include every Feedpak and Sloppak in their subfolders.</p>
+          <p class="lh-muted lh-playback-help">
+            You can keep playing during a scan. Library Doctor pauses while a song is open and
+            resumes when you exit the player.
+          </p>
+        </div>
+        <fieldset id="lh-targets" class="lh-target-grid">
+          <legend class="lh-visually-hidden">Scan target</legend>
+          <label class="lh-target-option">
+            <input type="radio" name="lh-target" value="library" checked>
+            <span><strong>All songs</strong><small>Check every package in the configured library.</small></span>
+          </label>
+          <label class="lh-target-option">
+            <input type="radio" name="lh-target" value="folder">
+            <span><strong>A folder</strong><small>Check one folder and all of its subfolders.</small></span>
+          </label>
+          <label class="lh-target-option">
+            <input type="radio" name="lh-target" value="file">
+            <span><strong>One package</strong><small>Check one .feedpak or legacy .sloppak file.</small></span>
+          </label>
+        </fieldset>
+        <label class="lh-deep-option">
+          <input id="lh-deep-audio" type="checkbox">
+          <span>
+            <strong>Deep audio checks</strong>
+            <small>Also inspect supported Ogg structure and duration. This reads much more data, so run a normal scan first.</small>
+          </span>
+        </label>
+        <details class="lh-worker-settings">
+          <summary>Scan performance <span id="lh-worker-summary">Automatic</span></summary>
+          <p class="lh-muted">
+            Automatic uses several CPU cores for larger uncached scans while reserving memory for
+            FeedBack and Windows. Small and cached scans stay single-worker.
+          </p>
+          <div class="lh-worker-controls">
+            <label>
+              <span>Worker selection</span>
+              <select id="lh-worker-mode">
+                <option value="automatic">Automatic (recommended)</option>
+                <option value="custom">Custom maximum</option>
+              </select>
+            </label>
+            <label id="lh-worker-limit-wrap" hidden>
+              <span>Maximum validation workers</span>
+              <input id="lh-worker-limit" type="number" min="1" step="1" inputmode="numeric" value="1">
+            </label>
+          </div>
+          <small class="lh-muted">
+            A custom value is a ceiling, not a forced count. Library Doctor may use fewer workers
+            when the scan, available memory, or operating system requires it.
+          </small>
+        </details>
+        <div class="lh-target-footer">
+          <div class="lh-target-selection">
+            <span class="lh-muted">Selected target</span>
+            <strong id="lh-target-path">Configured song library</strong>
+            <span id="lh-picker-note" class="lh-muted" hidden></span>
+          </div>
+          <button id="lh-choose-target" class="lh-button" type="button" hidden>Choose folder</button>
+        </div>
+      </div>
+    </details>
 
-  <section id="lh-batch-section" class="lh-batch-section" aria-labelledby="lh-batch-title" hidden>
-    <div class="lh-batch-heading">
-      <div>
-        <p class="lh-eyebrow">Current scan scope</p>
-        <h3 id="lh-batch-title">Safe batch repair</h3>
-        <p id="lh-batch-copy" class="lh-muted">
-          Review every deterministic safe repair in this scan scope before changing any Feedpaks.
-        </p>
+    <section class="lh-progress-panel">
+      <div class="lh-progress-copy">
+        <span id="lh-status">Library Doctor has not scanned this library yet.</span>
+        <span id="lh-scan-live" class="lh-visually-hidden" role="status"
+              aria-live="polite" aria-atomic="true"></span>
+        <span id="lh-progress-count"></span>
       </div>
-      <div class="lh-actions">
-        <button id="lh-batch-review" class="lh-button lh-button-safe" type="button">Review batch repair</button>
-        <button id="lh-batch-cancel" class="lh-button lh-button-danger" type="button" hidden>Stop batch</button>
-      </div>
-    </div>
-    <label class="lh-batch-preview-option">
-      <input id="lh-batch-preview-media" type="checkbox">
-      <span>
-        <strong>Also repair flagged audio previews automatically</strong>
-        <small>
-          Create a standard 30-second preview only when one is missing, shorter than
-          20 seconds, or longer than 35 seconds. Valid previews are untouched.
-        </small>
-      </span>
-    </label>
-    <div id="lh-batch-progress" class="lh-batch-progress" aria-live="polite" hidden>
-      <div>
-        <strong id="lh-batch-status">Preparing batch previewâ€¦</strong>
-        <span id="lh-batch-count" class="lh-muted"></span>
-        <span id="lh-batch-live-counts" class="lh-batch-live-counts" hidden></span>
-      </div>
-      <progress id="lh-batch-progress-bar" max="1" value="0" aria-label="Batch repair progress"></progress>
-    </div>
-    <div id="lh-batch-preview" class="lh-batch-content" aria-live="polite"></div>
-    <div id="lh-batch-result" class="lh-batch-content" aria-live="polite"></div>
-  </section>
+      <progress id="lh-progress" max="1" value="0" aria-label="Library scan progress" hidden></progress>
+      <p id="lh-scan-warning" class="lh-scan-warning" role="alert" hidden></p>
+      <p id="lh-error" class="lh-inline-error" role="alert" hidden></p>
+    </section>
 
-  <section class="lh-summary" aria-label="Library Doctor summary">
-    <button class="lh-summary-card" type="button" data-filter="all">
-      <span class="lh-summary-value" data-summary="total">0</span>
-      <span class="lh-summary-label">Checked</span>
-    </button>
-    <button class="lh-summary-card lh-tone-error" type="button" data-filter="errors">
-      <span class="lh-summary-value" data-summary="errors">0</span>
-      <span class="lh-summary-label">With errors</span>
-    </button>
-    <button class="lh-summary-card lh-tone-warning" type="button" data-filter="warnings">
-      <span class="lh-summary-value" data-summary="warnings">0</span>
-      <span class="lh-summary-label">Warnings only</span>
-    </button>
-    <button class="lh-summary-card lh-tone-review" type="button" data-filter="review">
-      <span class="lh-summary-value" data-summary="reviews">0</span>
-      <span class="lh-summary-label">Authoring review</span>
-    </button>
-    <button class="lh-summary-card lh-tone-good" type="button" data-filter="healthy">
-      <span class="lh-summary-value" data-summary="healthy">0</span>
-      <span class="lh-summary-label">No issues found by current checks</span>
-    </button>
-    <button class="lh-summary-card lh-tone-info" type="button" data-filter="no_lyrics">
-      <span class="lh-summary-value" data-summary="no_lyrics">0</span>
-      <span class="lh-summary-label">Without lyrics</span>
-    </button>
-    <button class="lh-summary-card lh-tone-info" type="button" data-filter="no_preview">
-      <span class="lh-summary-value" data-summary="no_preview">0</span>
-      <span class="lh-summary-label">Without previews</span>
-    </button>
-    <button class="lh-summary-card lh-tone-info" type="button" data-filter="deep_audio_partial">
-      <span class="lh-summary-value" data-summary="deep_audio_partial">0</span>
-      <span class="lh-summary-label">Partial deep audio</span>
-    </button>
-  </section>
-
-  <p class="lh-coverage-note">
-    Summary cards can overlap: for example, a package without lyrics can also contain an error.
-    FeedBack compatibility means valid package data that the current game may not display
-    or play as intended. Authoring review highlights unusual but potentially intentional tab data. Lyrics and
-    previews are optional; the Without previews view can still create a standard preview if you want one. Partial deep audio means one or more files use a format this
-    validator cannot inspect deeply or exceeded its safety limit. Coverage does not make
-    a package unhealthy. When a deterministic safe repair is available, Library Doctor
-    shows a preview and requires confirmation before changing the package. If a Feedpak
-    has multiple safe repair types, they can also be reviewed and applied together in one
-    transaction. Recovery data is created first; the existing package is replaced only after a complete repaired
-    candidate passes validation and archive integrity checks. No duplicate song is added to
-    the library. Chart repairs retain an Undo copy. Preview repairs offer either listen-first
-    review or confirmed automatic creation, then remove their temporary recovery data after
-    success so the repair is fully finished. Song Tools can also replace an existing valid
-    preview without requiring a scan finding. Findings that require
-    musical judgment and have no guarded workflow remain report-only.
-  </p>
-
-  <section class="lh-rule-section" aria-labelledby="lh-rule-title">
-    <div class="lh-rule-heading">
-      <div>
-        <h3 id="lh-rule-title">Findings by rule</h3>
-        <p id="lh-rule-note" class="lh-muted">Select a rule to show only affected packages.</p>
+    <section id="lh-overview" class="lh-summary" aria-label="Current scan outcome" hidden>
+      <div class="lh-summary-card">
+        <span class="lh-summary-value" data-summary="total">0</span>
+        <span class="lh-summary-label">Songs checked</span>
       </div>
-      <div class="lh-export-actions" aria-label="Export current results">
-        <button id="lh-export-json" class="lh-button" type="button">Export JSON</button>
-        <button id="lh-export-csv" class="lh-button" type="button">Export CSV</button>
+      <div class="lh-summary-card lh-tone-error">
+        <span class="lh-summary-value" data-summary="errors">0</span>
+        <span class="lh-summary-label">Needs fixing</span>
       </div>
-    </div>
-    <div id="lh-rule-summary" class="lh-rule-summary" aria-live="polite"></div>
-    <p id="lh-rule-empty" class="lh-empty" hidden>No findings are available for this scan.</p>
-    <p id="lh-rule-error" class="lh-inline-error" role="alert" hidden></p>
-  </section>
+      <div class="lh-summary-card lh-tone-warning">
+        <span class="lh-summary-value" data-summary="warnings">0</span>
+        <span class="lh-summary-label">May affect FeedBack</span>
+      </div>
+      <div class="lh-summary-card lh-tone-review">
+        <span class="lh-summary-value" data-summary="reviews">0</span>
+        <span class="lh-summary-label">Optional improvements</span>
+      </div>
+    </section>
 
-  <section class="lh-results-section" aria-labelledby="lh-results-title">
-    <div class="lh-results-heading">
-      <div>
-        <h3 id="lh-results-title">Packages</h3>
-        <p id="lh-result-count" class="lh-muted">No cached results</p>
+    <section id="lh-results-section" class="lh-results-section" aria-labelledby="lh-results-title" hidden>
+      <div class="lh-results-heading">
+        <div>
+          <h3 id="lh-results-title">Review affected songs</h3>
+          <p id="lh-result-count" class="lh-muted">No cached results</p>
+        </div>
+        <label class="lh-search">
+          <span class="lh-visually-hidden">Search songs</span>
+          <input id="lh-search" type="search" placeholder="Search title, artist, or package..." autocomplete="off">
+        </label>
       </div>
-      <label class="lh-search">
-        <span class="lh-visually-hidden">Search packages</span>
-        <input id="lh-search" type="search" placeholder="Search title, artist, or package…" autocomplete="off">
+
+      <div id="lh-filters" class="lh-filters" aria-label="Filter song results">
+        <button type="button" data-filter="problems" aria-pressed="true">All findings</button>
+        <button type="button" data-filter="errors" aria-pressed="false">Needs fixing</button>
+        <button type="button" data-filter="warnings" aria-pressed="false">May affect FeedBack</button>
+        <button type="button" data-filter="review" aria-pressed="false">Optional improvements</button>
+        <button type="button" data-filter="all" aria-pressed="false">All songs</button>
+      </div>
+
+      <details id="lh-more-filters" class="lh-more-filters">
+        <summary>More filters</summary>
+        <div class="lh-filters" aria-label="Additional song filters">
+          <button type="button" data-filter="healthy" aria-pressed="false">No issues found by current checks</button>
+          <button type="button" data-filter="no_lyrics" aria-pressed="false">Without lyrics</button>
+          <button type="button" data-filter="no_preview" aria-pressed="false">Without previews</button>
+          <button type="button" data-filter="deep_audio_partial" aria-pressed="false">Partial deep audio</button>
+        </div>
+      </details>
+
+      <div id="lh-results" class="lh-results"></div>
+      <p id="lh-empty" class="lh-empty" hidden></p>
+      <p id="lh-results-error" class="lh-inline-error" role="alert" hidden></p>
+
+      <nav id="lh-pagination" class="lh-pagination" aria-label="Song result pages" hidden>
+        <button id="lh-prev" class="lh-button" type="button">Previous</button>
+        <span id="lh-page-label" class="lh-muted"></span>
+        <button id="lh-next" class="lh-button" type="button">Next</button>
+      </nav>
+    </section>
+
+    <section id="lh-batch-section" class="lh-batch-section" aria-labelledby="lh-batch-title" hidden>
+      <div class="lh-batch-heading">
+        <div>
+          <p class="lh-eyebrow">Current scan scope</p>
+          <h3 id="lh-batch-title">Review safe repairs</h3>
+          <p id="lh-batch-copy" class="lh-muted">
+            Review deterministic repairs for affected songs before changing any Feedpaks.
+          </p>
+        </div>
+        <div class="lh-actions">
+          <button id="lh-batch-review" class="lh-button lh-button-safe" type="button">Review safe repairs</button>
+          <button id="lh-batch-cancel" class="lh-button lh-button-danger" type="button" hidden>Stop batch</button>
+        </div>
+      </div>
+      <label class="lh-batch-preview-option">
+        <input id="lh-batch-preview-media" type="checkbox">
+        <span>
+          <strong>Also repair flagged audio previews automatically</strong>
+          <small>Create a standard 30-second preview only when one is missing, too short, or too long. Valid previews are untouched.</small>
+        </span>
       </label>
-    </div>
+      <div id="lh-batch-progress" class="lh-batch-progress" hidden>
+        <div>
+          <strong id="lh-batch-status" role="status" aria-live="polite" aria-atomic="true">Preparing batch preview...</strong>
+          <span id="lh-batch-count" class="lh-muted"></span>
+          <span id="lh-batch-live-counts" class="lh-batch-live-counts" hidden></span>
+        </div>
+        <progress id="lh-batch-progress-bar" max="1" value="0" aria-label="Batch repair progress"></progress>
+      </div>
+      <div id="lh-batch-preview" class="lh-batch-content"></div>
+      <div id="lh-batch-result" class="lh-batch-content"></div>
+    </section>
 
-    <div id="lh-filters" class="lh-filters" aria-label="Filter package results">
-      <button type="button" data-filter="problems" aria-pressed="true">Needs attention</button>
-      <button type="button" data-filter="errors" aria-pressed="false">Errors</button>
-      <button type="button" data-filter="warnings" aria-pressed="false">Warnings</button>
-      <button type="button" data-filter="review" aria-pressed="false">Authoring review</button>
-      <button type="button" data-filter="healthy" aria-pressed="false">No issues found</button>
-      <button type="button" data-filter="all" aria-pressed="false">All</button>
-      <button type="button" data-filter="no_lyrics" aria-pressed="false">No lyrics</button>
-      <button type="button" data-filter="no_preview" aria-pressed="false">No preview</button>
-      <button type="button" data-filter="deep_audio_partial" aria-pressed="false">Partial deep audio</button>
-    </div>
+    <details id="lh-activity-section" class="lh-activity-section" hidden>
+      <summary>Activity and recovery</summary>
+      <span id="lh-activity-status" class="lh-visually-hidden" role="status"
+            aria-live="polite" aria-atomic="true"></span>
+      <section id="lh-repair-result" class="lh-repair-result" hidden></section>
+    </details>
 
-    <div id="lh-results" class="lh-results" aria-live="polite"></div>
-    <p id="lh-empty" class="lh-empty" hidden></p>
-    <p id="lh-results-error" class="lh-inline-error" role="alert" hidden></p>
-
-    <nav id="lh-pagination" class="lh-pagination" aria-label="Package result pages" hidden>
-      <button id="lh-prev" class="lh-button" type="button">Previous</button>
-      <span id="lh-page-label" class="lh-muted"></span>
-      <button id="lh-next" class="lh-button" type="button">Next</button>
-    </nav>
-  </section>
+    <details id="lh-scan-details" class="lh-scan-details" hidden>
+      <summary>Scan details and exports</summary>
+      <p id="lh-scan-provenance" class="lh-scan-provenance lh-muted" hidden></p>
+      <p class="lh-coverage-note">
+        Summary groups can overlap. Lyrics and previews are optional, and partial deep audio coverage does not make a package unhealthy.
+      </p>
+      <p class="lh-coverage-note">
+        Safe repairs always show a preview and require confirmation. Recovery data is created before a validated replacement is installed at the same package path.
+      </p>
+      <section class="lh-rule-section" aria-labelledby="lh-rule-title">
+        <div class="lh-rule-heading">
+          <div>
+            <h3 id="lh-rule-title">Findings by rule</h3>
+            <p id="lh-rule-note" class="lh-muted">Select a rule to filter the song list.</p>
+          </div>
+          <div class="lh-export-actions" aria-label="Export current results">
+            <button id="lh-export-json" class="lh-button" type="button">Export JSON</button>
+            <button id="lh-export-csv" class="lh-button" type="button">Export CSV</button>
+          </div>
+        </div>
+        <div id="lh-rule-summary" class="lh-rule-summary"></div>
+        <p id="lh-rule-empty" class="lh-empty" hidden>No findings are available for this scan.</p>
+        <p id="lh-rule-error" class="lh-inline-error" role="alert" hidden></p>
+      </section>
+    </details>
   </div>
 
   <section id="lh-song-tools-workspace" class="lh-song-tools" aria-labelledby="lh-song-tools-title" hidden>
     <header class="lh-song-tools-heading">
-      <div>
-        <p class="lh-eyebrow">Optional changes for any local song</p>
-        <h3 id="lh-song-tools-title">Song Tools</h3>
-        <p class="lh-muted">
-          Choose a song directly from FeedBack's indexed local library. Song Tools do not require
-          a Library Doctor scan or a warning. Each change still uses the same review, validation,
-          and Feedpak safety checks as a repair.
-        </p>
-      </div>
+      <p class="lh-eyebrow">Optional changes for any local song</p>
+      <h3 id="lh-song-tools-title">Song tools</h3>
+      <p class="lh-muted">
+        Choose a song from FeedBack's indexed local library. These tools do not require a scan or
+        warning, and every change still uses review, validation, and Feedpak safety checks.
+      </p>
     </header>
 
     <div class="lh-song-tool-browser">
       <label class="lh-song-tool-search">
         <span>Find a local song</span>
-        <input id="lh-song-tool-search" type="search"
-               placeholder="Search title, artist, or package..." autocomplete="off">
+        <input id="lh-song-tool-search" type="search" placeholder="Search title, artist, or package..." autocomplete="off">
       </label>
-      <p id="lh-song-tool-count" class="lh-muted" aria-live="polite">Loading local songs...</p>
+      <p id="lh-song-tool-count" class="lh-muted" role="status"
+         aria-live="polite" aria-atomic="true">Loading local songs...</p>
       <div id="lh-song-tool-results" class="lh-song-tool-results" role="list"></div>
       <p id="lh-song-tool-error" class="lh-inline-error" role="alert" hidden></p>
-      <nav id="lh-song-tool-pagination" class="lh-pagination" aria-label="Song Tool library pages" hidden>
+      <nav id="lh-song-tool-pagination" class="lh-pagination" aria-label="Song tool library pages" hidden>
         <button id="lh-song-tool-prev" class="lh-button" type="button">Previous</button>
         <span id="lh-song-tool-page" class="lh-muted"></span>
         <button id="lh-song-tool-next" class="lh-button" type="button">Next</button>
       </nav>
     </div>
 
-    <section id="lh-song-tool-selection" class="lh-song-tool-selection"
-             aria-live="polite" hidden></section>
+    <section id="lh-song-tool-selection" class="lh-song-tool-selection" tabindex="-1"
+             aria-labelledby="lh-song-tool-selection-title" hidden></section>
   </section>
-</main>
+</section>

@@ -1,0 +1,54 @@
+{
+  "schema": "library_doctor.host_contract.v1",
+  "declaredMinHost": "0.3.0-alpha.1",
+  "minimumCompatibleBuild": {
+    "commit": "950e3483573e458cc2aa7bc255d9590808947faa",
+    "date": "2026-07-08",
+    "description": "First FeedBack build with native plugin-module loading and sandboxed src serving."
+  },
+  "capabilities": [
+    {
+      "id": "plugin-sibling-loader-v1",
+      "evidence": [
+        {
+          "path": "plugins/__init__.py",
+          "contains": [
+            "plugin_context[\"load_sibling\"]",
+            "plugin_context[\"log\"]"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "plugin-native-modules-v1",
+      "evidence": [
+        {
+          "path": "plugins/__init__.py",
+          "contains": [
+            "\"script_type\": manifest.get(\"scriptType\")",
+            "@app.get(\"/api/plugins/{plugin_id}/src/{src_path:path}\")"
+          ]
+        }
+      ],
+      "evidenceAny": [
+        {
+          "path": "static/app.js",
+          "contains": "if (plugin.script_type === 'module') script.type = 'module';"
+        },
+        {
+          "path": "static/js/plugin-loader.js",
+          "contains": "if (plugin.script_type === 'module') script.type = 'module';"
+        }
+      ]
+    },
+    {
+      "id": "plugin-diagnostics-callable-v1",
+      "evidence": [
+        {
+          "path": "plugins/__init__.py",
+          "contains": "_parse_diagnostics_callable"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,54 @@
+{
+  "first_run": {
+    "status": {"stage": "idle", "running": false, "summary": {"total": 0}},
+    "expected": {"view": "first_run", "scan_options_open": true, "results_visible": false}
+  },
+  "cached_complete": {
+    "status": {
+      "stage": "idle",
+      "running": false,
+      "scan_current": true,
+      "summary": {"total": 12, "errors": 1, "warnings": 2, "reviews": 3},
+      "last_scan": {"complete": true, "target": {"label": "All songs"}}
+    },
+    "expected": {"view": "complete", "scan_options_open": false, "results_visible": true}
+  },
+  "partial": {
+    "status": {
+      "stage": "cancelled",
+      "running": false,
+      "summary": {"total": 7},
+      "last_scan": {"complete": false, "outcome": "cancelled"}
+    },
+    "expected": {"view": "partial", "scan_options_open": false, "results_visible": true}
+  },
+  "stale": {
+    "status": {
+      "stage": "idle",
+      "running": false,
+      "scan_current": false,
+      "summary": {"total": 12},
+      "last_scan": {"complete": true}
+    },
+    "expected": {"view": "stale", "scan_options_open": false, "results_visible": true}
+  },
+  "repair_receipt": {
+    "status": {"stage": "idle", "running": false, "summary": {"total": 12}},
+    "receipt": {"outcome": "success"},
+    "expected": {"view": "outcome", "activity_open": true}
+  },
+  "batch_ready": {
+    "status": {
+      "stage": "idle",
+      "running": false,
+      "summary": {"total": 12},
+      "last_scan": {"complete": true},
+      "batch": {"phase": "ready", "running": false}
+    },
+    "expected": {"view": "complete", "batch_visible": true}
+  },
+  "song_tools": {
+    "workspace": "tools",
+    "expected": {"health_visible": false, "tools_visible": true}
+  }
+}

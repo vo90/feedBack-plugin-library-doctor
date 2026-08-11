@@ -19,6 +19,15 @@ Small and fully cached scans stay single-worker. An advanced custom maximum is
 available, but remains a ceiling rather than forcing unsafe parallelism. Both
 scan modes automatically pause all workers while a song session is open and
 resume after the player is closed, so gameplay always has priority.
+Every uncached package is validated in an isolated worker with a bounded
+active-time deadline. A worker that stops responding is terminated and
+replaced; Library Doctor records a `package.validation-timeout` finding for the
+affected package and continues the scan without changing the package.
+Workers also have a measured per-process RSS ceiling: 768 MiB for a normal scan
+and 1.5 GiB for Deep Audio. A multi-worker overage is retried with one isolated
+worker so the package can be identified safely. A repeat overage records
+`package.validation-memory-limit`, terminates that worker, and continues with
+the remaining packages.
 
 ## Install
 
@@ -37,13 +46,16 @@ Python runtime dependency from `requirements.txt` during plugin startup.
 For local development, put this repository directly under FeedBack Desktop's
 user-plugins directory (or point `SLOPSMITH_PLUGINS_DIR` at its parent
 directory), then restart FeedBack. Do not copy its files into FeedBack core.
+During the Phase 1 transition, append `?libraryDoctorLayout=legacy` to the local
+FeedBack URL to reopen the temporary high-density layout for rollback testing.
 
 ## Use
 
-1. Open **Library Doctor** from FeedBack's plugin navigation. **Health Scan** is
-   the diagnostic and repair workspace; **Song Tools** is for optional changes
+1. Open **Library Doctor** from FeedBack's plugin navigation. **Library check** is
+   the diagnostic and repair workspace; **Song tools** is for optional changes
    to a song you choose.
-2. Choose **Whole library**, **Selected folder**, or **Single Feedpak**. Folder
+2. Select **Scan my library** for the recommended read-only check. Open **Scan
+   options** when you need **All songs**, **A folder**, or **One package**. Folder
    scans include all Feedpaks and Sloppaks in their subfolders. Selected paths
    must be inside FeedBack's configured song library.
 3. Start the scan. You can leave the screen while it works or cancel the scan;
@@ -56,8 +68,9 @@ directory), then restart FeedBack. Do not copy its files into FeedBack core.
    an automatic worker count by default and shows the chosen count in progress
    and scan provenance. Its custom maximum is for troubleshooting or deliberate
    tuning; it cannot override CPU, memory, task, or platform safety limits.
-4. Review **Needs attention** first. The rule summary shows how widespread each
-   issue is and can filter the package list. Every finding separates the actual
+4. Review **Needs fixing** first, followed by **May affect FeedBack** and
+   **Optional improvements**. Additional coverage filters, rule aggregation,
+   provenance, and exports remain under expandable details. Every finding separates the actual
    data problem, what a player may notice in FeedBack, and why fixing it matters.
    A suggested next action follows, while the expandable technical details retain
    the stable rule code, file, arrangement, time, and stored string index.
@@ -68,18 +81,27 @@ directory), then restart FeedBack. Do not copy its files into FeedBack core.
    recovery data, validates a repaired candidate, and saves it only if it
    introduces no new finding. A persistent result card confirms success or
    failure, states exactly what changed and what to expect in game, and offers
-   Undo after a successful chart repair. Repeated findings for the same repair rule
+   **Undo repair** after a successful chart repair. The latest receipt stays in
+   the Library check workspace under **Activity and recovery** instead of
+   appearing above unrelated Song tools. Repeated findings for the same repair rule
    are grouped into one package-wide action with an arrangement/source
    breakdown. When a Feedpak has more than one distinct safe repair type,
    **Fix all safe issues** previews and applies them as one validated package
    transaction with one recovery backup and one Undo. The individual repair
    controls remain available. Findings without a deterministic repair remain
-   report-only. Preview recommendations instead offer **Review preview manually**
-   and **Create automatically and finish**. Both generate from the full song mix
-   using the same selection standard; manual review lets you listen and choose
+   report-only. Every newly written recovery ZIP is reopened and its original
+   members are verified byte-for-byte before commit. Directory-package writes
+   also keep a durable private transaction journal. If FeedBack or the computer
+   stops between member writes, the next Library Doctor startup verifies the
+   journal and recovery backup, then either accepts the fully committed package
+   or restores the exact original members.
+   Unknown external edits are never overwritten and are surfaced for manual
+   recovery. Preview recommendations make **Listen and choose a preview** the
+   primary action, with **Create automatically and finish** as the secondary path.
+   Both generate from the full song mix using the same selection standard; listen-first review lets you hear and choose
    another starting point. A validated preview repair removes its temporary
    recovery copy automatically, so no later finalization step is required.
-6. Open **Song Tools** to search FeedBack's indexed local library and select any
+6. Open **Song tools** to search FeedBack's indexed local library and select any
    song, even one that has not been scanned or has no warning. **Preview
    Creator** can add a missing preview or replace an existing valid preview.
    It reuses the same source-bound generation, complete-package validation, and
@@ -95,7 +117,8 @@ an update, but are clearly marked as needing a new scan and do not expose repair
 controls. This prevents historical classifications from being treated as a
 current automatic-repair decision.
 
-For larger cleanups, **Safe batch repair** uses the complete current scan scope
+For larger cleanups, **Review safe repairs** sits below the affected-song results
+and uses the complete current scan scope
 (whole library, selected folder, or single Feedpak). It first builds a read-only
 preview showing eligible packages, repair totals, and every package excluded by
 a safety blocker. The scan records whether conditional handshape findings are
@@ -249,14 +272,14 @@ of only the package members changed by the repair, never another full copy of
 the Feedpak. For chart repairs these are the affected song-data files. The
 backup is stored under `library_doctor/repair_backups` in FeedBack's config
 directory and is retained until the repair is undone or explicitly finalized.
-**Undo this repair** restores
+**Undo repair** restores
 those exact original member bytes only
 when the repaired files have not subsequently changed; unrelated current package
 members are preserved. Recovery is validated before it is saved. Findings that
 were present in the exact original are allowed to return, because restoring that
 previous state is the purpose of Undo; they are shown again in the refreshed
-package report. A successful Undo removes the now-redundant backup. **Finalize
-and remove recovery copy** first verifies that the relevant package members
+package report. A successful Undo removes the now-redundant backup. **Delete
+Undo backup…** first verifies that the relevant package members
 still exactly match the repaired state, then removes only the private recovery
 copy; the playable Feedpak is not changed, but that repair can no longer be
 undone from Library Doctor.
@@ -292,7 +315,7 @@ package member are preserved.
 
 Preview repair remains separate from the per-song **Fix all safe issues** chart
 transaction because it creates audio and follows different recovery semantics.
-It can be included explicitly in **Safe batch repair** after reviewing the batch
+It can be included explicitly in **Review safe repairs** after reviewing the batch
 scope and confirming that flagged previews should be generated automatically.
 The read-only batch review performs no encoding; generation happens for one
 Feedpak at a time during the confirmed run. During replacement, temporary
@@ -439,7 +462,10 @@ The report cache is local to FeedBack's config directory at
 `library_doctor/library_doctor.db`. It stores package-relative paths and scan
 results. A targeted scan changes the visible dashboard scope without discarding
 cached reports for the rest of the library. Library Doctor does not contribute
-the database or song identities to FeedBack support bundles.
+the database or song identities to FeedBack support bundles. Its diagnostic
+callable contributes only bounded aggregate state and recovery counts; the
+support-log adapter removes package identities, local paths, exception text,
+and tracebacks before the host can collect them.
 
 Each scan also records its target, profile, expected and completed package
 counts, outcome, and discovery errors. Interrupted, cancelled, or partially
@@ -461,7 +487,8 @@ normal in-game workflow focused on package outcomes.
 - `repair_eligibility.py` contains the pure conditional handshape and preview
   source predicates shared by scanning and transactional repair planning.
 - `scanner.py` owns the playback-aware background scan, incremental SQLite
-  cache, cancellation, pagination, rule summaries, and report exports.
+  cache, corruption quarantine, bounded lock handling, cancellation,
+  pagination, rule summaries, and report exports.
 - `library_doctor_scan_worker.py` is the spawn-safe, side-effect-free process
   worker. It can only read and validate a package; SQLite and every file change
   remain in the parent process.
@@ -473,10 +500,27 @@ normal in-game workflow focused on package outcomes.
   the only package transaction and recovery authority.
 - `migration.py` performs the one-time, fail-closed move from the retired
   pre-0.15 identity while preserving scan history and recovery artifacts.
+- `privacy.py` is the support-log boundary. It replaces package identities with
+  per-session opaque tokens and removes local paths, exception text, and
+  tracebacks before the host logger receives a record.
+- `diagnostics.py` is the support-bundle callable. It reports only bounded,
+  identity-free operational counts and state-file readability.
+- `api_contracts.py` declares the additive response and strict mutation-request
+  shapes plus the uniform structured error envelope locked by the
+  characterization suite.
+- `mutation_receipts.py` owns the bounded durable idempotency ledger. Apply,
+  automatic preview, Fix all, Undo, and recovery finalization accept a
+  `request_id` or matching `Idempotency-Key`; completed outcomes can be read at
+  `GET /repair/receipt/{request_id}` and safely replayed after a lost response.
 - `routes.py` exposes the scanner through plugin-scoped FastAPI routes and uses
-  `context["load_sibling"]` for backend modules.
-- `screen.html`, `screen.js`, and `assets/library-doctor.css` provide the
-  in-game interface.
+  `context["load_sibling"]` for backend modules. Every route failure uses
+  `{code, message, file_state, retryable, next_action}`. Standalone Apply,
+  Undo, and Finalize share the same exclusive mutation reservation.
+- `screen.html`, the thin native-module `screen.js` entry, `src/`, and
+  `assets/library-doctor.css` provide the in-game interface. The plugin needs
+  FeedBack's module-capable `0.3.0-alpha.1` nightly (commit `950e348` or newer),
+  not the older tag with the same version text. `host-contract.json` and
+  `tools/verify_host_contract.py` make that capability floor executable.
 
 The vendored schemas in `schemas/` come from the authoritative
 [`got-feedback/feedpak-spec`](https://github.com/got-feedback/feedpak-spec)
@@ -490,11 +534,47 @@ the test dependencies and run:
 
 ```bash
 python -m pip install -r requirements-test.txt
-python -m ruff check validator.py scanner.py library_doctor_scan_worker.py repair.py repair_eligibility.py preview_repair.py batch_repair.py migration.py routes.py tests
+python -m pip check
+python -m pip_audit -r requirements.txt
+python -m ruff check validator.py scanner.py library_doctor_scan_worker.py repair.py repair_eligibility.py preview_repair.py batch_repair.py migration.py privacy.py diagnostics.py api_contracts.py mutation_receipts.py routes.py tools tests
 python -m pytest --cov --cov-report=term
-python -m py_compile validator.py scanner.py library_doctor_scan_worker.py repair.py repair_eligibility.py preview_repair.py batch_repair.py migration.py routes.py
-node --check screen.js
+python -m py_compile validator.py scanner.py library_doctor_scan_worker.py repair.py repair_eligibility.py preview_repair.py batch_repair.py migration.py privacy.py diagnostics.py api_contracts.py mutation_receipts.py routes.py tools/verify_host_contract.py
+npm ci
+npm run audit:dependencies
+npm run check:frontend
+npm run lint:frontend
+npm run test:frontend
+npm run test:browser:list
 ```
+
+The frontend suite imports the real `src/` graph in a small synthetic DOM. The
+nightly browser suite requires FeedBack nightly to be running, but intercepts
+every Library Doctor data and mutation route so it cannot scan or change the
+configured song library. Its stateful synthetic journey exercises the complete
+scan, repair, and Undo browser flow without touching a real Feedpak:
+
+```bash
+npx playwright install chromium
+npm run test:browser
+```
+
+Set `FEEDBACK_NIGHTLY_URL` when the host is not available at
+`http://127.0.0.1:18000`.
+
+Verify a candidate minimum or latest FeedBack checkout without changing it:
+
+```bash
+python tools/verify_host_contract.py /path/to/feedBack
+```
+
+The full accessibility certification matrix and manual assistive-technology
+journeys are in `docs/accessibility-certification-2026-08-11.md`. Scanner and
+adversarial-corpus limits are defined in
+`docs/performance-and-fuzz-budgets.md`. Pytest keeps temporary files and its
+cache in ignored repository-local `.test-artifacts/` and `.test-cache/`
+directories, so a clean checkout does not depend on the system temp directory.
+The versioned release-candidate ledger and remaining human procedures are in
+`release-signoff.json` and `docs/release-signoff-0.43.0.md`.
 
 `library_doctor` is the plugin ID and API namespace from version 0.15 onward.
 Upgrading from an earlier release moves the previous local cache and recovery

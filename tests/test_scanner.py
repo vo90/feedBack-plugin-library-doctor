@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import shutil
+import sqlite3
 import sys
 import threading
 import time
@@ -108,6 +109,12 @@ def test_completed_scan_exposes_aggregate_performance_telemetry(
         "source_recheck_seconds",
         "source_change_retries",
         "parallel_fallbacks",
+        "worker_timeouts",
+        "worker_restarts",
+        "peak_worker_rss_bytes",
+        "worker_rss_limit_bytes",
+        "worker_memory_limit_exceeded",
+        "worker_memory_restarts",
         "cache_write_seconds",
         "scope_update_seconds",
     }
@@ -263,9 +270,34 @@ def test_parallel_scanner_keeps_cache_writes_in_parent_and_reports_workers(
 
 
 def test_parallel_pool_start_failure_falls_back_to_sequential_validation(
-    scanner_module, tmp_path,
+    scanner_module, tmp_path, monkeypatch,
 ):
     calls = []
+    choose_worker_policy = scanner_module.choose_worker_policy
+
+    def deterministic_worker_policy(
+        pending_packages,
+        *,
+        deep_audio,
+        requested_max,
+        worker_backend_available,
+    ):
+        return choose_worker_policy(
+            pending_packages,
+            deep_audio=deep_audio,
+            requested_max=requested_max,
+            worker_backend_available=worker_backend_available,
+            logical_cpus=8,
+            physical_cpus=4,
+            total_memory=16 * 1024**3,
+            available_memory=12 * 1024**3,
+            platform="linux",
+            environment={},
+        )
+
+    monkeypatch.setattr(
+        scanner_module, "choose_worker_policy", deterministic_worker_policy
+    )
 
     def validate(_path, package, **_options):
         calls.append(package)
@@ -289,6 +321,180 @@ def test_parallel_pool_start_failure_falls_back_to_sequential_validation(
     assert status["scanned"] == 3
     assert status["performance"]["parallel_fallbacks"] == 1
     assert sorted(calls) == [f"song-{index}.feedpak" for index in range(3)]
+
+
+def test_non_cooperative_worker_is_terminated_and_replaced_after_deadline(
+    scanner_module, tmp_path, monkeypatch,
+):
+    choose_worker_policy = scanner_module.choose_worker_policy
+
+    def one_worker_policy(
+        pending_packages,
+        *,
+        deep_audio,
+        requested_max,
+        worker_backend_available,
+    ):
+        return choose_worker_policy(
+            pending_packages,
+            deep_audio=deep_audio,
+            requested_max=1,
+            worker_backend_available=worker_backend_available,
+            logical_cpus=2,
+            physical_cpus=1,
+            total_memory=8 * 1024**3,
+            available_memory=6 * 1024**3,
+            platform="linux",
+            environment={},
+        )
+
+    monkeypatch.setattr(scanner_module, "choose_worker_policy", one_worker_policy)
+
+    pools = []
+
+    class TestPool:
+        def __init__(self, hangs):
+            self.hangs = hangs
+            self.cancelled = False
+            self.shutdown_options = None
+
+        def set_paused(self, _paused):
+            pass
+
+        def submit(self, _path, package, _deep_audio):
+            future = concurrent.futures.Future()
+            if not self.hangs:
+                future.set_result({
+                    "outcome": "complete",
+                    "report": _report(package),
+                    "elapsed_seconds": 0.001,
+                })
+            return future
+
+        def cancel(self):
+            self.cancelled = True
+
+        def shutdown(self, **options):
+            self.shutdown_options = options
+
+    def pool_factory(_workers, _validator_version):
+        pool = TestPool(hangs=not pools)
+        pools.append(pool)
+        return pool
+
+    instance, library = _make_scanner(
+        scanner_module,
+        tmp_path,
+        lambda _path, package, **_options: _report(package),
+        worker_pool_factory=pool_factory,
+        package_timeout_seconds=0.05,
+    )
+    (library / "one.feedpak").write_bytes(b"one")
+    (library / "two.feedpak").write_bytes(b"two")
+
+    status = _run(instance, force=True, max_workers=1)
+    reports = {item["package"]: item for item in instance.results()["items"]}
+
+    assert status["stage"] == "complete"
+    assert status["performance"]["worker_timeouts"] == 1
+    assert status["performance"]["worker_restarts"] == 1
+    assert len(pools) == 2
+    assert pools[0].cancelled is True
+    assert pools[0].shutdown_options["force"] is True
+    timeout_reports = [
+        report for report in reports.values()
+        if report["findings"]
+        and report["findings"][0]["code"] == "package.validation-timeout"
+    ]
+    assert len(timeout_reports) == 1
+    assert sum(report["status"] == "healthy" for report in reports.values()) == 1
+
+
+def test_worker_exceeding_rss_budget_is_stopped_and_next_package_continues(
+    scanner_module, tmp_path, monkeypatch,
+):
+    choose_worker_policy = scanner_module.choose_worker_policy
+
+    def one_worker_policy(
+        pending_packages,
+        *,
+        deep_audio,
+        requested_max,
+        worker_backend_available,
+    ):
+        return choose_worker_policy(
+            pending_packages,
+            deep_audio=deep_audio,
+            requested_max=1,
+            worker_backend_available=worker_backend_available,
+            logical_cpus=2,
+            physical_cpus=1,
+            total_memory=8 * 1024**3,
+            available_memory=6 * 1024**3,
+            platform="linux",
+            environment={},
+        )
+
+    monkeypatch.setattr(scanner_module, "choose_worker_policy", one_worker_policy)
+    pools = []
+
+    class TestPool:
+        def __init__(self, over_budget):
+            self.over_budget = over_budget
+            self.cancelled = False
+            self.shutdown_options = None
+
+        def set_paused(self, _paused):
+            pass
+
+        def submit(self, _path, package, _deep_audio):
+            future = concurrent.futures.Future()
+            future.set_result({
+                "outcome": "complete",
+                "report": _report(package),
+                "elapsed_seconds": 0.001,
+            })
+            return future
+
+        def memory_usage(self):
+            limit = scanner_module.STANDARD_WORKER_RSS_LIMIT_BYTES
+            return {1234: limit + 1 if self.over_budget else limit // 4}
+
+        def cancel(self):
+            self.cancelled = True
+
+        def shutdown(self, **options):
+            self.shutdown_options = options
+
+    def pool_factory(_workers, _validator_version):
+        pool = TestPool(over_budget=not pools)
+        pools.append(pool)
+        return pool
+
+    instance, library = _make_scanner(
+        scanner_module,
+        tmp_path,
+        lambda _path, package, **_options: _report(package),
+        worker_pool_factory=pool_factory,
+    )
+    (library / "one.feedpak").write_bytes(b"one")
+    (library / "two.feedpak").write_bytes(b"two")
+
+    status = _run(instance, force=True, max_workers=1)
+    reports = {item["package"]: item for item in instance.results()["items"]}
+
+    assert status["stage"] == "complete"
+    assert status["performance"]["worker_memory_limit_exceeded"] == 1
+    assert status["performance"]["worker_memory_restarts"] == 1
+    assert status["performance"]["peak_worker_rss_bytes"] > status["performance"]["worker_rss_limit_bytes"]
+    assert pools[0].cancelled is True
+    assert pools[0].shutdown_options["force"] is True
+    assert any(
+        report["findings"]
+        and report["findings"][0]["code"] == "package.validation-memory-limit"
+        for report in reports.values()
+    )
+    assert sum(report["status"] == "healthy" for report in reports.values()) == 1
 
 
 def test_scan_retries_when_a_feedpak_changes_during_validation(
@@ -566,6 +772,46 @@ def test_existing_report_cache_is_migrated_into_visible_scope(scanner_module, tm
     assert migrated.summary()["deep_audio_partial"] == 1
     assert migrated.current_target() == {"kind": "library", "label": "Whole library"}
     migrated._conn.close()
+
+
+def test_corrupt_report_cache_is_quarantined_and_rebuilt(scanner_module, tmp_path, caplog):
+    database = tmp_path / "config" / "library_doctor" / "library_doctor.db"
+    database.parent.mkdir(parents=True)
+    corrupt_bytes = b"this-is-not-a-sqlite-database"
+    database.write_bytes(corrupt_bytes)
+
+    cache = scanner_module._ReportCache(
+        database,
+        log=logging.getLogger("library-doctor-corrupt-cache-test"),
+    )
+
+    assert cache.summary()["total"] == 0
+    quarantined = list(database.parent.glob("library_doctor.db.corrupt-*"))
+    assert len(quarantined) == 1
+    assert quarantined[0].read_bytes() == corrupt_bytes
+    assert database.read_bytes().startswith(b"SQLite format 3")
+    assert "quarantined an unreadable report cache" in caplog.text
+    cache._conn.close()
+
+
+def test_report_cache_waits_for_a_short_database_lock(scanner_module, tmp_path):
+    database = tmp_path / "config" / "library_doctor" / "library_doctor.db"
+    seed = scanner_module._ReportCache(database)
+    seed._conn.close()
+    locker = sqlite3.connect(database, timeout=0, check_same_thread=False)
+    locker.execute("PRAGMA journal_mode = DELETE")
+    locker.execute("BEGIN EXCLUSIVE")
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        opening = executor.submit(scanner_module._ReportCache, database)
+        time.sleep(0.1)
+        assert opening.done() is False
+        locker.rollback()
+        cache = opening.result(timeout=3)
+
+    assert cache.summary()["total"] == 0
+    cache._conn.close()
+    locker.close()
 
 
 def test_selected_targets_must_stay_inside_the_library(scanner_module, tmp_path):

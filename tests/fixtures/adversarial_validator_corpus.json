@@ -1,0 +1,58 @@
+{
+  "schema": "library_doctor.adversarial_corpus.v1",
+  "safe_relpaths": [
+    {"value": "arrangements/lead.json", "safe": true},
+    {"value": "manifest.yaml", "safe": true},
+    {"value": "folder/", "safe": true},
+    {"value": "a/./b.json", "safe": true},
+    {"value": "", "safe": false},
+    {"value": "/absolute.json", "safe": false},
+    {"value": "../escape.json", "safe": false},
+    {"value": "a/../../escape.json", "safe": false},
+    {"value": "a//b.json", "safe": false},
+    {"value": "C:/drive.json", "safe": false},
+    {"value": "a\\b.json", "safe": false},
+    {"value": null, "safe": false},
+    {"value": 42, "safe": false}
+  ],
+  "arrangement_json": [
+    {
+      "name": "minimal-valid",
+      "content": "{\"notes\":[],\"chords\":[]}",
+      "required_code": null
+    },
+    {
+      "name": "truncated-object",
+      "content": "{\"notes\":[",
+      "required_code": "package.invalid-json"
+    },
+    {
+      "name": "json-comments-rejected",
+      "content": "{\"notes\":[] /* comment */,\"chords\":[]}",
+      "required_code": "package.invalid-json"
+    },
+    {
+      "name": "wrong-top-level-type",
+      "content": "[]",
+      "required_code": "spec.schema"
+    },
+    {
+      "name": "nonfinite-number",
+      "content": "{\"notes\":[{\"time\":NaN}],\"chords\":[]}",
+      "required_code": "spec.nonfinite-number"
+    },
+    {
+      "name": "mixed-hostile-types",
+      "content": "{\"notes\":[null,true,1,\"note\",{}],\"chords\":{\"unexpected\":true}}",
+      "required_code": "spec.schema"
+    }
+  ],
+  "exact_identity": [
+    {"name": "object-key-order", "left": {"a": 1, "b": [2]}, "right": {"b": [2], "a": 1}, "equal": true},
+    {"name": "boolean-vs-integer", "left": true, "right": 1, "equal": false},
+    {"name": "integer-vs-float", "left": 1, "right": 1.0, "equal": false},
+    {"name": "negative-vs-positive-zero", "left": -0.0, "right": 0.0, "equal": false},
+    {"name": "list-order", "left": [1, 2], "right": [2, 1], "equal": false},
+    {"name": "exact-nested-copy", "left": {"notes": [{"time": 1.25, "fret": 3}]}, "right": {"notes": [{"time": 1.25, "fret": 3}]}, "equal": true}
+  ]
+}

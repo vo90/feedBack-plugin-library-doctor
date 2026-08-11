@@ -1,0 +1,25 @@
+{
+  "schema": "library_doctor.repair_test_coverage.v1",
+  "rules": {
+    "chart.negative-muted-fret": ["tests/test_repair.py::test_normalizes_all_negative_exact_string_mutes_and_nothing_else"],
+    "chart.duplicate-note": ["tests/test_repair.py::test_plans_only_exact_top_level_note_duplicates"],
+    "chart.duplicate-chord-note": ["tests/test_repair.py::test_removes_only_exact_duplicate_members_inside_each_chord"],
+    "chart.duplicate-chord": ["tests/test_repair.py::test_removes_only_exact_duplicate_arrangement_events"],
+    "chart.duplicate-anchor": ["tests/test_repair.py::test_removes_only_exact_duplicate_arrangement_events"],
+    "chart.duplicate-handshape": ["tests/test_repair.py::test_removes_only_exact_duplicate_arrangement_events"],
+    "chart.zero-length-handshape": ["tests/test_repair.py::test_removes_only_zero_length_handshapes_redundant_with_exact_chords"],
+    "chart.invalid-handshape-span": ["tests/test_repair.py::test_invalid_handshape_repair_ignores_valid_and_zero_length_spans"],
+    "chart.note-duplicates-chord": ["tests/test_repair.py::test_plans_exact_standalone_notes_that_duplicate_explicit_chord_members"],
+    "chart.bend-points-out-of-order": ["tests/test_repair.py::test_bend_repair_stably_orders_every_curve_without_losing_data"],
+    "lyrics.out-of-order": ["tests/test_repair.py::test_lyric_repair_stably_orders_cues_without_changing_content"],
+    "timeline.duplicate-beat": ["tests/test_repair.py::test_plans_only_exact_valid_beat_marker_duplicates"],
+    "timeline.beats-out-of-order": ["tests/test_repair.py::test_timeline_repair_stably_orders_markers_without_changing_data"],
+    "timeline.duplicate-section": ["tests/test_repair.py::test_plans_only_exact_valid_section_marker_duplicates"],
+    "timeline.sections-out-of-order": ["tests/test_repair.py::test_timeline_repair_stably_orders_markers_without_changing_data"],
+    "drums.duplicate-hit": ["tests/test_repair.py::test_plans_only_exact_drum_hit_duplicates"],
+    "media.preview-missing": ["tests/test_preview_repair.py::test_missing_preview_is_added_and_temporary_recovery_is_removed"],
+    "media.preview-too-short": ["tests/test_repair_catalog_coverage.py::test_media_catalog_entries_share_the_reviewed_preview_contract"],
+    "media.preview-too-long": ["tests/test_preview_repair.py::test_preview_candidate_uses_lyric_cue_and_is_source_bound"],
+    "media.preview-regenerate": ["tests/test_preview_repair.py::test_valid_preview_regeneration_applies_and_finishes_without_recovery"]
+  }
+}
