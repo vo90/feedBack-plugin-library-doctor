@@ -55,14 +55,18 @@ filesystem's native change record. On Windows, Library Doctor reads NTFS
 `ChangeTime` through `GetFileInformationByHandleEx`, because Python exposes the
 creation time as `st_ctime` there. Other systems use `st_ctime_ns`.
 
-A deterministic randomized test mutates twelve unsampled middle positions,
-flushes the writes, restores the original file size and modification time, and
-proves that every mutation invalidates the directory package signature.
+A deterministic randomized test mutates twelve positions distributed across
+all nine content windows, flushes the writes, restores the original file size
+and modification time, and proves that every sampled mutation invalidates the
+directory package signature. A separate deterministic test proves that a
+native change-record update is also bound into the signature.
 
 The cache remains an invalidation optimization rather than a cryptographic
-boundary against a privileged process capable of forging native filesystem
-records. README now states that threat model and points users to **Recheck
-without cache**. Repair Apply and Undo continue to use independent exact hashes.
+boundary. An edit outside the sampled windows can evade the cache if size and
+modification time are preserved and the filesystem does not produce a distinct
+change record; a privileged process capable of forging native records can do
+the same. README states that threat model and points users to **Recheck without
+cache**. Repair Apply and Undo continue to use independent exact hashes.
 
 ## Exact 0.34.0 compatibility
 
@@ -75,7 +79,7 @@ both the historical repair receipt and current restore receipt.
 
 ## Explicit residual-risk decisions
 
-Two platform boundaries remain accepted rather than misrepresented as solved:
+Three platform boundaries remain accepted rather than misrepresented as solved:
 
 1. **Final filesystem instruction window.** Portable Python and supported
    Windows/Linux filesystems do not offer an atomic compare-and-swap of arbitrary
@@ -89,6 +93,13 @@ Two platform boundaries remain accepted rather than misrepresented as solved:
    validator currently launches no native child and imports no mutation service.
    Adding either capability reopens the OS-sandbox requirement and must not be
    treated as covered by the current guard.
+3. **Bounded large-file cache signatures.** Reading and hashing every byte of
+   every large audio member would remove the intended cache-performance
+   benefit. Distributed samples plus a native change record catch sampled edits
+   and ordinary filesystem-observable changes, but a same-metadata edit outside
+   the samples can evade invalidation when the filesystem change record does not
+   advance. A fresh scan is available explicitly; repair commits use exact
+   hashes and do not inherit this cache limitation.
 
 These decisions narrow claims to what the implementation and executable tests
 actually prove. They are not waivers for any failed package, recovery, privacy,
@@ -104,7 +115,7 @@ host runtime, novice usability, remote CI, and clean release-worktree evidence.
 
 The complete local gate passed after implementation:
 
-- `python -m pytest --cov --cov-report=term`: 443 passed with 85.57% total
+- `python -m pytest --cov --cov-report=term`: 444 passed with 85.57% total
   coverage (configured minimum: 85%);
 - the constrained one-worker scanner, worker, and adversarial corpus: 77 passed;
 - `python -m ruff check .` and the CI production/tool `py_compile` target: passed;

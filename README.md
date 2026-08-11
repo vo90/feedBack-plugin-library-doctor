@@ -115,12 +115,15 @@ FeedBack URL to reopen the temporary high-density layout for rollback testing.
    confirmation is wanted.
 
 Cache signatures are invalidation hints, not a hostile-filesystem security
-boundary. A privileged process that can rewrite bytes and also forge native
-filesystem change records could evade a cached scan; **Recheck without cache**
-is the explicit response to that threat. Repair Apply and Undo do not trust the
-cache as their commit guard: affected directory members are SHA-256 checked,
-and archived packages are bound to the complete archive SHA-256 immediately
-before replacement.
+boundary. Large files use nine distributed content windows plus the native
+filesystem change record. An edit outside those windows can evade a cached scan
+if it also preserves size and modification time and the filesystem does not
+produce a distinct change record; a privileged process able to forge those
+records has the same capability. **Recheck without cache** is the explicit
+response to that threat. Repair Apply and Undo do not trust the cache as their
+commit guard: affected directory members are SHA-256 checked, and archived
+packages are bound to the complete archive SHA-256 immediately before
+replacement.
 
 Saved reports from an older Library Doctor rule version remain readable after
 an update, but are clearly marked as needing a new scan and do not expose repair

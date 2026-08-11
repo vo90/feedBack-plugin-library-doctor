@@ -1156,7 +1156,7 @@ def test_cache_signature_detects_same_size_same_timestamp_content_change(
     assert calls == ["one.feedpak", "one.feedpak"]
 
 
-def test_large_file_signature_detects_random_middle_mutations_with_restored_metadata(
+def test_large_file_signature_detects_random_mutations_across_sample_windows(
     scanner_module, tmp_path
 ):
     package = tmp_path / "Song.feedpak"
@@ -1165,24 +1165,23 @@ def test_large_file_signature_detects_random_middle_mutations_with_restored_meta
     size = scanner_module.SIGNATURE_FULL_FILE_BYTES * 3
     member.write_bytes(b"a" * size)
     original = member.stat()
-    sample_ranges = [
-        range(offset, offset + scanner_module.SIGNATURE_SAMPLE_BYTES)
-        for offset in scanner_module._signature_sample_offsets(size)
-    ]
     mutation = b"phase-8-middle-mutation"
-    candidates = [
-        offset
-        for offset in range(
-            scanner_module.SIGNATURE_SAMPLE_BYTES,
-            size - scanner_module.SIGNATURE_SAMPLE_BYTES,
-            4096,
+    sample_starts = scanner_module._signature_sample_offsets(size)
+    rng = random.Random(20260812)
+    offsets = [
+        rng.randint(
+            sample_start,
+            sample_start + scanner_module.SIGNATURE_SAMPLE_BYTES - len(mutation),
         )
-        if not any(
-            offset < sampled.stop and offset + len(mutation) > sampled.start
-            for sampled in sample_ranges
-        )
+        for sample_start in sample_starts
     ]
-    offsets = random.Random(20260812).sample(candidates, 12)
+    offsets.extend(
+        rng.randint(
+            sample_start,
+            sample_start + scanner_module.SIGNATURE_SAMPLE_BYTES - len(mutation),
+        )
+        for sample_start in rng.sample(list(sample_starts), 3)
+    )
 
     for offset in offsets:
         before = scanner_module.LibraryScanner._signature(package)
@@ -1202,6 +1201,27 @@ def test_large_file_signature_detects_random_middle_mutations_with_restored_meta
             stream.flush()
             os.fsync(stream.fileno())
         os.utime(member, ns=(original.st_atime_ns, original.st_mtime_ns))
+
+
+def test_large_file_signature_binds_filesystem_change_token(
+    scanner_module, tmp_path, monkeypatch
+):
+    package = tmp_path / "Song.feedpak"
+    package.mkdir()
+    member = package / "full.ogg"
+    member.write_bytes(b"a" * (scanner_module.SIGNATURE_FULL_FILE_BYTES + 1))
+    change_token = [100]
+    monkeypatch.setattr(
+        scanner_module,
+        "_filesystem_change_token",
+        lambda _path, _stat: change_token[0],
+    )
+
+    before = scanner_module.LibraryScanner._signature(package)
+    change_token[0] = 101
+    after = scanner_module.LibraryScanner._signature(package)
+
+    assert after != before
 
 
 def test_cache_signature_is_scoped_to_the_configured_library(
