@@ -304,6 +304,18 @@ def setup(app, context):
             "combined": repair_module.all_safe_repair_definition(),
         }
 
+    @router.get(
+        "/reviewed-repairs",
+        response_model=contracts.ReviewedRepairCatalogContract,
+    )
+    def get_reviewed_repairs():
+        return {
+            "schema": "library_doctor.reviewed_repair_catalog.v1",
+            "catalog_version": repair_module.REPAIR_CATALOG_VERSION,
+            "registry_version": repair_module.REVIEWED_REPAIR_REGISTRY_VERSION,
+            "items": repair_module.reviewed_repair_catalog(),
+        }
+
     @router.get("/repair/history")
     def get_repair_history(limit: int = Query(default=5, ge=1, le=20)):
         return repair_service.history(limit)
@@ -562,6 +574,55 @@ def setup(app, context):
         except repair_module.RepairPlanningError as exc:
             raise HTTPException(status_code=400, detail=repair_error(exc)) from exc
 
+    @router.post("/reviewed-repair/inspect")
+    def inspect_reviewed_repair(payload: contracts.ReviewedInspectRequestContract):
+        try:
+            return repair_service.inspect_reviewed(
+                payload.package,
+                payload.adapter_id,
+                offset=payload.offset,
+                limit=payload.limit,
+            )
+        except repair_module.RepairPlanningError as exc:
+            raise HTTPException(status_code=400, detail=repair_error(exc)) from exc
+
+    @router.post("/reviewed-repair/preview")
+    def preview_reviewed_repair(payload: contracts.ReviewedPreviewRequestContract):
+        try:
+            return repair_service.preview_reviewed(
+                payload.package,
+                payload.adapter_id,
+                [decision.model_dump() for decision in payload.decisions],
+            )
+        except repair_module.RepairPlanningError as exc:
+            raise HTTPException(status_code=400, detail=repair_error(exc)) from exc
+
+    @router.post("/reviewed-repair/audio")
+    def generate_reviewed_passage_audio(
+        payload: contracts.ReviewedAudioRequestContract,
+    ):
+        try:
+            return repair_service.reviewed_passage(
+                payload.package,
+                payload.adapter_id,
+                payload.candidate_id,
+            )
+        except repair_module.RepairPlanningError as exc:
+            raise HTTPException(status_code=400, detail=repair_error(exc)) from exc
+
+    @router.get("/reviewed-repair/audio/{audio_token}")
+    def get_reviewed_passage_audio(
+        audio_token: str,
+        range_header: str | None = Header(default=None, alias="Range"),
+    ):
+        try:
+            return _audio_response(
+                repair_service.reviewed_passage_audio(audio_token),
+                range_header,
+            )
+        except repair_module.RepairPlanningError as exc:
+            raise HTTPException(status_code=404, detail=repair_error(exc)) from exc
+
     @router.get("/repair/media/candidate/{plan_id}")
     def get_media_repair_candidate(
         plan_id: str,
@@ -608,6 +669,8 @@ def setup(app, context):
         *,
         rule_code: str | None = None,
         all_safe: bool = False,
+        reviewed_adapter_id: str | None = None,
+        reviewed_decisions: list[dict] | None = None,
         ticket: dict | None = None,
     ):
         if ticket is not None and ticket.get("replay") is not None:
@@ -630,7 +693,18 @@ def setup(app, context):
             verified_options = (
                 verified_deep_audio_options(package) if deep_audio else {}
             )
-            if all_safe:
+            if reviewed_adapter_id is not None:
+                result = repair_service.apply_reviewed(
+                    package,
+                    reviewed_adapter_id,
+                    reviewed_decisions or [],
+                    plan_id,
+                    deep_audio=deep_audio,
+                    request_id=ticket and ticket["request_id"],
+                    request_fingerprint=ticket and ticket["fingerprint"],
+                    **verified_options,
+                )
+            elif all_safe:
                 result = repair_service.apply_all(
                     package,
                     plan_id,
@@ -706,6 +780,34 @@ def setup(app, context):
             payload.package,
             payload.plan_id,
             rule_code=payload.rule_code,
+            ticket=ticket,
+        )
+
+    @router.post(
+        "/reviewed-repair/apply",
+        response_model=contracts.MutationReceiptContract,
+    )
+    def apply_reviewed_repair(
+        payload: contracts.ReviewedApplyRequestContract,
+        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    ):
+        decisions = [decision.model_dump() for decision in payload.decisions]
+        ticket = begin_idempotent_mutation(
+            "reviewed-repair.apply",
+            payload,
+            idempotency_key,
+            {
+                "package": payload.package,
+                "adapter_id": payload.adapter_id,
+                "decisions": decisions,
+                "plan_id": payload.plan_id,
+            },
+        )
+        return apply_repair_transaction(
+            payload.package,
+            payload.plan_id,
+            reviewed_adapter_id=payload.adapter_id,
+            reviewed_decisions=decisions,
             ticket=ticket,
         )
 

@@ -17,6 +17,105 @@ async function expectNoAccessibilityViolations(page) {
   expect(result.violations, JSON.stringify(result.violations, null, 2)).toEqual([]);
 }
 
+const reviewedDefinition = {
+  adapter_id: 'review.hopo-techniques',
+  title: 'Review hammer-ons and pull-offs',
+  description: 'Compare same-string context and choose explicitly.',
+  safety: 'review_required',
+  trigger_rule_codes: ['review.same-fret-hopo'],
+  mutable_fields: ['ho', 'po', 'tp'],
+  context_schema: 'library_doctor.reviewed_hopo_context.v1',
+  candidate_limit: 2000,
+  audio_support: true,
+  test_owner: 'review.hopo-techniques',
+  decisions: [
+    ['set_hammer_on', 'Use hammer-on'],
+    ['set_pull_off', 'Use pull-off'],
+    ['convert_to_tap', 'Convert to tap'],
+    ['remove_hopo', 'Remove HO/PO'],
+    ['leave_unchanged', 'Leave unchanged'],
+  ].map(([name, label]) => ({
+    name, label, description: `${label} description.`, confirmation: `${label}?`,
+  })),
+};
+
+const reviewedCandidate = {
+  candidate_id: `hopo-${'d'.repeat(24)}`,
+  member_path: 'arrangements/lead.json',
+  location: 'arrangements/lead.json.notes[1]',
+  context_kind: 'standalone_note',
+  stream: 'Top-level arrangement',
+  time: 2,
+  string: 0,
+  fret: 5,
+  techniques: { hammer_on: true, pull_off: false, tap: false },
+  reasons: ['same_fret'],
+  trigger_codes: ['review.same-fret-hopo'],
+  predecessor_state: 'usable',
+  next_state: 'usable',
+  previous: { time: 1, fret: 5, writable: true },
+  next: { time: 3, fret: 8, writable: true },
+  previous_gap_seconds: 1,
+  next_gap_seconds: 1,
+  outgoing_match: true,
+  blockers: [],
+  decision_names: ['set_hammer_on', 'set_pull_off', 'convert_to_tap', 'remove_hopo', 'leave_unchanged'],
+};
+
+const reviewedReport = {
+  ...syntheticReport,
+  package: 'synthetic/reviewed-hopo.feedpak',
+  title: 'Reviewed HOPO Song',
+  features: {
+    preview_declared: true,
+    preview_available: true,
+    repair_scan_current: true,
+    repair_eligibility: {},
+  },
+  findings: [{
+    code: 'review.same-fret-hopo',
+    severity: 'info',
+    category: 'authoring_review',
+    message: 'One same-fret HO/PO needs an author decision.',
+    affected_count: 1,
+    rule: {
+      title: 'Same-fret HO/PO needs review',
+      area: 'Playability',
+      confidence: 'medium',
+      repairability: 'review_required',
+      guidance: 'Open Reviewed repair.',
+    },
+  }],
+};
+
+function reviewedInspection() {
+  return {
+    schema: 'library_doctor.reviewed_repair_inspection.v1',
+    adapter_id: reviewedDefinition.adapter_id,
+    package: reviewedReport.package,
+    title: reviewedDefinition.title,
+    available: true,
+    candidate_count: 1,
+    candidates: [reviewedCandidate],
+    decision_definitions: reviewedDefinition.decisions,
+  };
+}
+
+const reviewedPlan = {
+  plan_id: 'e'.repeat(64),
+  available: true,
+  safety: 'review_required',
+  title: reviewedDefinition.title,
+  changing_count: 1,
+  skipped_count: 0,
+  unresolved_count: 0,
+  remaining_review_count: 0,
+  decision_counts: { remove_hopo: 1 },
+  player_result: 'Only the selected HO/PO fields change.',
+  user_value: 'The author chose the intended result.',
+  file_handling: { summary: 'A complete candidate is validated and Undo is retained.' },
+};
+
 
 test('first-run shell exposes the safe action and scoped live status', async ({ page }) => {
   const { root, requests } = await openSyntheticLibraryDoctor(page);
@@ -53,6 +152,93 @@ test('result filtering and repair review/cancel never apply a package', async ({
   await expect(root.getByRole('button', { name: 'Review safe fix' })).toBeVisible();
   await expect(root.getByRole('button', { name: 'Apply safe repair' })).toHaveCount(0);
   expect(requests.some((request) => request.includes('/repair/apply'))).toBe(false);
+});
+
+test('reviewed HOPO journey can be cancelled without any mutation', async ({ page }) => {
+  const { root, requests } = await openSyntheticLibraryDoctor(page, {
+    status: { ...completeStatus, summary: { total: 1, errors: 0, warnings: 0, reviews: 1 } },
+    results: { total: 1, limit: 50, offset: 0, items: [reviewedReport] },
+    pluginRoute: async ({ path, request, route }) => {
+      if (path === '/reviewed-repairs') {
+        await route.fulfill({ json: { items: [reviewedDefinition] } });
+        return true;
+      }
+      if (path === '/reviewed-repair/inspect' && request.method() === 'POST') {
+        await route.fulfill({ json: reviewedInspection() });
+        return true;
+      }
+      return false;
+    },
+  });
+
+  await root.locator('.lh-package > summary').click();
+  await root.getByRole('button', { name: 'Open Reviewed repair' }).click();
+  await expect(root.getByRole('heading', { name: /Candidate 1 of 1/ })).toBeFocused();
+  await expect(root.locator('.lh-reviewed-choice input:checked')).toHaveCount(0);
+  await expect(root.getByRole('button', { name: 'Preview selected changes' })).toBeDisabled();
+  await root.getByRole('radio', { name: /Remove HO\/PO/ }).check();
+  await root.getByRole('button', { name: 'Close', exact: true }).click();
+  await expect(root.getByRole('button', { name: 'Open Reviewed repair' })).toBeFocused();
+  expect(requests.some((item) => item.includes('/reviewed-repair/preview'))).toBe(false);
+  expect(requests.some((item) => item.includes('/reviewed-repair/apply'))).toBe(false);
+});
+
+test('reviewed HOPO journey previews, confirms, applies, and offers Undo', async ({ page }) => {
+  const receipt = {
+    ...reviewedPlan,
+    applied: true,
+    outcome: 'success',
+    backup_id: 'synthetic-reviewed-backup',
+    undo_available: true,
+    change_kind: 'reviewed_decisions',
+    change_count: 1,
+    removed_count: 0,
+    musical_positions: 1,
+    item_name: 'reviewed HO/PO decision',
+    package: reviewedReport.package,
+    report: { title: reviewedReport.title, artist: reviewedReport.artist },
+    file_handling: {
+      summary: 'A complete candidate passed validation and recovery was retained.',
+      backup_retained: true,
+    },
+  };
+  const { root, requests } = await openSyntheticLibraryDoctor(page, {
+    status: { ...completeStatus, summary: { total: 1, errors: 0, warnings: 0, reviews: 1 } },
+    results: { total: 1, limit: 50, offset: 0, items: [reviewedReport] },
+    pluginRoute: async ({ path, request, route }) => {
+      if (path === '/reviewed-repairs') {
+        await route.fulfill({ json: { items: [reviewedDefinition] } });
+        return true;
+      }
+      if (path === '/reviewed-repair/inspect') {
+        await route.fulfill({ json: reviewedInspection() });
+        return true;
+      }
+      if (path === '/reviewed-repair/preview') {
+        await route.fulfill({ json: reviewedPlan });
+        return true;
+      }
+      if (path === '/reviewed-repair/apply') {
+        await route.fulfill({ json: receipt });
+        return true;
+      }
+      return false;
+    },
+  });
+
+  await root.locator('.lh-package > summary').click();
+  await root.getByRole('button', { name: 'Open Reviewed repair' }).click();
+  await root.getByRole('radio', { name: /Remove HO\/PO/ }).check();
+  await root.getByRole('button', { name: 'Preview selected changes' }).click();
+  await expect(root.getByRole('heading', { name: 'Exact reviewed-repair preview' })).toBeFocused();
+  await expect(root.locator('.lh-reviewed-preview')).toContainText('0 remain unresolved');
+  await root.getByRole('button', { name: 'Confirm these reviewed changes' }).click();
+  await expect(root.getByRole('button', { name: 'Apply reviewed changes' })).toBeFocused();
+  await root.getByRole('button', { name: 'Apply reviewed changes' }).click();
+  await expect(root.locator('#lh-repair-result')).toContainText('Change completed');
+  await expect(root.getByRole('button', { name: 'Undo repair' })).toBeVisible();
+  expect(requests.some((item) => item.includes('/reviewed-repair/preview'))).toBe(true);
+  expect(requests.some((item) => item.includes('/reviewed-repair/apply'))).toBe(true);
 });
 
 test('keyboard workspace activation and batch confirmation remain reversible', async ({ page }) => {

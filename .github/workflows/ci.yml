@@ -28,9 +28,9 @@ jobs:
       - run: python -m pip install -r requirements-test.txt
       - run: python -m pip check
       - run: npm ci
-      - run: python -m ruff check validator.py scanner.py library_doctor_scan_worker.py repair.py repair_eligibility.py preview_repair.py batch_repair.py migration.py privacy.py diagnostics.py api_contracts.py mutation_receipts.py routes.py tools tests
+      - run: python -m ruff check validator.py scanner.py library_doctor_scan_worker.py repair.py repair_eligibility.py reviewed_repair.py preview_repair.py batch_repair.py migration.py privacy.py diagnostics.py api_contracts.py mutation_receipts.py routes.py tools tests
       - run: python -m pytest --cov --cov-report=term
-      - run: python -m py_compile validator.py scanner.py library_doctor_scan_worker.py repair.py repair_eligibility.py preview_repair.py batch_repair.py migration.py privacy.py diagnostics.py api_contracts.py mutation_receipts.py routes.py tools/verify_host_contract.py
+      - run: python -m py_compile validator.py scanner.py library_doctor_scan_worker.py repair.py repair_eligibility.py reviewed_repair.py preview_repair.py batch_repair.py migration.py privacy.py diagnostics.py api_contracts.py mutation_receipts.py routes.py tools/verify_host_contract.py
       - run: npm run check:frontend
       - run: npm run lint:frontend
       - run: npm run test:frontend

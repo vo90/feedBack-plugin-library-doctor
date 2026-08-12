@@ -185,18 +185,32 @@ export function createResultsController({
 
   async function loadRepairCatalog() {
     try {
-      const payload = await request('/repairs');
+      const [payload, reviewed] = await Promise.all([
+        request('/repairs'),
+        request('/reviewed-repairs'),
+      ]);
       if (!state.active) return;
       state.repairRules = {};
+      state.reviewedRepairAdapters = {};
+      state.reviewedRuleAdapters = {};
       state.allSafeRepair = payload.combined || null;
       (payload.items || []).forEach((definition) => {
         if (definition && definition.rule_code) {
           state.repairRules[definition.rule_code] = definition;
         }
       });
+      (reviewed.items || []).forEach((definition) => {
+        if (!definition?.adapter_id) return;
+        state.reviewedRepairAdapters[definition.adapter_id] = definition;
+        (definition.trigger_rule_codes || []).forEach((code) => {
+          state.reviewedRuleAdapters[code] = definition.adapter_id;
+        });
+      });
     } catch (error) {
       if (isAbortError(error) || !state.active) return;
       state.repairRules = {};
+      state.reviewedRepairAdapters = {};
+      state.reviewedRuleAdapters = {};
       state.allSafeRepair = null;
       console.warn('[Library Doctor] Could not load safe repair catalog:', error);
     }

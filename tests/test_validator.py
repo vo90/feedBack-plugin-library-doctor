@@ -646,6 +646,38 @@ def test_bend_rounding_tolerance_and_harmonic_pair_are_supported(tmp_path, valid
     assert "chart.bend-point-outside-sustain" not in _codes(report)
 
 
+def test_hopo_review_findings_are_explicitly_review_required(tmp_path, validator):
+    arrangement = {
+        "notes": [
+            {"t": 1.0, "s": 0, "f": 3},
+            {"t": 2.0, "s": 0, "f": 5, "po": True},
+            {"t": 3.0, "s": 0, "f": 5, "ho": True},
+            {"t": 4.0, "s": 0, "f": 7, "ho": True, "po": True},
+            {"t": 5.0, "s": 1, "f": 9, "ho": True},
+        ],
+        "chords": [],
+    }
+
+    report = validator.validate_feedpak(_package(tmp_path, arrangement=arrangement))
+    findings = {finding["code"]: finding for finding in report["findings"]}
+
+    expected = {
+        "chart.conflicting-techniques",
+        "review.hopo-direction-mismatch",
+        "review.same-fret-hopo",
+        "review.hopo-without-source",
+    }
+    assert expected.issubset(findings)
+    assert all(
+        findings[code]["rule"]["repairability"] == "review_required"
+        for code in expected
+    )
+    assert all(
+        "Reviewed repair" in findings[code]["rule"]["guidance"]
+        for code in expected
+    )
+
+
 def test_capo_tuning_and_tempo_highway_limits_are_checked(tmp_path, validator):
     arrangement = {
         "tuning": [0] * 9,

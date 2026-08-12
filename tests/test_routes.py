@@ -493,6 +493,277 @@ def test_core_route_payloads_match_the_phase2_typed_contracts(tmp_path):
     client.close()
 
 
+def test_reviewed_repair_routes_inspect_preview_apply_and_stay_out_of_safe_catalog(
+    tmp_path,
+):
+    def preview_hook(module):
+        module._probe_with_ffmpeg = lambda _source: 30.0
+        module._render_with_ffmpeg = (
+            lambda _source, _start, _duration: b"OggS" + b"x" * 1_024
+        )
+
+    def validator_hook(module):
+        module.probe_ogg_duration = lambda _source: 30.0
+
+    client, library = _client(
+        tmp_path,
+        preview_hook=preview_hook,
+        validator_hook=validator_hook,
+    )
+    package = _valid_package(library)
+    arrangement_path = package / "arrangements" / "lead.json"
+    arrangement_path.write_text(
+        json.dumps({
+            "notes": [
+                {"t": 1.0, "s": 0, "f": 3},
+                {"t": 2.0, "s": 0, "f": 5, "po": True},
+            ],
+            "chords": [],
+        }),
+        encoding="utf-8",
+    )
+
+    reviewed_catalog = client.get(
+        "/api/plugins/library_doctor/reviewed-repairs"
+    )
+    safe_catalog = client.get("/api/plugins/library_doctor/repairs").json()
+    assert reviewed_catalog.status_code == 200
+    assert reviewed_catalog.json()["items"][0]["adapter_id"] == (
+        "review.hopo-techniques"
+    )
+    assert "review.hopo-techniques" not in {
+        item["rule_code"] for item in safe_catalog["items"]
+    }
+
+    inspection = client.post(
+        "/api/plugins/library_doctor/reviewed-repair/inspect",
+        json={
+            "package": "Artist/Song.feedpak",
+            "adapter_id": "review.hopo-techniques",
+        },
+    )
+    assert inspection.status_code == 200
+    candidate = inspection.json()["candidates"][0]
+    decisions = [{
+        "candidate_id": candidate["candidate_id"],
+        "decision": "set_hammer_on",
+    }]
+    passage = client.post(
+        "/api/plugins/library_doctor/reviewed-repair/audio",
+        json={
+            "package": "Artist/Song.feedpak",
+            "adapter_id": "review.hopo-techniques",
+            "candidate_id": candidate["candidate_id"],
+        },
+    )
+    assert passage.status_code == 200, passage.text
+    assert "cannot prove" in passage.json()["notice"]
+    audio = client.get(
+        "/api/plugins/library_doctor/reviewed-repair/audio/"
+        + passage.json()["audio_token"],
+        headers={"Range": "bytes=0-3"},
+    )
+    assert audio.status_code == 206
+    assert audio.content == b"OggS"
+    preview = client.post(
+        "/api/plugins/library_doctor/reviewed-repair/preview",
+        json={
+            "package": "Artist/Song.feedpak",
+            "adapter_id": "review.hopo-techniques",
+            "decisions": decisions,
+        },
+    )
+    assert preview.status_code == 200
+    assert preview.json()["safety"] == "review_required"
+
+    apply_payload = {
+        "package": "Artist/Song.feedpak",
+        "adapter_id": "review.hopo-techniques",
+        "decisions": decisions,
+        "plan_id": preview.json()["plan_id"],
+    }
+    applied = client.post(
+        "/api/plugins/library_doctor/reviewed-repair/apply",
+        headers={"Idempotency-Key": "reviewed-route-0001"},
+        json=apply_payload,
+    )
+    assert applied.status_code == 200
+    repaired = json.loads(arrangement_path.read_text(encoding="utf-8"))
+    assert repaired["notes"][1]["ho"] is True
+    assert "po" not in repaired["notes"][1]
+    assert applied.json()["request_id"] == "reviewed-route-0001"
+    assert applied.json()["undo_available"] is True
+    replay = client.post(
+        "/api/plugins/library_doctor/reviewed-repair/apply",
+        headers={"Idempotency-Key": "reviewed-route-0001"},
+        json=apply_payload,
+    )
+    assert replay.status_code == 200
+    assert replay.json()["idempotent_replay"] is True
+    client.close()
+
+
+def test_reviewed_repair_requests_reject_paths_fields_values_and_unknown_decisions(
+    tmp_path,
+):
+    client, library = _client(tmp_path)
+    package = _valid_package(library)
+    (package / "arrangements" / "lead.json").write_text(
+        json.dumps({
+            "notes": [{"t": 1.0, "s": 0, "f": 5, "ho": True}],
+            "chords": [],
+        }),
+        encoding="utf-8",
+    )
+    base = {
+        "package": "Artist/Song.feedpak",
+        "adapter_id": "review.hopo-techniques",
+        "decisions": [{
+            "candidate_id": "hopo-" + "a" * 24,
+            "decision": "remove_hopo",
+        }],
+    }
+
+    for mutation in (
+        {**base, "member_path": "arrangements/lead.json"},
+        {
+            **base,
+            "decisions": [{
+                **base["decisions"][0],
+                "field": "f",
+                "value": 12,
+            }],
+        },
+    ):
+        response = client.post(
+            "/api/plugins/library_doctor/reviewed-repair/preview",
+            json=mutation,
+        )
+        assert response.status_code == 422
+        assert response.json()["detail"]["code"] == "invalid_request"
+    unknown = client.post(
+        "/api/plugins/library_doctor/reviewed-repair/preview",
+        json={
+            **base,
+            "decisions": [{
+                "candidate_id": "hopo-" + "a" * 24,
+                "decision": "guess_for_me",
+            }],
+        },
+    )
+    assert unknown.status_code == 400
+    assert unknown.json()["detail"]["code"] == "invalid_decisions"
+    client.close()
+
+
+def test_reviewed_inspection_pages_report_exact_totals_and_disjoint_ids(tmp_path):
+    client, library = _client(tmp_path)
+    package = _valid_package(library)
+    (package / "arrangements" / "lead.json").write_text(
+        json.dumps({
+            "notes": [
+                {"t": 1.0, "s": string, "f": 5, "ho": True}
+                for string in range(3)
+            ],
+            "chords": [],
+        }),
+        encoding="utf-8",
+    )
+    endpoint = "/api/plugins/library_doctor/reviewed-repair/inspect"
+    common = {
+        "package": "Artist/Song.feedpak",
+        "adapter_id": "review.hopo-techniques",
+        "limit": 2,
+    }
+
+    first = client.post(endpoint, json={**common, "offset": 0}).json()
+    second = client.post(endpoint, json={**common, "offset": 2}).json()
+
+    assert first["total_candidate_count"] == second["total_candidate_count"] == 3
+    assert first["candidate_count"] == 2
+    assert second["candidate_count"] == 1
+    assert first["has_previous"] is False and first["has_next"] is True
+    assert second["has_previous"] is True and second["has_next"] is False
+    assert {item["candidate_id"] for item in first["candidates"]}.isdisjoint(
+        item["candidate_id"] for item in second["candidates"]
+    )
+    client.close()
+
+
+def test_reviewed_archive_apply_preserves_members_and_supports_undo(tmp_path):
+    client, library = _client(tmp_path)
+    source = _valid_package(
+        tmp_path / "reviewed-archive-source",
+        "Artist/Archived.feedpak",
+    )
+    arrangement = source / "arrangements" / "lead.json"
+    original_document = {
+        "notes": [
+            {"t": 1.0, "s": 0, "f": 3},
+            {"t": 2.0, "s": 0, "f": 5, "po": True},
+        ],
+        "chords": [],
+    }
+    arrangement.write_text(json.dumps(original_document), encoding="utf-8")
+    archive_path = library / "Artist" / "Archived.feedpak"
+    archive_path.parent.mkdir(parents=True)
+    with zipfile.ZipFile(archive_path, "w", zipfile.ZIP_DEFLATED) as archive:
+        for member in source.rglob("*"):
+            if member.is_file():
+                archive.write(member, member.relative_to(source).as_posix())
+
+    inspection = client.post(
+        "/api/plugins/library_doctor/reviewed-repair/inspect",
+        json={
+            "package": "Artist/Archived.feedpak",
+            "adapter_id": "review.hopo-techniques",
+        },
+    ).json()
+    decisions = [{
+        "candidate_id": inspection["candidates"][0]["candidate_id"],
+        "decision": "set_hammer_on",
+    }]
+    preview = client.post(
+        "/api/plugins/library_doctor/reviewed-repair/preview",
+        json={
+            "package": "Artist/Archived.feedpak",
+            "adapter_id": "review.hopo-techniques",
+            "decisions": decisions,
+        },
+    ).json()
+    applied = client.post(
+        "/api/plugins/library_doctor/reviewed-repair/apply",
+        headers={"Idempotency-Key": "reviewed-archive-0001"},
+        json={
+            "package": "Artist/Archived.feedpak",
+            "adapter_id": "review.hopo-techniques",
+            "decisions": decisions,
+            "plan_id": preview["plan_id"],
+        },
+    )
+
+    assert applied.status_code == 200, applied.text
+    with zipfile.ZipFile(archive_path, "r") as archive:
+        repaired = json.loads(archive.read("arrangements/lead.json"))
+        retained_audio = archive.read("stems/full.ogg")
+    assert repaired["notes"][1]["ho"] is True
+    assert "po" not in repaired["notes"][1]
+    assert retained_audio == b"audio"
+
+    restored = client.post(
+        "/api/plugins/library_doctor/repair/restore",
+        json={
+            "package": "Artist/Archived.feedpak",
+            "backup_id": applied.json()["backup_id"],
+        },
+    )
+    assert restored.status_code == 200, restored.text
+    with zipfile.ZipFile(archive_path, "r") as archive:
+        restored_document = json.loads(archive.read("arrangements/lead.json"))
+    assert restored_document == original_document
+    client.close()
+
+
 def test_openapi_exposes_typed_mutations_and_one_error_contract(tmp_path):
     client, _library = _client(tmp_path)
     document = client.app.openapi()
@@ -512,6 +783,9 @@ def test_openapi_exposes_typed_mutations_and_one_error_contract(tmp_path):
         "/api/plugins/library_doctor/repair/restore": "RecoveryMutationRequestContract",
         "/api/plugins/library_doctor/repair/recovery/finalize": (
             "RecoveryMutationRequestContract"
+        ),
+        "/api/plugins/library_doctor/reviewed-repair/apply": (
+            "ReviewedApplyRequestContract"
         ),
     }
     for path, schema_name in expected_requests.items():

@@ -661,6 +661,80 @@
 .lh-song-tool-current-label { display: block; margin-top: .75rem; color: var(--lh-text); font-size: .9rem; }
 .lh-song-tool-card .lh-media-preview-player { margin-top: .7rem; }
 .lh-song-tool-card .lh-repair-buttons { margin-top: .75rem; }
+.lh-reviewed-shell {
+  display: grid;
+  gap: .85rem;
+  margin-top: .75rem;
+  border: 1px solid color-mix(in srgb, var(--lh-review) 65%, var(--lh-border));
+  border-radius: .7rem;
+  padding: 1rem;
+  background: color-mix(in srgb, var(--lh-review) 7%, var(--lh-surface));
+}
+.lh-reviewed-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 1rem; }
+.lh-reviewed-header h4,
+.lh-reviewed-candidate h5,
+.lh-reviewed-preview h5 { margin: 0; color: var(--lh-text); }
+.lh-reviewed-candidate { display: grid; gap: .75rem; }
+.lh-reviewed-reason {
+  margin: 0;
+  border-left: 3px solid var(--lh-review);
+  padding: .45rem .7rem;
+  background: color-mix(in srgb, var(--lh-review) 8%, transparent);
+  line-height: 1.5;
+}
+.lh-reviewed-notes {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: .6rem;
+}
+.lh-reviewed-note {
+  display: grid;
+  gap: .3rem;
+  min-width: 0;
+  border: 1px solid var(--lh-border);
+  border-radius: .55rem;
+  padding: .7rem;
+  background: var(--lh-card);
+}
+.lh-reviewed-note-current {
+  border-color: color-mix(in srgb, var(--lh-accent) 70%, var(--lh-border));
+  box-shadow: inset 0 3px 0 color-mix(in srgb, var(--lh-accent) 70%, transparent);
+}
+.lh-reviewed-fret { color: var(--lh-text); font-size: 1.1rem; font-weight: 800; }
+.lh-reviewed-decisions {
+  display: grid;
+  gap: .45rem;
+  min-width: 0;
+  margin: 0;
+  border: 1px solid var(--lh-border);
+  border-radius: .55rem;
+  padding: .8rem;
+}
+.lh-reviewed-decisions legend { padding: 0 .3rem; color: var(--lh-text); font-weight: 800; }
+.lh-reviewed-choice {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: start;
+  gap: .65rem;
+  border: 1px solid var(--lh-border);
+  border-radius: .45rem;
+  padding: .65rem;
+  background: var(--lh-surface);
+  cursor: pointer;
+}
+.lh-reviewed-choice:has(input:checked) {
+  border-color: var(--lh-accent);
+  background: color-mix(in srgb, var(--lh-accent) 10%, var(--lh-surface));
+}
+.lh-reviewed-choice:has(input:disabled) { cursor: not-allowed; opacity: .68; }
+.lh-reviewed-choice input { margin-top: .2rem; }
+.lh-reviewed-choice span { display: grid; gap: .2rem; }
+.lh-reviewed-choice small { color: var(--lh-dim); font-size: .8rem; line-height: 1.45; }
+.lh-reviewed-footer { display: grid; gap: .55rem; border-top: 1px solid var(--lh-border); padding-top: .75rem; }
+.lh-reviewed-footer > p { margin: 0; }
+.lh-reviewed-audio { display: grid; gap: .35rem; }
+.lh-reviewed-audio p { margin: 0; }
+.lh-reviewed-preview { display: grid; gap: .65rem; }
 .lh-visually-hidden { position: absolute !important; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 
 .lh-shell :is(button, input, select, summary, audio, [tabindex]):focus-visible {
@@ -688,6 +762,8 @@
   .lh-song-tool-selection-header { flex-direction: column; }
   .lh-song-tool-item { grid-template-columns: minmax(0, 1fr); }
   .lh-song-tool-item .lh-song-tool-format { grid-column: 1; grid-row: auto; }
+  .lh-reviewed-header { flex-direction: column; }
+  .lh-reviewed-notes { grid-template-columns: 1fr; }
 }
 
 @media (max-width: 420px) {
@@ -726,6 +802,8 @@
     .lh-song-tool-card) {
     border-color: CanvasText;
   }
+  .lh-reviewed-shell, .lh-reviewed-note, .lh-reviewed-decisions,
+  .lh-reviewed-choice { border-color: CanvasText; }
   .lh-shell :is(button[aria-pressed="true"], button[aria-current="true"],
     button[aria-expanded="true"], .lh-target-option:has(input:checked)) {
     border-color: Highlight;

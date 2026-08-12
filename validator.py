@@ -28,7 +28,11 @@ import yaml
 from jsonschema import Draft202012Validator
 
 try:
-    from repair_eligibility import assess_redundant_handshapes, preview_source_path
+    from repair_eligibility import (
+        assess_redundant_handshapes,
+        find_hopo_review_candidates,
+        preview_source_path,
+    )
 except ModuleNotFoundError:  # Tests and some plugin hosts load files by path.
     _eligibility_name = "_library_doctor_repair_eligibility"
     _eligibility = sys.modules.get(_eligibility_name)
@@ -41,11 +45,12 @@ except ModuleNotFoundError:  # Tests and some plugin hosts load files by path.
         sys.modules[_eligibility_name] = _eligibility
         _eligibility_spec.loader.exec_module(_eligibility)
     assess_redundant_handshapes = _eligibility.assess_redundant_handshapes
+    find_hopo_review_candidates = _eligibility.find_hopo_review_candidates
     preview_source_path = _eligibility.preview_source_path
 
 
 SPEC_REVISION = "52548b742f64c2a35052a141976ea1b7889f4b1a"
-VALIDATOR_VERSION = f"rules-27:feedpak-{SPEC_REVISION}"
+VALIDATOR_VERSION = f"rules-28:feedpak-{SPEC_REVISION}"
 SUPPORTED_MAJOR = 1
 SCHEMA_DIR = Path(__file__).resolve().parent / "schemas"
 MAX_TEXT_BYTES = 64 * 1024 * 1024
@@ -112,6 +117,10 @@ _RULE_TITLES = {
     "chart.string-conflict": "Overlapping notes on one string",
     "chart.coincident-chords": "Chords start at the same time",
     "chart.chord-string-duplicate": "Chord repeats a string",
+    "chart.conflicting-techniques": "Hammer-on and pull-off both enabled",
+    "review.hopo-direction-mismatch": "HO/PO direction needs review",
+    "review.same-fret-hopo": "Same-fret HO/PO needs review",
+    "review.hopo-without-source": "HO/PO has no usable source note",
     "review.same-fret-slide": "Same-fret slide needs review",
     "review.impossible-chord-fingering": "Impossible chord fingering",
     "lyrics.too-few-line-breaks": "Lyrics may be missing line breaks",
@@ -303,6 +312,22 @@ _RULE_EXPERIENCE = {
     "review.near-simultaneous-string-notes": (
         "Notes that are only milliseconds apart may look like a chord but require an unintended rapid stagger when played.",
         "Confirming or aligning them makes the intended chord or picking pattern clearer to the player.",
+    ),
+    "chart.conflicting-techniques": (
+        "The note asks FeedBack to show both a hammer-on and a pull-off, so renderer precedence can hide the authorâ€™s actual intent.",
+        "Choosing one technique, a tap, or neither gives the player one explicit instruction while preserving the note itself.",
+    ),
+    "review.hopo-direction-mismatch": (
+        "The stored hammer-on or pull-off points in the opposite direction from the preceding note on that string.",
+        "An explicit author choice makes the transition agree with the intended fret movement without Library Doctor guessing.",
+    ),
+    "review.same-fret-hopo": (
+        "The preceding note is on the same fret, so a normal incoming hammer-on or pull-off has no pitch change to describe.",
+        "Reviewing it can preserve an intentional gesture, convert a tapped re-articulation, or remove a copied flag.",
+    ),
+    "review.hopo-without-source": (
+        "Library Doctor cannot identify one usable preceding note on the same string for this incoming hammer-on or pull-off.",
+        "Reviewing the surrounding notes lets the author keep or replace the technique without inventing a source note.",
     ),
     "media.preview-missing": (
         "The song has no embedded audio excerpt, so library browsing cannot play a quick preview for this Feedpak.",
@@ -516,6 +541,18 @@ def rule_metadata(code: str, severity: str = "warning", category: str = "validat
             "You can also open the manual preview repair to listen first or choose "
             "another start position."
         )
+    elif code in {
+        "chart.conflicting-techniques",
+        "review.hopo-direction-mismatch",
+        "review.same-fret-hopo",
+        "review.hopo-without-source",
+    }:
+        repairability = "review_required"
+        guidance = (
+            "Open Reviewed repair to compare the previous, current, and next "
+            "same-string note, then make an explicit author decision. Library "
+            "Doctor will not choose a technique automatically."
+        )
     elif code in _SAFE_REPAIR_CANDIDATES:
         repairability = "safe_candidate"
         guidance = "The repeated entries appear identical. Keep one copy in the source and scan it again."
@@ -525,7 +562,7 @@ def rule_metadata(code: str, severity: str = "warning", category: str = "validat
     else:
         repairability = "manual"
         guidance = "Review this part of the song package and correct it in an authoring tool."
-    if category == "feedback_compatibility":
+    if category == "feedback_compatibility" and repairability != "review_required":
         guidance = (
             "The Feedpak value is allowed, but the current FeedBack display or "
             "playback path may not represent it correctly."
@@ -3136,6 +3173,44 @@ def _validate_arrangement_semantics(
         entry=entry,
         check_fretted=check_fretted,
     ).validate()
+    if check_fretted:
+        hopo_candidates = find_hopo_review_candidates(data, member_path=relpath)
+        for code, severity, message in (
+            (
+                "review.hopo-direction-mismatch",
+                "info",
+                "HO/PO marker(s) point in the opposite direction from the preceding same-string note; review the intended technique.",
+            ),
+            (
+                "review.same-fret-hopo",
+                "info",
+                "HO/PO marker(s) follow the same fret on the same string; review whether this is a tap, copied flag, or intentional re-articulation.",
+            ),
+            (
+                "review.hopo-without-source",
+                "info",
+                "HO/PO marker(s) have no single usable preceding same-string note; review the surrounding passage before changing them.",
+            ),
+        ):
+            matches = [
+                candidate
+                for candidate in hopo_candidates
+                if code in candidate.trigger_codes
+            ]
+            if not matches:
+                continue
+            first = matches[0]
+            findings.add(
+                severity,
+                code,
+                f"{len(matches)} {message}",
+                category="authoring_review",
+                location=first.location,
+                arrangement_id=arrangement_id,
+                time=first.time,
+                string=first.string,
+                affected_count=len(matches),
+            )
     if isinstance(data.get("tempos"), list):
         _validate_song_timeline_semantics(
             {"tempos": data["tempos"]},

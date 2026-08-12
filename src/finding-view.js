@@ -132,6 +132,35 @@ export function createFindingView({ actions, document, make, number, state }) {
     return item;
   }
 
+  function reviewedFindingGroupNode(findings, report, adapterId) {
+    const definition = state.reviewedRepairAdapters?.[adapterId] || {};
+    const item = make('li', 'lh-finding lh-finding-group lh-reviewed-finding-group');
+    item.dataset.severity = findings.some((finding) => finding.severity === 'warning')
+      ? 'warning'
+      : 'info';
+    item.dataset.category = 'authoring_review';
+    item.appendChild(make(
+      'strong',
+      'lh-finding-title',
+      definition.title || 'Reviewed tab repair available',
+    ));
+    const affected = findings.reduce(
+      (total, finding) => total + Math.max(1, Number(finding.affected_count || 1)),
+      0,
+    );
+    appendFindingExplanation(
+      item,
+      `${number(affected)} stored HO/PO occurrence${affected === 1 ? '' : 's'} need an author decision. They may include both flags, a lone flag opposite to incoming fret movement, a same-fret transition, or no single usable predecessor.`,
+      'The highway may show the wrong HO/PO symbol, hide one of two competing symbols, or present a technique that does not describe the authored transition.',
+      'Reviewed repair compares stream-local previous/current/next evidence and changes nothing until you explicitly choose what each note should store.',
+      'Open the package-wide Reviewed repair below. There is no default choice, unusual notes can be left unchanged, and every selected mutation receives full package validation, recovery backup, and Undo.',
+    );
+    const controls = actions.reviewedRepairControls(report, adapterId);
+    if (controls) item.appendChild(controls);
+    item.appendChild(relatedFindingDetails(findings));
+    return item;
+  }
+
   function displayFindingNodes(report) {
     const findings = Array.isArray(report.findings) ? [...report.findings] : [];
     if (!report.features?.preview_declared) {
@@ -199,8 +228,15 @@ export function createFindingView({ actions, document, make, number, state }) {
     }
 
     const repairGroups = new Map();
+    const reviewedGroups = new Map();
     findings.forEach((finding) => {
       if (consumed.has(finding)) return;
+      const adapterId = state.reviewedRuleAdapters?.[finding.code];
+      if (adapterId) {
+        if (!reviewedGroups.has(adapterId)) reviewedGroups.set(adapterId, []);
+        reviewedGroups.get(adapterId).push(finding);
+        return;
+      }
       const definition = state.repairRules[finding.code];
       if (!definition || definition.safety !== 'safe_automatic') return;
       if (!repairGroups.has(finding.code)) repairGroups.set(finding.code, []);
@@ -209,6 +245,13 @@ export function createFindingView({ actions, document, make, number, state }) {
 
     findings.forEach((finding) => {
       if (consumed.has(finding)) return;
+      const adapterId = state.reviewedRuleAdapters?.[finding.code];
+      const reviewedGroup = adapterId && reviewedGroups.get(adapterId);
+      if (reviewedGroup) {
+        reviewedGroup.forEach((member) => consumed.add(member));
+        nodes.push(reviewedFindingGroupNode(reviewedGroup, report, adapterId));
+        return;
+      }
       const group = repairGroups.get(finding.code);
       if (group && group.length > 1) {
         group.forEach((member) => consumed.add(member));

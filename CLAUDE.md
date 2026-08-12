@@ -43,7 +43,7 @@ standalone plugin even if it is later bundled with FeedBack.
 python -m pytest
 python -m pip check
 python -m pip_audit -r requirements.txt
-python -m py_compile validator.py scanner.py library_doctor_scan_worker.py repair.py repair_eligibility.py preview_repair.py batch_repair.py migration.py privacy.py diagnostics.py api_contracts.py mutation_receipts.py routes.py tools/verify_host_contract.py
+python -m py_compile validator.py scanner.py library_doctor_scan_worker.py repair.py repair_eligibility.py reviewed_repair.py preview_repair.py batch_repair.py migration.py privacy.py diagnostics.py api_contracts.py mutation_receipts.py routes.py tools/verify_host_contract.py
 npm ci
 npm run audit:dependencies
 npm run check:frontend

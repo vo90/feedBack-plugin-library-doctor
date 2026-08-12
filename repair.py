@@ -55,9 +55,26 @@ _shared_strict_reversed_handshape_context = (
     _eligibility.strict_reversed_handshape_context
 )
 
+try:
+    import reviewed_repair as _reviewed
+except ModuleNotFoundError:  # Tests and some plugin hosts load files by path.
+    _reviewed_name = "_library_doctor_reviewed_repair"
+    _reviewed = sys.modules.get(_reviewed_name)
+    if _reviewed is None:
+        _reviewed_spec = importlib.util.spec_from_file_location(
+            _reviewed_name,
+            Path(__file__).resolve().with_name("reviewed_repair.py"),
+        )
+        _reviewed = importlib.util.module_from_spec(_reviewed_spec)
+        sys.modules[_reviewed_name] = _reviewed
+        _reviewed_spec.loader.exec_module(_reviewed)
 
-REPAIR_CATALOG_VERSION = "repairs-17"
+
+REPAIR_CATALOG_VERSION = "repairs-18"
 REPAIR_PLAN_SCHEMA = "library_doctor.repair_plan.v1"
+REVIEWED_PACKAGE_PLAN_SCHEMA = "library_doctor.reviewed_repair_plan.v1"
+REVIEWED_INSPECTION_SCHEMA = "library_doctor.reviewed_repair_inspection.v1"
+REVIEWED_REPAIR_REGISTRY_VERSION = _reviewed.REVIEWED_REPAIR_REGISTRY_VERSION
 MAX_REPAIR_TEXT_BYTES = 64 * 1024 * 1024
 MAX_REPAIR_MEMBER_BYTES = 128 * 1024 * 1024
 MAX_REPAIR_STRUCTURE_ITEMS = 2_000_000
@@ -72,6 +89,7 @@ HISTORY_SCHEMA = "library_doctor.repair_history.v1"
 TRANSACTION_SCHEMA = "library_doctor.repair_transaction.v1"
 MAX_REPAIR_HISTORY = 50
 MAX_PENDING_TRANSACTIONS = 100
+MAX_REVIEWED_DECISIONS = 2_000
 _BACKUP_ID_RE = re.compile(r"^[0-9]{8}-[0-9]{6}-[0-9a-f]{12}$")
 _REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$")
 _REQUEST_FINGERPRINT_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -875,6 +893,11 @@ def repair_catalog() -> list[dict]:
     return [definition.to_dict() for definition in _ALL_REPAIR_DEFINITIONS]
 
 
+def reviewed_repair_catalog() -> list[dict]:
+    """Return author-decided adapters, kept outside every safe allowlist."""
+    return _reviewed.reviewed_repair_catalog()
+
+
 def all_safe_repair_definition() -> dict:
     """Return user-facing metadata for the combined per-package repair."""
     return dict(_ALL_SAFE_DEFINITION)
@@ -919,15 +942,72 @@ def apply_json_member(raw: bytes, plan: dict) -> bytes:
 
 
 def _apply_plan_actions_to_document(document, plan: dict) -> None:
-    """Apply already-validated safe actions to an in-memory JSON document."""
+    """Apply already-validated closed actions to an in-memory JSON document."""
     removed: set[tuple[tuple[str | int, ...], int]] = set()
     reordered: set[tuple[str | int, ...]] = set()
     normalized: set[tuple[tuple[str | int, ...], int]] = set()
+    reviewed_paths: set[tuple[str | int, ...]] = set()
+    repair_mode = plan.get("repair_mode", "automatic")
+    expected_safety = (
+        "review_required" if repair_mode == "reviewed" else "safe_automatic"
+    )
+    reviewed_candidates = None
+    if repair_mode == "reviewed":
+        try:
+            reviewed_definition = _reviewed.reviewed_repair_definition(
+                plan.get("adapter_id")
+            )
+        except (TypeError, ValueError):
+            raise RepairPlanningError("invalid_plan", "The repair preview is invalid.")
+        operation_ids = {
+            operation.get("candidate_id")
+            for action in plan.get("actions", [])
+            if isinstance(action, dict)
+            for operation in action.get("operations", [])
+            if isinstance(operation, dict)
+        }
+        source = plan.get("source") if isinstance(plan.get("source"), dict) else {}
+        selection = reviewed_definition.select_document(
+            document,
+            member_path=str(source.get("member_path") or ""),
+            candidate_ids=operation_ids,
+        )
+        reviewed_candidates = {
+            candidate.candidate_id: candidate
+            for candidate in selection.candidates
+        }
     for action in plan.get("actions", []):
-        if not isinstance(action, dict) or action.get("safety") != "safe_automatic":
+        if not isinstance(action, dict) or action.get("safety") != expected_safety:
             raise RepairPlanningError("invalid_plan", "The repair preview is invalid.")
         for operation in action.get("operations", []):
-            _apply_operation(document, operation, removed, reordered, normalized)
+            if repair_mode == "reviewed":
+                candidate = reviewed_candidates.get(
+                    operation.get("candidate_id")
+                    if isinstance(operation, dict) else None
+                )
+                if candidate is None:
+                    raise RepairPlanningError(
+                        "source_changed",
+                        "A reviewed note changed after this preview. Inspect it again before applying decisions.",
+                    )
+                expected = _reviewed_operation(
+                    document,
+                    reviewed_definition,
+                    candidate,
+                    operation.get("decision"),
+                )
+                if expected != operation:
+                    raise RepairPlanningError(
+                        "invalid_plan", "The reviewed repair preview is invalid."
+                    )
+            _apply_operation(
+                document,
+                operation,
+                removed,
+                reordered,
+                normalized,
+                reviewed_paths,
+            )
 
 
 class RepairService:
@@ -1021,6 +1101,94 @@ class RepairService:
                 rule_codes=rule_codes,
             )
             return self._public_plan(internal)
+
+    def inspect_reviewed(
+        self,
+        package: str,
+        adapter_id: str,
+        *,
+        offset: int = 0,
+        limit: int | None = None,
+    ) -> dict:
+        """Return current source-bound candidates without creating a write plan."""
+        with self._lock:
+            _root, package_path, package_name = self._resolve_package(package)
+            internal = self._inspect_reviewed_package(
+                package_path,
+                package_name,
+                adapter_id,
+                offset=offset,
+                limit=limit,
+            )
+            return self._public_plan(internal)
+
+    def preview_reviewed(
+        self,
+        package: str,
+        adapter_id: str,
+        decisions: list[dict],
+    ) -> dict:
+        """Preview explicit author decisions against current candidate IDs."""
+        with self._lock:
+            _root, package_path, package_name = self._resolve_package(package)
+            internal = self._plan_reviewed_package(
+                package_path,
+                package_name,
+                adapter_id,
+                decisions,
+            )
+            return self._public_plan(internal)
+
+    def apply_reviewed(
+        self,
+        package: str,
+        adapter_id: str,
+        decisions: list[dict],
+        plan_id: str,
+        *,
+        deep_audio: bool = False,
+        verified_before_report: dict | None = None,
+        source_guard=None,
+        request_id: str | None = None,
+        request_fingerprint: str | None = None,
+    ) -> dict:
+        """Replan, validate, back up, and commit reviewed author decisions."""
+        if not isinstance(plan_id, str) or len(plan_id) != 64:
+            raise RepairPlanningError(
+                "invalid_plan",
+                "Review these decisions again before applying them.",
+            )
+        transaction_started = time.monotonic()
+        with self._lock:
+            _root, package_path, package_name = self._resolve_package(package)
+            internal = self._plan_reviewed_package(
+                package_path,
+                package_name,
+                adapter_id,
+                decisions,
+            )
+            if internal["plan_id"] != plan_id:
+                raise RepairPlanningError(
+                    "source_changed",
+                    "The song or reviewed decisions changed after preview. Review them again before applying.",
+                )
+            if not internal["available"]:
+                raise RepairPlanningError(
+                    "nothing_to_repair",
+                    "No selected reviewed decision changes this package.",
+                )
+            return self._apply_internal(
+                package_path,
+                package_name,
+                internal,
+                deep_audio=deep_audio,
+                verified_before_report=verified_before_report,
+                source_guard=source_guard,
+                transaction_started=transaction_started,
+                request_id=request_id,
+                request_operation="reviewed-repair.apply",
+                request_fingerprint=request_fingerprint,
+            )
 
     def apply(
         self,
@@ -1116,6 +1284,70 @@ class RepairService:
                     "This Feedpak's current preview is not playable Ogg audio.",
                 )
             return content
+
+    def reviewed_passage(
+        self,
+        package: str,
+        adapter_id: str,
+        candidate_id: str,
+    ) -> dict:
+        """Generate optional bounded audio for one current reviewed candidate."""
+        if self._preview_repair is None or not hasattr(
+            self._preview_repair, "passage"
+        ):
+            raise RepairPlanningError(
+                "review_audio_unavailable",
+                "Optional passage listening is unavailable. Visual review is still available.",
+            )
+        with self._lock:
+            _root, package_path, package_name = self._resolve_package(package)
+            try:
+                definition = _reviewed.reviewed_repair_definition(adapter_id)
+            except ValueError as exc:
+                raise RepairPlanningError(
+                    "unsupported_reviewed_repair",
+                    "This Reviewed repair adapter is not supported.",
+                ) from exc
+            if not definition.audio_support:
+                raise RepairPlanningError(
+                    "review_audio_unavailable",
+                    "This Reviewed repair does not provide passage listening.",
+                )
+            manifest = self._read_repair_manifest(package_path)
+            matches = []
+            for member_path, _raw, document in self._reviewed_member_documents(
+                package_path, manifest
+            ):
+                selection = definition.select_document(
+                    document,
+                    member_path=member_path,
+                    candidate_ids={candidate_id},
+                )
+                matches.extend(selection.candidates)
+            if len(matches) != 1:
+                raise RepairPlanningError(
+                    "candidate_changed",
+                    "This reviewed note changed or is no longer available. Inspect the package again.",
+                )
+            candidate = matches[0]
+            return self._preview_repair.passage(
+                package_name,
+                candidate.candidate_id,
+                candidate.time,
+                lambda member_path, limit: self._read_member(
+                    package_path, member_path, limit
+                ),
+            )
+
+    def reviewed_passage_audio(self, audio_token: str) -> bytes:
+        if self._preview_repair is None or not hasattr(
+            self._preview_repair, "passage_audio"
+        ):
+            raise RepairPlanningError(
+                "review_audio_unavailable",
+                "Optional passage listening is unavailable.",
+            )
+        return self._preview_repair.passage_audio(audio_token)
 
     def preview_tool_status(self, package: str) -> dict:
         """Return scan-independent Preview Creator eligibility for one package."""
@@ -1393,7 +1625,18 @@ class RepairService:
             rule_codes = internal.get("rule_codes")
             if not isinstance(rule_codes, list) or not rule_codes:
                 rule_codes = [internal["rule_code"]]
-            self._verify_validation(before, after, rule_codes)
+            verification = internal.get("_verification")
+            if (
+                isinstance(verification, dict)
+                and verification.get("mode") == "reviewed"
+            ):
+                self._verify_reviewed_validation(
+                    before,
+                    after,
+                    set(internal.get("rule_codes") or ()),
+                )
+            else:
+                self._verify_validation(before, after, rule_codes)
             self._emit_transaction_barrier(
                 "candidate_validated", package=package_name, operation="repair"
             )
@@ -1554,6 +1797,22 @@ class RepairService:
             "rule_code": internal["rule_code"],
             "rule_codes": internal.get("rule_codes", [internal["rule_code"]]),
             "repair_summaries": internal.get("repair_summaries", []),
+            **(
+                {
+                    key: internal.get(key)
+                    for key in (
+                        "selected_count",
+                        "changing_count",
+                        "skipped_count",
+                        "blocked_count",
+                        "unresolved_count",
+                        "remaining_review_count",
+                        "decision_counts",
+                    )
+                }
+                if internal.get("change_kind") == "reviewed_decisions"
+                else {}
+            ),
             "backup_id": backup_id,
             "change_kind": internal.get("change_kind", "remove_duplicates"),
             "change_count": internal.get("change_count", internal["removed_count"]),
@@ -2636,6 +2895,315 @@ class RepairService:
             "_members": planned,
         }
 
+    def _reviewed_member_documents(
+        self,
+        package_path: Path,
+        manifest: dict,
+    ) -> list[tuple[str, bytes, dict]]:
+        documents = []
+        for member_path in self._resolved_repair_member_paths(
+            package_path,
+            manifest,
+            "arrangement",
+        ):
+            raw = self._read_member(
+                package_path, member_path, MAX_REPAIR_TEXT_BYTES
+            )
+            safe_member_path = _validate_member_path(member_path)
+            if safe_member_path.lower().endswith(".jsonc"):
+                raise RepairPlanningError(
+                    "jsonc_requires_lossless_writer",
+                    "Commented JSON can be inspected by the scanner but cannot be changed until comments can be preserved.",
+                )
+            if not safe_member_path.lower().endswith(".json"):
+                raise RepairPlanningError(
+                    "unsupported_text_format",
+                    "Reviewed song-data repairs currently require ordinary JSON arrangement files.",
+                )
+            document = _parse_json(raw)
+            _inspect_structure(document)
+            if not isinstance(document, dict):
+                raise RepairPlanningError(
+                    "invalid_document_shape",
+                    "An arrangement does not have the expected JSON structure for Reviewed repair.",
+                )
+            documents.append((safe_member_path, raw, document))
+        return sorted(documents, key=lambda item: item[0])
+
+    def _inspect_reviewed_package(
+        self,
+        package_path: Path,
+        package_name: str,
+        adapter_id: str,
+        *,
+        offset: int,
+        limit: int | None,
+    ) -> dict:
+        try:
+            definition = _reviewed.reviewed_repair_definition(adapter_id)
+        except ValueError as exc:
+            raise RepairPlanningError(
+                "unsupported_reviewed_repair",
+                "This Reviewed repair adapter is not supported.",
+            ) from exc
+        if not _integer(offset) or offset < 0:
+            raise RepairPlanningError(
+                "invalid_review_page", "The reviewed-repair page offset is invalid."
+            )
+        page_limit = definition.candidate_limit if limit is None else limit
+        if (
+            not _integer(page_limit)
+            or page_limit < 1
+            or page_limit > definition.candidate_limit
+        ):
+            raise RepairPlanningError(
+                "invalid_review_page", "The reviewed-repair page size is invalid."
+            )
+        manifest = self._read_repair_manifest(package_path)
+        candidates = []
+        member_sources = []
+        total_candidate_count = 0
+        blocked_count = 0
+        remaining_offset = offset
+        remaining_limit = page_limit
+        for member_path, raw, document in self._reviewed_member_documents(
+            package_path, manifest
+        ):
+            member_page = definition.inspect_page_document(
+                document,
+                member_path=member_path,
+                offset=remaining_offset,
+                limit=max(remaining_limit, 1),
+            )
+            if remaining_limit:
+                page_items = member_page.candidates[:remaining_limit]
+                candidates.extend(candidate.to_dict() for candidate in page_items)
+                remaining_limit -= len(page_items)
+            remaining_offset = max(0, remaining_offset - member_page.total_count)
+            total_candidate_count += member_page.total_count
+            blocked_count += member_page.blocked_count
+            member_sources.append({
+                "member_path": member_path,
+                "sha256": hashlib.sha256(raw).hexdigest(),
+                "byte_count": len(raw),
+                "candidate_count": member_page.total_count,
+            })
+        page_count = len(candidates)
+        omitted_candidate_count = max(0, total_candidate_count - page_count)
+        has_previous = offset > 0
+        has_next = offset + page_count < total_candidate_count
+        unsigned = {
+            "schema": REVIEWED_INSPECTION_SCHEMA,
+            "catalog_version": REPAIR_CATALOG_VERSION,
+            "reviewed_registry_version": _reviewed.REVIEWED_REPAIR_REGISTRY_VERSION,
+            "validator_version": self._validator_version,
+            "package": package_name,
+            "adapter_id": adapter_id,
+            "offset": offset,
+            "limit": page_limit,
+            "member_sources": member_sources,
+            "candidates": candidates,
+        }
+        return {
+            **unsigned,
+            "inspection_id": _digest_json(unsigned),
+            "title": definition.title,
+            "description": definition.description,
+            "safety": "review_required",
+            "candidate_count": len(candidates),
+            "total_candidate_count": total_candidate_count,
+            "omitted_candidate_count": omitted_candidate_count,
+            "offset": offset,
+            "limit": page_limit,
+            "has_previous": has_previous,
+            "has_next": has_next,
+            "previous_offset": max(0, offset - page_limit) if has_previous else None,
+            "next_offset": offset + page_count if has_next else None,
+            "inspection_blocker": (
+                f"Showing candidates {offset + 1}-{offset + page_count} of {total_candidate_count} in one bounded page. Use the page controls to review the rest."
+                if has_previous or has_next else ""
+            ),
+            "blocked_count": blocked_count,
+            "page_blocked_count": sum(
+                bool(item["blockers"]) for item in candidates
+            ),
+            "decision_definitions": [
+                decision.to_dict() for decision in definition.decisions
+            ],
+            "available": bool(candidates),
+        }
+
+    def _plan_reviewed_package(
+        self,
+        package_path: Path,
+        package_name: str,
+        adapter_id: str,
+        decisions: list[dict],
+    ) -> dict:
+        try:
+            definition = _reviewed.reviewed_repair_definition(adapter_id)
+        except ValueError as exc:
+            raise RepairPlanningError(
+                "unsupported_reviewed_repair",
+                "This Reviewed repair adapter is not supported.",
+            ) from exc
+        requested = _reviewed_decision_items(decisions, definition)
+        requested_by_id = dict(requested)
+        manifest = self._read_repair_manifest(package_path)
+        planned = []
+        seen_candidates = set()
+        decision_summaries = []
+        total_candidate_count = 0
+        blocked_candidate_count = 0
+        remaining_review_count = 0
+        for member_path, raw, document in self._reviewed_member_documents(
+            package_path, manifest
+        ):
+            member_selection = definition.select_document(
+                document,
+                member_path=member_path,
+                candidate_ids=frozenset(requested_by_id),
+            )
+            member_candidates = member_selection.candidates
+            member_ids = {
+                candidate.candidate_id for candidate in member_candidates
+            }
+            total_candidate_count += member_selection.total_count
+            blocked_candidate_count += member_selection.blocked_count
+            member_decisions = [
+                {"candidate_id": candidate_id, "decision": decision}
+                for candidate_id, decision in requested
+                if candidate_id in member_ids
+            ]
+            seen_candidates.update(member_ids.intersection(requested_by_id))
+            if not member_decisions:
+                remaining_review_count += member_selection.total_count
+                continue
+            plan = plan_reviewed_json_member(
+                raw,
+                member_path=member_path,
+                adapter_id=adapter_id,
+                validator_version=self._validator_version,
+                decisions=member_decisions,
+            )
+            changed = bool(plan["actions"])
+            decision_summaries.extend(member_decisions)
+            if changed:
+                replacement = apply_json_member(raw, plan)
+                repaired_document = _parse_json(replacement)
+                _inspect_structure(repaired_document)
+                remaining_review_count += definition.inspect_page_document(
+                    repaired_document,
+                    member_path=member_path,
+                    offset=0,
+                    limit=1,
+                ).total_count
+                planned.append({
+                    "member_path": member_path,
+                    "raw": raw,
+                    "plan": plan,
+                    "source_kind": "arrangement",
+                })
+            else:
+                remaining_review_count += member_selection.total_count
+        missing = [
+            candidate_id
+            for candidate_id, _decision in requested
+            if candidate_id not in seen_candidates
+        ]
+        if missing:
+            raise RepairPlanningError(
+                "candidate_changed",
+                "A reviewed note changed or is no longer questionable. Inspect the package again.",
+            )
+        change_count = sum(
+            action["change_count"]
+            for item in planned
+            for action in item["plan"]["actions"]
+        )
+        decision_counts = {
+            decision.name: sum(
+                selected == decision.name
+                for _candidate_id, selected in requested
+            )
+            for decision in definition.decisions
+        }
+        unsigned = {
+            "schema": REVIEWED_PACKAGE_PLAN_SCHEMA,
+            "catalog_version": REPAIR_CATALOG_VERSION,
+            "reviewed_registry_version": _reviewed.REVIEWED_REPAIR_REGISTRY_VERSION,
+            "validator_version": self._validator_version,
+            "package": package_name,
+            "rule_code": adapter_id,
+            "rule_codes": list(definition.trigger_rule_codes),
+            "adapter_id": adapter_id,
+            "decisions": decision_summaries,
+            "member_plans": [
+                {
+                    "member_path": item["member_path"],
+                    "plan_id": item["plan"]["plan_id"],
+                }
+                for item in planned
+            ],
+            "blockers": [],
+        }
+        return {
+            **unsigned,
+            "plan_id": _digest_json(unsigned),
+            "available": bool(planned),
+            "title": definition.title,
+            "description": definition.description,
+            "safety": "review_required",
+            "player_result": (
+                "Only the HO/PO/tap fields selected in Reviewed repair are changed; note timing, fret, string, and every other technique are preserved."
+            ),
+            "user_value": (
+                "Ambiguous tab can be corrected inside Library Doctor with an explicit author choice, complete validation, recovery backup, and Undo."
+            ),
+            "file_handling": self._file_handling(None),
+            "item_name": "reviewed HO/PO decision",
+            "change_kind": "reviewed_decisions",
+            "change_count": change_count,
+            "candidate_count": total_candidate_count,
+            "selected_count": len(requested),
+            "changing_count": sum(
+                decision != "leave_unchanged"
+                for _candidate_id, decision in requested
+            ),
+            "skipped_count": sum(
+                decision == "leave_unchanged"
+                for _candidate_id, decision in requested
+            ),
+            "blocked_count": blocked_candidate_count,
+            "unresolved_count": max(0, total_candidate_count - len(requested)),
+            "remaining_review_count": remaining_review_count,
+            "decision_counts": decision_counts,
+            "member_count": len(planned),
+            "arrays_affected": sum(
+                action["arrays_affected"]
+                for item in planned
+                for action in item["plan"]["actions"]
+            ),
+            "musical_positions": change_count,
+            "removed_count": 0,
+            "repair_summaries": [{
+                "rule_code": adapter_id,
+                "title": definition.title,
+                "item_name": "reviewed HO/PO decision",
+                "change_kind": "reviewed_decisions",
+                "change_count": change_count,
+                "removed_count": 0,
+                "arrays_affected": len(planned),
+                "musical_positions": change_count,
+                "member_count": len(planned),
+            }],
+            "_verification": {
+                "mode": "reviewed",
+                "adapter_id": adapter_id,
+            },
+            "_members": planned,
+        }
+
     @staticmethod
     def _ordered_safe_rule_codes(
         rule_codes: Iterable[str] | None,
@@ -3340,6 +3908,26 @@ class RepairService:
                 "The repaired candidate introduced a new validation finding and was not saved.",
             )
 
+    @staticmethod
+    def _verify_reviewed_validation(
+        before: dict,
+        after: dict,
+        reviewed_codes: set[str],
+    ) -> None:
+        """Allow explicit review outcomes but no increase in unrelated findings."""
+        before_counts = _report_code_counts(before)
+        after_counts = _report_code_counts(after)
+        introduced = sorted(
+            code
+            for code, count in after_counts.items()
+            if code not in reviewed_codes and count > before_counts.get(code, 0)
+        )
+        if introduced:
+            raise RepairPlanningError(
+                "verification_failed",
+                "The reviewed candidate introduced a new validation finding and was not saved.",
+            )
+
     def _create_backup(
         self,
         package_name: str,
@@ -3380,6 +3968,9 @@ class RepairService:
                     "removed_count", "musical_positions",
                     "arrays_affected", "member_count", "rule_count",
                     "repair_summaries", "player_result", "user_value",
+                    "selected_count", "changing_count", "skipped_count",
+                    "blocked_count", "unresolved_count",
+                    "remaining_review_count", "decision_counts",
                     "media", "artist",
                 )
             },
@@ -3833,6 +4424,22 @@ class RepairService:
             "rule_code": metadata.get("rule_code"),
             "rule_codes": metadata.get("rule_codes", []),
             "repair_summaries": summary.get("repair_summaries", []),
+            **(
+                {
+                    key: summary.get(key)
+                    for key in (
+                        "selected_count",
+                        "changing_count",
+                        "skipped_count",
+                        "blocked_count",
+                        "unresolved_count",
+                        "remaining_review_count",
+                        "decision_counts",
+                    )
+                }
+                if summary.get("change_kind") == "reviewed_decisions"
+                else {}
+            ),
             "backup_id": backup_id,
             "change_kind": summary.get("change_kind", "repair"),
             "change_count": int(summary.get("change_count", 0) or 0),
@@ -4272,6 +4879,242 @@ def plan_json_member(
         validator_version=validator_version,
         definition=definition,
     )
+
+
+def _reviewed_decision_items(decisions, definition) -> list[tuple[str, str]]:
+    if (
+        not isinstance(decisions, list)
+        or not decisions
+        or len(decisions) > MAX_REVIEWED_DECISIONS
+    ):
+        raise RepairPlanningError(
+            "invalid_decisions",
+            "Choose at least one reviewed repair decision from the current inspection.",
+        )
+    result = []
+    seen = set()
+    candidate_prefix = f"{definition.candidate_id_prefix}-"
+    decision_names = {item.name for item in definition.decisions}
+    for item in decisions:
+        if not isinstance(item, dict) or set(item) != {"candidate_id", "decision"}:
+            raise RepairPlanningError(
+                "invalid_decisions", "A reviewed repair decision is invalid."
+            )
+        candidate_id = item.get("candidate_id")
+        decision = item.get("decision")
+        if (
+            not isinstance(candidate_id, str)
+            or not candidate_id.startswith(candidate_prefix)
+            or len(candidate_id) != len(candidate_prefix) + 24
+            or not isinstance(decision, str)
+            or decision not in decision_names
+            or candidate_id in seen
+        ):
+            raise RepairPlanningError(
+                "invalid_decisions", "A reviewed repair decision is invalid."
+            )
+        seen.add(candidate_id)
+        result.append((candidate_id, decision))
+    return result
+
+
+def _reviewed_change(
+    document: dict,
+    path: tuple[str | int, ...],
+    *,
+    set_fields: dict,
+    remove_fields: tuple[str, ...],
+    allowed_fields: frozenset[str],
+) -> dict:
+    note = _value_at_path(document, path)
+    if not isinstance(note, dict):
+        raise RepairPlanningError(
+            "source_changed",
+            "A reviewed note changed after inspection. Inspect it again before applying decisions.",
+        )
+    if (
+        not set(set_fields).issubset(allowed_fields)
+        or not set(remove_fields).issubset(allowed_fields)
+        or set(set_fields).intersection(remove_fields)
+        or any(value is not True for value in set_fields.values())
+    ):
+        raise RepairPlanningError(
+            "invalid_plan", "The reviewed repair preview is invalid."
+        )
+    updated = copy.deepcopy(note)
+    for field in remove_fields:
+        updated.pop(field, None)
+    updated.update(set_fields)
+    return {
+        "target_path": list(path),
+        "expected_before_sha256": hashlib.sha256(
+            _canonical_json(note)
+        ).hexdigest(),
+        "expected_after_sha256": hashlib.sha256(
+            _canonical_json(updated)
+        ).hexdigest(),
+        "set_fields": dict(set_fields),
+        "remove_fields": list(remove_fields),
+    }
+
+
+def _reviewed_operation(document: dict, definition, candidate, decision: str) -> dict:
+    if decision not in candidate.decision_names or decision == "leave_unchanged":
+        raise RepairPlanningError(
+            "invalid_decision",
+            "Choose one of the decisions currently offered for this reviewed note.",
+        )
+    if candidate.blockers:
+        raise RepairPlanningError(
+            "candidate_blocked",
+            "This note has conflicting or malformed source data and cannot be changed from Reviewed repair.",
+        )
+
+    try:
+        mutations = definition.build_mutations(candidate, decision)
+    except ValueError as exc:
+        raise RepairPlanningError(
+            "invalid_decision",
+            "Choose one of the decisions currently offered for this reviewed note.",
+        ) from exc
+    allowed_fields = frozenset(definition.mutable_fields)
+    changes = []
+    for mutation in mutations:
+        if mutation.target_role == "current":
+            target_path = candidate.target_path
+        elif mutation.target_role == "next" and candidate.next is not None:
+            target_path = candidate.next.path
+        else:
+            target_path = None
+        if target_path is None:
+            raise RepairPlanningError(
+                "invalid_decision",
+                "A reviewed repair target is no longer explicit and writable.",
+            )
+        changes.append(_reviewed_change(
+            document,
+            target_path,
+            set_fields=mutation.set_dict(),
+            remove_fields=mutation.remove_fields,
+            allowed_fields=allowed_fields,
+        ))
+    return {
+        "operation": definition.operation_name,
+        "candidate_id": candidate.candidate_id,
+        "decision": decision,
+        "mutable_fields": sorted(definition.mutable_fields),
+        "changes": changes,
+    }
+
+
+def plan_reviewed_json_member(
+    raw: bytes,
+    *,
+    member_path: str,
+    adapter_id: str,
+    validator_version: str,
+    decisions: list[dict],
+) -> dict:
+    """Build a source-bound closed plan from explicit candidate decisions."""
+    safe_member_path = _validate_member_path(member_path)
+    try:
+        definition = _reviewed.reviewed_repair_definition(adapter_id)
+    except ValueError as exc:
+        raise RepairPlanningError(
+            "unsupported_reviewed_repair",
+            "This Reviewed repair adapter is not supported by this version of Library Doctor.",
+        ) from exc
+    if safe_member_path.lower().endswith(".jsonc"):
+        raise RepairPlanningError(
+            "jsonc_requires_lossless_writer",
+            "Commented JSON cannot be repaired until comments can be preserved.",
+        )
+    if not safe_member_path.lower().endswith(".json"):
+        raise RepairPlanningError(
+            "unsupported_text_format",
+            "Reviewed song-data repairs currently require an ordinary JSON file.",
+        )
+    if not isinstance(raw, bytes) or len(raw) > MAX_REPAIR_TEXT_BYTES:
+        raise RepairPlanningError(
+            "source_too_large", "This song file is too large to review safely."
+        )
+    if not isinstance(validator_version, str) or not validator_version.strip():
+        raise ValueError("validator_version must be a non-empty string")
+    requested = _reviewed_decision_items(decisions, definition)
+    document = _parse_json(raw)
+    _inspect_structure(document)
+    if not isinstance(document, dict):
+        raise RepairPlanningError(
+            "invalid_document_shape",
+            "The arrangement does not have the expected JSON structure for Reviewed repair.",
+        )
+    selection = definition.select_document(
+        document,
+        member_path=safe_member_path,
+        candidate_ids={candidate_id for candidate_id, _decision in requested},
+    )
+    candidates = {
+        candidate.candidate_id: candidate
+        for candidate in selection.candidates
+    }
+    operations = []
+    accepted = []
+    for candidate_id, decision in requested:
+        candidate = candidates.get(candidate_id)
+        if candidate is None:
+            raise RepairPlanningError(
+                "candidate_changed",
+                "A reviewed note changed or is no longer questionable. Inspect the package again.",
+            )
+        if decision not in candidate.decision_names:
+            raise RepairPlanningError(
+                "invalid_decision",
+                "Choose one of the decisions currently offered for this reviewed note.",
+            )
+        accepted.append({"candidate_id": candidate_id, "decision": decision})
+        if decision != "leave_unchanged":
+            operations.append(_reviewed_operation(
+                document, definition, candidate, decision
+            ))
+
+    source_sha256 = hashlib.sha256(raw).hexdigest()
+    actions = []
+    if operations:
+        action = {
+            "adapter_id": adapter_id,
+            "action_kind": definition.operation_name,
+            "change_kind": "reviewed_decisions",
+            "safety": "review_required",
+            "title": definition.title,
+            "summary": f"Apply {len(operations)} explicit HO/PO decision(s).",
+            "change_count": len(operations),
+            "removed_count": 0,
+            "arrays_affected": len({candidate.stream_path for candidate in candidates.values() if candidate.candidate_id in {item['candidate_id'] for item in accepted}}),
+            "musical_positions": len(operations),
+            "operations": operations,
+        }
+        action["action_id"] = _digest_json({
+            "source_sha256": source_sha256,
+            **action,
+        })
+        actions.append(action)
+    unsigned = {
+        "schema": REPAIR_PLAN_SCHEMA,
+        "repair_mode": "reviewed",
+        "adapter_id": adapter_id,
+        "catalog_version": REPAIR_CATALOG_VERSION,
+        "reviewed_registry_version": _reviewed.REVIEWED_REPAIR_REGISTRY_VERSION,
+        "validator_version": validator_version,
+        "source": {
+            "member_path": safe_member_path,
+            "source_kind": "arrangement",
+            "sha256": source_sha256,
+            "byte_count": len(raw),
+        },
+        "decisions": accepted,
+        "actions": actions,
+    }
+    return {**unsigned, "plan_id": _digest_json(unsigned)}
 
 
 def _plan_json_document(
@@ -5095,9 +5938,21 @@ def _apply_operation(
     removed: set[tuple[tuple[str | int, ...], int]],
     reordered: set[tuple[str | int, ...]],
     normalized: set[tuple[tuple[str | int, ...], int]],
+    reviewed_paths: set[tuple[str | int, ...]],
 ) -> None:
     if not isinstance(operation, dict):
         raise RepairPlanningError("invalid_plan", "The repair preview is invalid.")
+    reviewed_definition = _reviewed.reviewed_repair_for_operation(
+        operation.get("operation")
+    )
+    if reviewed_definition is not None:
+        _apply_reviewed_operation(
+            document,
+            operation,
+            reviewed_paths,
+            allowed_fields=frozenset(reviewed_definition.mutable_fields),
+        )
+        return
     if operation.get("operation") == "normalize_muted_negative_frets":
         _apply_muted_fret_normalization_operation(
             document, operation, normalized
@@ -5168,6 +6023,82 @@ def _apply_operation(
         raise RepairPlanningError("invalid_plan", "The repair preview is invalid.")
     for index in declared_indexes:
         del values[index]
+
+
+def _apply_reviewed_operation(
+    document: dict,
+    operation: dict,
+    reviewed_paths: set[tuple[str | int, ...]],
+    *,
+    allowed_fields: frozenset[str],
+) -> None:
+    if set(operation) != {
+        "operation", "candidate_id", "decision", "mutable_fields", "changes",
+    } or operation.get("mutable_fields") != sorted(allowed_fields):
+        raise RepairPlanningError(
+            "invalid_plan", "The reviewed repair preview is invalid."
+        )
+    changes = operation.get("changes")
+    if not isinstance(changes, list) or len(changes) not in {1, 2}:
+        raise RepairPlanningError(
+            "invalid_plan", "The reviewed repair preview is invalid."
+        )
+    for change in changes:
+        if not isinstance(change, dict) or set(change) != {
+            "target_path",
+            "expected_before_sha256",
+            "expected_after_sha256",
+            "set_fields",
+            "remove_fields",
+        }:
+            raise RepairPlanningError(
+                "invalid_plan", "The reviewed repair preview is invalid."
+            )
+        raw_path = change.get("target_path")
+        set_fields = change.get("set_fields")
+        remove_fields = change.get("remove_fields")
+        if (
+            not isinstance(raw_path, list)
+            or not raw_path
+            or not isinstance(set_fields, dict)
+            or not isinstance(remove_fields, list)
+            or not set(set_fields).issubset(allowed_fields)
+            or not set(remove_fields).issubset(allowed_fields)
+            or set(set_fields).intersection(remove_fields)
+            or len(remove_fields) != len(set(remove_fields))
+            or any(value is not True for value in set_fields.values())
+        ):
+            raise RepairPlanningError(
+                "invalid_plan", "The reviewed repair preview is invalid."
+            )
+        path = tuple(raw_path)
+        if path in reviewed_paths:
+            raise RepairPlanningError(
+                "invalid_plan", "Two reviewed decisions target the same note."
+            )
+        note = _value_at_path(document, path)
+        before_digest = change.get("expected_before_sha256")
+        after_digest = change.get("expected_after_sha256")
+        if (
+            not isinstance(note, dict)
+            or not isinstance(before_digest, str)
+            or len(before_digest) != 64
+            or not isinstance(after_digest, str)
+            or len(after_digest) != 64
+            or hashlib.sha256(_canonical_json(note)).hexdigest() != before_digest
+        ):
+            raise RepairPlanningError(
+                "source_changed",
+                "A reviewed note changed after this preview. Inspect it again before applying decisions.",
+            )
+        reviewed_paths.add(path)
+        for field in remove_fields:
+            note.pop(field, None)
+        note.update(set_fields)
+        if hashlib.sha256(_canonical_json(note)).hexdigest() != after_digest:
+            raise RepairPlanningError(
+                "invalid_plan", "The reviewed repair postcondition did not match."
+            )
 
 
 def _apply_muted_fret_normalization_operation(
@@ -5773,6 +6704,21 @@ def _report_codes(report: dict) -> set[str]:
         for item in findings
         if isinstance(item, dict) and isinstance(item.get("code"), str)
     }
+
+
+def _report_code_counts(report: dict) -> dict[str, int]:
+    findings = report.get("findings") if isinstance(report, dict) else None
+    if not isinstance(findings, list):
+        return {}
+    counts: dict[str, int] = {}
+    for item in findings:
+        if not isinstance(item, dict) or not isinstance(item.get("code"), str):
+            continue
+        affected = item.get("affected_count", 1)
+        if not _integer(affected) or affected < 1:
+            affected = 1
+        counts[item["code"]] = counts.get(item["code"], 0) + affected
+    return counts
 
 
 def _finite_number(value) -> bool:

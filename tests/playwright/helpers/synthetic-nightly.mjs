@@ -173,6 +173,16 @@ export async function openSyntheticLibraryDoctor(page, {
         },
       });
     }
+    if (path === '/reviewed-repairs') {
+      return route.fulfill({
+        json: {
+          schema: 'library_doctor.reviewed_repair_catalog.v1',
+          catalog_version: 'synthetic-contract-v1',
+          registry_version: 'reviewed-repairs-2',
+          items: [],
+        },
+      });
+    }
     if (path === '/repair/history') return route.fulfill({ json: { items: [] } });
     if (path === '/results') return route.fulfill({ json: results });
     if (path === '/repair/preview') return route.fulfill({ json: repairPlan });

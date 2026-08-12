@@ -68,6 +68,7 @@ export async function launchLibraryDoctor({
   results = { total: 0, items: [] },
   rules = { items: [] },
   repairs = { schema: 'library_doctor.repair_catalog.v1', items: [], combined: null },
+  reviewedRepairs = { schema: 'library_doctor.reviewed_repair_catalog.v1', items: [] },
   history = { items: [] },
   songs = { total: 0, songs: [] },
   route,
@@ -113,6 +114,7 @@ export async function launchLibraryDoctor({
     if (key === '/api/plugins/library_doctor/status') return jsonResponse(status || {});
     if (key === '/api/plugins/library_doctor/rules') return jsonResponse(rules);
     if (key === '/api/plugins/library_doctor/repairs') return jsonResponse(repairs);
+    if (key === '/api/plugins/library_doctor/reviewed-repairs') return jsonResponse(reviewedRepairs);
     if (key.startsWith('/api/plugins/library_doctor/repair/history?')) return jsonResponse(history);
     if (key.startsWith('/api/plugins/library_doctor/results?')) return jsonResponse(results);
     if (key.startsWith('/api/library?')) return jsonResponse(songs);

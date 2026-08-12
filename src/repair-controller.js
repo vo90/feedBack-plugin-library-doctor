@@ -46,6 +46,9 @@ export function createRepairController({
       : [];
     if (restored) {
       const restoredChange = summaries.length === 1 ? summaries[0] : receipt;
+      if (restoredChange.change_kind === 'reviewed_decisions') {
+        return `Restored the exact original HO/PO/tap fields for ${number(repairChangeCount(restoredChange))} reviewed ${repairChangeCount(restoredChange) === 1 ? 'decision' : 'decisions'}. The related review findings may return.`;
+      }
       if (restoredChange.change_kind === 'replace_media') {
         if (restoredChange.media?.creates_preview) {
           return 'Removed the generated preview and restored the exact original manifest from recovery storage. The package has no embedded preview again.';
@@ -67,6 +70,9 @@ export function createRepairController({
     }
     if (receipt.change_kind === 'combined' && summaries.length === 1) {
       return `${completedRepairChange(summaries[0])}.`;
+    }
+    if (receipt.change_kind === 'reviewed_decisions') {
+      return `Applied ${number(count)} explicit reviewed HO/PO ${count === 1 ? 'decision' : 'decisions'}. Note timing, string, fret, and every technique outside HO/PO/tap were preserved.`;
     }
     if (receipt.change_kind === 'reorder') {
       return `${completedRepairChange(receipt)}${positions ? ` at ${number(positions)} musical ${positions === 1 ? 'position' : 'positions'}` : ''}. Every authored entry and property was preserved.`;

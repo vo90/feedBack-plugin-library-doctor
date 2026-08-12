@@ -14,6 +14,7 @@ import { createFormatters } from './formatters.js';
 import { createPlaybackController } from './playback-controller.js';
 import { createPreviewController } from './preview-controller.js';
 import { createRepairController } from './repair-controller.js';
+import { createReviewedRepairController } from './reviewed-repair-controller.js';
 import { createResultsController } from './results-controller.js';
 import { createScanController } from './scan-controller.js';
 import { createSongToolsController } from './song-tools-controller.js';
@@ -105,6 +106,18 @@ export function bootLibraryDoctor(hostWindow = window) {
     repairChangeCount,
     request,
     setHidden,
+    state,
+    text,
+  });
+  const reviewedRepairController = createReviewedRepairController({
+    actions,
+    apiRoot: API,
+    createConfirmation,
+    document,
+    focus,
+    make,
+    number,
+    request,
     state,
     text,
   });
@@ -420,6 +433,7 @@ export function bootLibraryDoctor(hostWindow = window) {
     refreshStatus: scanController.refreshStatus,
     previewRepair: previewController.previewRepair,
     repairControls: repairController.repairControls,
+    reviewedRepairControls: reviewedRepairController.reviewedRepairControls,
     renderRepairFailure: repairController.renderRepairFailure,
     renderRepairResult: repairController.renderRepairResult,
     renderStatus: statusView.renderStatus,

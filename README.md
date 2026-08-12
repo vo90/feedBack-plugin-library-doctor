@@ -237,6 +237,44 @@ JSONC arrangement files are left unchanged until a comment-preserving writer is
 available. Repairs cannot run during a library scan or while the song player
 has priority.
 
+### Reviewed tab repairs
+
+Hammer-on and pull-off findings that require musical intent are deliberately
+separate from every automatic-safe allowlist. **Reviewed repair** covers notes
+with both flags, a lone flag opposite to the incoming same-string fret
+movement, same-fret HO/PO, and HO/PO without one usable predecessor. It keeps
+top-level arrangements and phrase difficulties as independent streams and uses
+the next same-string note only as evidence; long gaps do not hide a candidate.
+
+The workflow presents one bounded candidate at a time with previous, current,
+and next fret context. It never preselects a choice. The author can explicitly
+store hammer-on, store pull-off, convert the current note to a tap, remove its
+HO/PO fields, leave it unchanged, or conditionally move the marker to one
+unambiguous next explicit note that has no HO, PO, or tap flag. Conflicting
+same-time frets, ambiguous predecessors, malformed technique values, stale
+objects, JSONC, and ambiguous
+move targets remain visible but cannot be mutated. Only `ho`, `po`, and `tp`
+may change; timing, string, fret, sustain, chord data, and other techniques are
+preserved.
+
+Candidate inspection uses bounded server pages with exact package totals.
+Previous/next page controls retain explicit decisions already made in the
+current session, while a per-adapter decision limit prevents an unbounded
+request. Candidates from later pages remain source-bound and can be previewed,
+applied, and undone normally.
+
+Reviewed choices use the same complete candidate validation, durable recovery
+backup, receipt history, cache refresh, and hash-guarded Undo as conservative
+chart repairs. They never enter **Fix all safe issues** or multi-song safe
+batch repair. An optional on-demand 12-second full-mix excerpt can help with
+timing, but it is held only in bounded temporary memory and is never added to
+the Feedpak; the UI explains that a mixed recording cannot prove a particular
+fretting technique. The scalable adapter registry declares candidate IDs,
+pagination, decisions, blockers, mutable fields, mutation derivation, and exact
+postconditions. Its executable ownership fixture requires candidate, decision,
+blocker, preservation, tamper, validation, Undo, API, and frontend coverage
+before another reviewed repair can be added.
+
 **Fix all safe issues** recalculates each eligible repair against the result of
 the previous step, using a fixed dependency order. The plugin then builds and
 validates one complete candidate, creates one backup, and saves once. If any
@@ -497,8 +535,11 @@ normal in-game workflow focused on package outcomes.
 
 - `validator.py` contains the package reader and validation rules. It has no
   server or UI state and can be tested directly.
-- `repair_eligibility.py` contains the pure conditional handshape and preview
-  source predicates shared by scanning and transactional repair planning.
+- `repair_eligibility.py` contains the pure conditional handshape, preview,
+  and reviewed HO/PO classifiers shared by scanning and transactional repair
+  planning.
+- `reviewed_repair.py` owns the closed reviewed-repair adapter registry and
+  registered decision vocabulary without performing filesystem writes.
 - `scanner.py` owns the playback-aware background scan, incremental SQLite
   cache, corruption quarantine, bounded lock handling, cancellation,
   pagination, rule summaries, and report exports.
@@ -549,9 +590,9 @@ the test dependencies and run:
 python -m pip install -r requirements-test.txt
 python -m pip check
 python -m pip_audit -r requirements.txt
-python -m ruff check validator.py scanner.py library_doctor_scan_worker.py repair.py repair_eligibility.py preview_repair.py batch_repair.py migration.py privacy.py diagnostics.py api_contracts.py mutation_receipts.py routes.py tools tests
+python -m ruff check validator.py scanner.py library_doctor_scan_worker.py repair.py repair_eligibility.py reviewed_repair.py preview_repair.py batch_repair.py migration.py privacy.py diagnostics.py api_contracts.py mutation_receipts.py routes.py tools tests
 python -m pytest --cov --cov-report=term
-python -m py_compile validator.py scanner.py library_doctor_scan_worker.py repair.py repair_eligibility.py preview_repair.py batch_repair.py migration.py privacy.py diagnostics.py api_contracts.py mutation_receipts.py routes.py tools/verify_host_contract.py
+python -m py_compile validator.py scanner.py library_doctor_scan_worker.py repair.py repair_eligibility.py reviewed_repair.py preview_repair.py batch_repair.py migration.py privacy.py diagnostics.py api_contracts.py mutation_receipts.py routes.py tools/verify_host_contract.py
 npm ci
 npm run audit:dependencies
 npm run check:frontend

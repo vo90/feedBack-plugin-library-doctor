@@ -79,6 +79,40 @@ class RepairCatalogContract(_ResponseContract):
     combined: dict[str, Any]
 
 
+class ReviewedDecisionDefinitionContract(_ResponseContract):
+    name: str
+    label: str
+    description: str
+    confirmation: str
+
+
+class ReviewedRepairDefinitionContract(_ResponseContract):
+    adapter_id: str
+    title: str
+    description: str
+    safety: Literal["review_required"]
+    trigger_rule_codes: list[str]
+    mutable_fields: list[str]
+    decisions: list[ReviewedDecisionDefinitionContract]
+    context_schema: str
+    candidate_limit: int = Field(ge=1, le=10_000)
+    candidate_id_prefix: str
+    operation_name: str
+    blocker_codes: list[str]
+    postconditions: list[str]
+    audio_support: bool
+    test_owner: str
+
+
+class ReviewedRepairCatalogContract(_ResponseContract):
+    schema_: Literal["library_doctor.reviewed_repair_catalog.v1"] = Field(
+        alias="schema"
+    )
+    catalog_version: str
+    registry_version: str
+    items: list[ReviewedRepairDefinitionContract]
+
+
 class StructuredErrorDetailContract(_ResponseContract):
     code: str
     message: str
@@ -139,6 +173,64 @@ class AllSafeApplyRequestContract(_RequestContract):
     package: str
     plan_id: str
     request_id: RequestId | None = None
+
+
+ReviewedAdapterId = Annotated[
+    str,
+    Field(
+        min_length=8,
+        max_length=96,
+        pattern=r"^review\.[a-z0-9][a-z0-9.-]*$",
+    ),
+]
+ReviewedCandidateId = Annotated[
+    str,
+    Field(
+        min_length=27,
+        max_length=57,
+        pattern=r"^[a-z][a-z0-9_-]{1,31}-[0-9a-f]{24}$",
+    ),
+]
+ReviewedDecisionName = Annotated[
+    str,
+    Field(
+        min_length=3,
+        max_length=64,
+        pattern=r"^[a-z][a-z0-9_]*$",
+    ),
+]
+
+
+class ReviewedDecisionRequestContract(_RequestContract):
+    candidate_id: ReviewedCandidateId
+    decision: ReviewedDecisionName
+
+
+class ReviewedInspectRequestContract(_RequestContract):
+    package: str
+    adapter_id: ReviewedAdapterId
+    offset: int = Field(default=0, ge=0, le=1_000_000)
+    limit: int = Field(default=2_000, ge=1, le=2_000)
+
+
+class ReviewedPreviewRequestContract(_RequestContract):
+    package: str
+    adapter_id: ReviewedAdapterId
+    decisions: list[ReviewedDecisionRequestContract] = Field(
+        min_length=1,
+        max_length=2_000,
+    )
+
+
+class ReviewedApplyRequestContract(ReviewedPreviewRequestContract):
+    plan_id: Annotated[str, Field(min_length=64, max_length=64, pattern=r"^[0-9a-f]{64}$")]
+    request_id: RequestId | None = None
+
+
+class ReviewedAudioRequestContract(_RequestContract):
+    package: str
+    adapter_id: ReviewedAdapterId
+    candidate_id: ReviewedCandidateId
 
 
 class BatchPreviewRequestContract(_RequestContract):

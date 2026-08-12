@@ -13,6 +13,8 @@ function initialState() {
     resultRequest: 0,
     ruleMetadata: {},
     repairRules: {},
+    reviewedRepairAdapters: {},
+    reviewedRuleAdapters: {},
     allSafeRepair: null,
     batch: null,
     batchRenderKey: '',

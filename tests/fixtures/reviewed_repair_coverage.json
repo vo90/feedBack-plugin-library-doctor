@@ -1,0 +1,34 @@
+{
+  "schema": "library_doctor.reviewed_repair_test_coverage.v1",
+  "adapters": {
+    "review.hopo-techniques": {
+      "candidate": [
+        "tests/test_reviewed_repair_foundation.py::test_hopo_classifier_covers_conflict_direction_same_fret_and_missing_source",
+        "tests/test_reviewed_repair_foundation.py::test_hopo_candidate_pages_are_bounded_disjoint_and_exactly_counted"
+      ],
+      "decision": ["tests/test_reviewed_repair_planner.py::test_reviewed_hopo_decisions_change_only_closed_technique_fields"],
+      "blocker": [
+        "tests/test_reviewed_repair_planner.py::test_candidate_blocker_prevents_mutation_but_remains_visible",
+        "tests/test_reviewed_repair_foundation.py::test_move_to_next_is_not_offered_for_tap_or_ambiguous_target"
+      ],
+      "preservation": ["tests/test_reviewed_repair_planner.py::test_reviewed_hopo_decisions_change_only_closed_technique_fields"],
+      "stale_tamper": [
+        "tests/test_reviewed_repair_planner.py::test_reviewed_apply_refuses_forged_generic_field_mutation",
+        "tests/test_reviewed_repair_planner.py::test_move_to_next_plan_fails_closed_when_target_gains_tap"
+      ],
+      "validation": [
+        "tests/test_reviewed_repair_planner.py::test_reviewed_service_uses_candidate_validation_backup_history_and_undo",
+        "tests/test_routes.py::test_reviewed_archive_apply_preserves_members_and_supports_undo"
+      ],
+      "undo": ["tests/test_reviewed_repair_planner.py::test_reviewed_service_uses_candidate_validation_backup_history_and_undo"],
+      "api": [
+        "tests/test_routes.py::test_reviewed_repair_routes_inspect_preview_apply_and_stay_out_of_safe_catalog",
+        "tests/test_routes.py::test_reviewed_inspection_pages_report_exact_totals_and_disjoint_ids"
+      ],
+      "frontend": [
+        "tests/frontend/reviewed-repair.test.mjs::reviewed repair previews exact counts, confirms, applies, and exposes Undo",
+        "tests/frontend/reviewed-repair.test.mjs::reviewed pages retain decisions and expose blocked candidates without guessing"
+      ]
+    }
+  }
+}

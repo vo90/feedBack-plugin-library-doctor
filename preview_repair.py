@@ -56,6 +56,9 @@ MAX_PREVIEW_CANDIDATE_BYTES = 8 * 1024 * 1024
 MAX_METADATA_MEMBER_BYTES = 16 * 1024 * 1024
 PLAN_TTL_SECONDS = 30 * 60
 MAX_CACHED_PLANS = 4
+PASSAGE_DURATION_SECONDS = 12.0
+PASSAGE_LEAD_SECONDS = 4.0
+MAX_CACHED_PASSAGES = 8
 LOUDNESS_SAMPLE_RATE = 400
 MAX_LOUDNESS_ANALYSIS_SECONDS = 8 * 60 * 60
 MAX_LOUDNESS_PCM_BYTES = (
@@ -395,6 +398,7 @@ class PreviewRepairEngine:
             select_loudest_start or _loudest_start_with_ffmpeg
         )
         self._plans: OrderedDict[str, dict] = OrderedDict()
+        self._passages: OrderedDict[str, dict] = OrderedDict()
         self._lock = threading.Lock()
 
     @staticmethod
@@ -804,6 +808,112 @@ class PreviewRepairEngine:
         with self._lock:
             self._plans.pop(plan_id, None)
 
+    def passage(
+        self,
+        package_name: str,
+        candidate_id: str,
+        candidate_time: float,
+        read_member,
+    ) -> dict:
+        """Render a bounded listen-only clip around one reviewed candidate."""
+        if (
+            not isinstance(candidate_id, str)
+            or not candidate_id.startswith("hopo-")
+            or _finite_number(candidate_time) is None
+        ):
+            raise self._error_type(
+                "invalid_candidate", "This reviewed audio request is invalid."
+            )
+        _manifest_raw, manifest = self._load_manifest(read_member)
+        full_mix_path = preview_source_path(manifest)
+        if not full_mix_path or not full_mix_path.lower().endswith(".ogg"):
+            raise self._error_type(
+                "review_audio_unavailable",
+                "This Feedpak does not have one unambiguous manifest-declared Ogg full mix for passage listening.",
+            )
+        source = read_member(full_mix_path, MAX_PREVIEW_SOURCE_BYTES)
+        source_sha256 = hashlib.sha256(source).hexdigest()
+        try:
+            source_duration = self._probe_duration(source)
+        except Exception as exc:
+            raise self._error_type(
+                "review_audio_unavailable",
+                "Library Doctor could not confirm the full-mix duration for passage listening.",
+            ) from exc
+        if not math.isfinite(source_duration) or source_duration < 0.25:
+            raise self._error_type(
+                "review_audio_unavailable",
+                "The full mix is too short for passage listening.",
+            )
+        target_duration = min(PASSAGE_DURATION_SECONDS, source_duration)
+        start = min(
+            max(0.0, float(candidate_time) - PASSAGE_LEAD_SECONDS),
+            max(0.0, source_duration - target_duration),
+        )
+        token = _digest({
+            "kind": "reviewed_passage",
+            "package": package_name,
+            "candidate_id": candidate_id,
+            "source_sha256": source_sha256,
+            "start": round(start, 3),
+            "duration": round(target_duration, 3),
+        })
+        with self._lock:
+            self._prune()
+            cached = self._passages.get(token)
+            if isinstance(cached, dict) and isinstance(cached.get("audio"), bytes):
+                self._passages.move_to_end(token)
+                return {
+                    key: value for key, value in cached.items()
+                    if key not in {"audio", "_created_at"}
+                }
+        try:
+            audio = self._render_preview(source, start, target_duration)
+        except Exception as exc:
+            raise self._error_type(
+                "review_audio_unavailable",
+                "Library Doctor could not generate this optional passage clip. Visual review is still available.",
+            ) from exc
+        if not isinstance(audio, bytes) or not 1_000 <= len(audio) <= MAX_PREVIEW_CANDIDATE_BYTES:
+            raise self._error_type(
+                "review_audio_unavailable",
+                "The optional passage clip did not meet Library Doctor's audio safety limits.",
+            )
+        entry = {
+            "schema": "library_doctor.reviewed_passage_audio.v1",
+            "audio_token": token,
+            "candidate_id": candidate_id,
+            "start_seconds": round(start, 3),
+            "duration_seconds": round(target_duration, 3),
+            "expires_in_seconds": PLAN_TTL_SECONDS,
+            "notice": (
+                "This is a short excerpt of the mixed recording. It may help with timing, but it cannot prove a specific fretting technique."
+            ),
+            "audio": audio,
+            "_created_at": time.monotonic(),
+        }
+        with self._lock:
+            self._passages[token] = entry
+            self._passages.move_to_end(token)
+            self._prune()
+        return {
+            key: value for key, value in entry.items()
+            if key not in {"audio", "_created_at"}
+        }
+
+    def passage_audio(self, audio_token: str) -> bytes:
+        with self._lock:
+            self._prune()
+            entry = self._passages.get(audio_token)
+            audio = entry.get("audio") if isinstance(entry, dict) else None
+            if not isinstance(audio, bytes):
+                raise self._error_type(
+                    "review_audio_expired",
+                    "This passage clip expired. Generate it again from Reviewed repair.",
+                )
+            self._passages.move_to_end(audio_token)
+            return audio
+
     def _automatic_start(
         self,
         manifest: dict,
@@ -921,3 +1031,11 @@ class PreviewRepairEngine:
             self._plans.pop(plan_id, None)
         while len(self._plans) > MAX_CACHED_PLANS:
             self._plans.popitem(last=False)
+        stale_passages = [
+            token for token, item in self._passages.items()
+            if float(item.get("_created_at") or 0.0) < cutoff
+        ]
+        for token in stale_passages:
+            self._passages.pop(token, None)
+        while len(self._passages) > MAX_CACHED_PASSAGES:
+            self._passages.popitem(last=False)
