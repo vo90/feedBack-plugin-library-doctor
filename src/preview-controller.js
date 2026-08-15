@@ -16,6 +16,13 @@ export function createPreviewController({
       : 'Listen and choose a preview';
   }
 
+  function previewSetConfirmation(result, mode) {
+    return {
+      mode,
+      media: result?.media || {},
+    };
+  }
+
   function confirmAutomaticPreviewRepair(report, finding, trigger, manual, region) {
     trigger.disabled = true;
     manual.disabled = true;
@@ -67,7 +74,11 @@ export function createPreviewController({
       actionRegistry.renderRepairResult(result);
       await actionRegistry.refreshStatus();
       await Promise.all([
-        actionRegistry.loadRules(), actionRegistry.loadResults(), actionRegistry.refreshSelectedSongTool(report.package),
+        actionRegistry.loadRules(),
+        actionRegistry.loadResults(),
+        actionRegistry.refreshSelectedSongTool(report.package, {
+          previewConfirmation: previewSetConfirmation(result, 'automatic'),
+        }),
       ]);
     } catch (error) {
       apply.disabled = false;
@@ -298,7 +309,11 @@ export function createPreviewController({
       actionRegistry.renderRepairResult(result);
       await actionRegistry.refreshStatus();
       await Promise.all([
-        actionRegistry.loadRules(), actionRegistry.loadResults(), actionRegistry.refreshSelectedSongTool(report.package),
+        actionRegistry.loadRules(),
+        actionRegistry.loadResults(),
+        actionRegistry.refreshSelectedSongTool(report.package, plan.change_kind === 'replace_media'
+          ? { previewConfirmation: previewSetConfirmation(result, 'chosen') }
+          : {}),
       ]);
     } catch (error) {
       apply.disabled = false;

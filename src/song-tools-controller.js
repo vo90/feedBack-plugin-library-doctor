@@ -4,6 +4,7 @@ export function createSongToolsController({
   badge,
   coreRequest,
   document,
+  duration,
   focus,
   getElements,
   make,
@@ -143,7 +144,40 @@ export function createSongToolsController({
     return heading;
   }
 
-  function renderPreviewCreator(song, status, region) {
+  function renderPreviewConfirmation(card, confirmation) {
+    if (!confirmation) return;
+    const automatic = confirmation.mode === 'automatic';
+    const media = confirmation.media || {};
+    const start = duration(media.start_seconds);
+    const length = duration(media.candidate_duration_seconds || 30);
+    const notice = make('section', 'lh-preview-set-confirmation');
+    notice.setAttribute('role', 'status');
+    notice.setAttribute('aria-live', 'polite');
+    notice.setAttribute('aria-atomic', 'true');
+    notice.tabIndex = -1;
+    notice.appendChild(badge('Preview updated', 'good'));
+    notice.appendChild(make(
+      'strong',
+      '',
+      automatic ? 'Automatic preview created and set' : 'Your chosen preview is set',
+    ));
+    notice.appendChild(make(
+      'p',
+      '',
+      automatic
+        ? `Library Doctor selected a ${length} excerpt starting at ${start}, saved it, and validated the complete Feedpak.`
+        : `The ${length} excerpt you chose, starting at ${start}, was saved and validated in the complete Feedpak.`,
+    ));
+    notice.appendChild(make(
+      'p',
+      'lh-muted',
+      'The refreshed player below is now the preview FeedBack uses while browsing this song.',
+    ));
+    card.appendChild(notice);
+    focus(notice);
+  }
+
+  function renderPreviewCreator(song, status, region, { previewConfirmation = null } = {}) {
     const packageName = songPackage(song);
     const report = {
       package: packageName,
@@ -158,6 +192,7 @@ export function createSongToolsController({
 
     const card = make('section', 'lh-song-tool-card');
     card.appendChild(make('h4', '', 'Preview Creator'));
+    renderPreviewConfirmation(card, previewConfirmation);
     card.appendChild(make(
       'p',
       '',
@@ -211,7 +246,9 @@ export function createSongToolsController({
     region.appendChild(card);
   }
 
-  async function openPreviewCreator(song, trigger, region, { refresh = false } = {}) {
+  async function openPreviewCreator(
+    song, trigger, region, { refresh = false, previewConfirmation = null } = {},
+  ) {
     const packageName = songPackage(song);
     if (!packageName) return;
     if (!refresh && state.songTools.activeTool === 'preview') {
@@ -238,7 +275,7 @@ export function createSongToolsController({
         || selectionRequest !== state.songTools.selectionRequest
         || songPackage(state.songTools.selected) !== packageName
       ) return;
-      renderPreviewCreator(song, status, region);
+      renderPreviewCreator(song, status, region, { previewConfirmation });
     } catch (error) {
       if (
         state.songTools.activeTool !== 'preview'
@@ -249,7 +286,7 @@ export function createSongToolsController({
     }
   }
 
-  function renderSongToolMenu(song, { openTool = '' } = {}) {
+  function renderSongToolMenu(song, { openTool = '', previewConfirmation = null } = {}) {
     const packageName = songPackage(song);
     state.songTools.activeTool = '';
     el.songToolSelection.replaceChildren();
@@ -278,8 +315,12 @@ export function createSongToolsController({
     setHidden(el.songToolSelection, false);
     focus(el.songToolSelection);
     if (openTool === 'preview') {
-      openPreviewCreator(song, preview, region, { refresh: true });
+      return openPreviewCreator(song, preview, region, {
+        refresh: true,
+        previewConfirmation,
+      });
     }
+    return undefined;
   }
 
   function closeSongToolSelection({ render = true } = {}) {
@@ -312,13 +353,17 @@ export function createSongToolsController({
     renderSongToolMenu(song);
   }
 
-  function refreshSelectedSongTool(packageName) {
+  function refreshSelectedSongTool(packageName, { previewConfirmation = null } = {}) {
     if (
       state.workspace === 'tools'
       && songPackage(state.songTools.selected) === packageName
     ) {
-      renderSongToolMenu(state.songTools.selected, { openTool: 'preview' });
+      return renderSongToolMenu(state.songTools.selected, {
+        openTool: 'preview',
+        previewConfirmation,
+      });
     }
+    return undefined;
   }
 
 

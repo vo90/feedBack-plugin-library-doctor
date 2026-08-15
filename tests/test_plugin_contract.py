@@ -276,7 +276,7 @@ def test_preview_tools_can_replace_a_valid_preview_and_show_the_finished_audio()
 
     assert "function loadSongTools()" in script
     assert "function selectSongTool(song)" in script
-    assert "function openPreviewCreator(song, trigger, region" in script
+    assert "function openPreviewCreator(" in script
     assert "coreRequest(`/api/library?${params}`)" in script
     assert "/repair/media/tool/status?package=" in script
     assert "media.preview-regenerate" in script
@@ -298,11 +298,15 @@ def test_song_tools_keep_the_selected_panel_outside_the_result_list():
     assert "focus(el.songToolSelection)" in script
     assert "titleHeading.id = 'lh-song-tool-selection-title'" in script
     assert "function closeSongToolSelection" in script
-    assert "renderSongToolMenu(state.songTools.selected, { openTool: 'preview' })" in script
+    assert "previewConfirmation" in script
+    assert "Your chosen preview is set" in script
+    assert "Automatic preview created and set" in script
+    assert "now the preview FeedBack uses" in script
+    assert ".lh-preview-set-confirmation" in styles
     assert "Available tools" in script
     assert "Opening Preview Creator..." in script
     assert script.index("function selectSongTool(song)") < script.index(
-        "function refreshSelectedSongTool(packageName)"
+        "function refreshSelectedSongTool(packageName,"
     )
     assert ".lh-song-tool-row" in styles
     assert ".lh-song-tool-choice" in styles

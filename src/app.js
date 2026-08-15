@@ -139,6 +139,7 @@ export function bootLibraryDoctor(hostWindow = window) {
     badge,
     coreRequest,
     document,
+    duration,
     focus,
     getElements: elements,
     make,

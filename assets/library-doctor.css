@@ -658,6 +658,20 @@
 }
 .lh-song-tool-card > h4 { margin: 0; color: var(--lh-text); font-size: 1rem; }
 .lh-song-tool-card > p { margin: .35rem 0 0; color: var(--lh-dim); font-size: .82rem; line-height: 1.5; }
+.lh-preview-set-confirmation {
+  display: grid;
+  gap: .35rem;
+  margin-top: .75rem;
+  border: 1px solid color-mix(in srgb, var(--lh-good) 70%, var(--lh-border));
+  border-radius: .55rem;
+  padding: .75rem;
+  background: color-mix(in srgb, var(--lh-good) 12%, var(--lh-surface));
+  box-shadow: inset 3px 0 0 var(--lh-good);
+}
+.lh-preview-set-confirmation:focus { outline: 2px solid var(--lh-good); outline-offset: 2px; }
+.lh-preview-set-confirmation strong { color: var(--lh-text); font-size: .92rem; }
+.lh-preview-set-confirmation p { margin: 0; color: var(--lh-text); font-size: .82rem; line-height: 1.45; }
+.lh-preview-set-confirmation .lh-muted { color: var(--lh-dim); }
 .lh-song-tool-current-label { display: block; margin-top: .75rem; color: var(--lh-text); font-size: .9rem; }
 .lh-song-tool-card .lh-media-preview-player { margin-top: .7rem; }
 .lh-song-tool-card .lh-repair-buttons { margin-top: .75rem; }

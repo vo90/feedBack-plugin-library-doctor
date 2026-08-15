@@ -197,6 +197,140 @@ test('Song Tools keeps its detail panel outside the result list and manages focu
   assert.equal(selection.hidden, true);
 });
 
+function previewToolRoute(request, { mode, startSeconds }) {
+  if (request.key.startsWith('/api/plugins/library_doctor/repair/media/tool/status?')) {
+    return jsonResponse({
+      available: true,
+      rule_code: 'media.preview-regenerate',
+      current_preview_available: true,
+      preview_declared: true,
+      title: 'Tool Song',
+      artist: 'Synthetic Artist',
+    });
+  }
+  if (request.key === '/api/plugins/library_doctor/repair/preview') {
+    return jsonResponse({
+      available: true,
+      plan_id: 'preview-plan-1',
+      title: 'Create a standard audio preview',
+      change_kind: 'replace_media',
+      item_name: 'audio preview',
+      media: {
+        creates_preview: false,
+        original_duration_seconds: 30,
+        candidate_duration_seconds: 30,
+        start_seconds: startSeconds,
+        max_start_seconds: 200,
+        candidate_size: '320 KB',
+        original_size: '300 KB',
+        selection_reason: mode === 'automatic' ? 'representative section' : 'user-selected position',
+      },
+    });
+  }
+  const applyPath = mode === 'automatic'
+    ? '/api/plugins/library_doctor/repair/media/automatic'
+    : '/api/plugins/library_doctor/repair/apply';
+  if (request.key === applyPath) {
+    return jsonResponse({
+      id: `${mode}-preview-receipt`,
+      outcome: 'success',
+      package: 'synthetic/tool-song.feedpak',
+      title: 'Tool Song',
+      artist: 'Synthetic Artist',
+      change_kind: 'replace_media',
+      change_count: 1,
+      item_name: 'audio preview',
+      media: {
+        creates_preview: false,
+        original_duration_seconds: 30,
+        candidate_duration_seconds: 30,
+        start_seconds: startSeconds,
+        selection_reason: mode === 'automatic' ? 'representative section' : 'user-selected position',
+      },
+      file_handling: { backup_removed: true, backup_cleanup_required: false },
+      undo_available: false,
+    });
+  }
+  return null;
+}
+
+async function openSyntheticPreviewTool(app) {
+  app.document.querySelector('button[data-workspace="tools"]').click();
+  await waitFor(() => app.document.querySelector('.lh-song-tool-item'), 'Song Tools item');
+  app.document.querySelector('.lh-song-tool-item').click();
+  app.document.querySelector('.lh-song-tool-choice').click();
+  await waitFor(
+    () => [...app.document.querySelectorAll('button')]
+      .some((button) => button.textContent === 'Listen and choose a replacement preview'),
+    'Preview Creator actions',
+  );
+}
+
+function buttonWithText(document, label) {
+  return [...document.querySelectorAll('button')]
+    .find((button) => button.textContent === label);
+}
+
+test('Song Tools confirms that a listened-to and chosen preview is now set', async (t) => {
+  const app = await launchLibraryDoctor({
+    status: auditedStates.cached_complete.status,
+    songs: {
+      total: 1,
+      songs: [{ filename: 'synthetic/tool-song.feedpak', title: 'Tool Song', artist: 'Synthetic Artist' }],
+    },
+    repairs: {
+      items: [{ rule_code: 'media.preview-regenerate', change_kind: 'replace_media' }],
+      combined: null,
+    },
+    route(request) {
+      return previewToolRoute(request, { mode: 'chosen', startSeconds: 100 });
+    },
+  });
+  t.after(() => app.close());
+  await openSyntheticPreviewTool(app);
+
+  buttonWithText(app.document, 'Listen and choose a replacement preview').click();
+  await waitFor(() => buttonWithText(app.document, 'Keep this preview'), 'manual preview candidate');
+  buttonWithText(app.document, 'Keep this preview').click();
+  buttonWithText(app.document, 'Confirm replacement and finish').click();
+
+  await waitFor(() => app.document.querySelector('.lh-preview-set-confirmation'), 'chosen preview confirmation');
+  const confirmation = app.document.querySelector('.lh-preview-set-confirmation');
+  assert.match(confirmation.textContent, /Your chosen preview is set/);
+  assert.match(confirmation.textContent, /starting at 1m 40s/);
+  assert.match(confirmation.textContent, /now the preview FeedBack uses/);
+  await waitFor(() => app.document.activeElement === confirmation, 'chosen preview confirmation focus');
+});
+
+test('Song Tools confirms that an automatically created preview is now set', async (t) => {
+  const app = await launchLibraryDoctor({
+    status: auditedStates.cached_complete.status,
+    songs: {
+      total: 1,
+      songs: [{ filename: 'synthetic/tool-song.feedpak', title: 'Tool Song', artist: 'Synthetic Artist' }],
+    },
+    repairs: {
+      items: [{ rule_code: 'media.preview-regenerate', change_kind: 'replace_media' }],
+      combined: null,
+    },
+    route(request) {
+      return previewToolRoute(request, { mode: 'automatic', startSeconds: 47 });
+    },
+  });
+  t.after(() => app.close());
+  await openSyntheticPreviewTool(app);
+
+  buttonWithText(app.document, 'Create automatically and finish').click();
+  buttonWithText(app.document, 'Create preview and finish').click();
+
+  await waitFor(() => app.document.querySelector('.lh-preview-set-confirmation'), 'automatic preview confirmation');
+  const confirmation = app.document.querySelector('.lh-preview-set-confirmation');
+  assert.match(confirmation.textContent, /Automatic preview created and set/);
+  assert.match(confirmation.textContent, /starting at 47s/);
+  assert.match(confirmation.textContent, /now the preview FeedBack uses/);
+  await waitFor(() => app.document.activeElement === confirmation, 'automatic preview confirmation focus');
+});
+
 test('historical repair activity stays collapsed until the user chooses to inspect it', async (t) => {
   const receipt = {
     id: 'synthetic-repair-1',
