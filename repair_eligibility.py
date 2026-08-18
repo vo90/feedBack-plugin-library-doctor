@@ -12,7 +12,7 @@ import json
 import math
 from dataclasses import dataclass
 from pathlib import PurePosixPath
-from typing import Iterator
+from typing import Callable, Iterator
 
 
 HANDSHAPE_REVIEW_MESSAGES = {
@@ -44,9 +44,9 @@ HOPO_DECISION_NAMES = (
     "set_pull_off",
     "convert_to_tap",
     "remove_hopo",
-    "leave_unchanged",
 )
 MAX_HOPO_REVIEW_CANDIDATES = 2_000
+REVIEW_DIFFICULTY_SCOPES = frozenset({"full_only", "all_authored"})
 
 
 @dataclass(frozen=True)
@@ -55,6 +55,11 @@ class HopoNeighbour:
 
     time: float
     fret: int
+    effective_fret: int
+    sustain: float
+    link_next: bool
+    slide_to: int | None
+    slide_unpitch_to: int | None
     location: str
     path: tuple[str | int, ...] | None
     writable: bool
@@ -62,19 +67,27 @@ class HopoNeighbour:
     pull_off: bool
     tap: bool
     malformed_techniques: bool
+    context_kind: str
 
     def to_dict(self) -> dict:
         return {
             "time": self.time,
             "fret": self.fret,
+            "effective_fret": self.effective_fret,
+            "sustain": self.sustain,
+            "sustain_end": round(self.time + self.sustain, 4),
             "location": self.location,
             "writable": self.writable,
             "techniques": {
                 "hammer_on": self.hammer_on,
                 "pull_off": self.pull_off,
                 "tap": self.tap,
+                "link_next": self.link_next,
+                "slide_to": self.slide_to,
+                "slide_unpitch_to": self.slide_unpitch_to,
             },
             "malformed_techniques": self.malformed_techniques,
+            "context_kind": self.context_kind,
         }
 
 
@@ -89,12 +102,16 @@ class HopoReviewCandidate:
     candidate_id: str
     member_path: str
     stream_path: tuple[str | int, ...]
+    stream_level_count: int | None
+    stream_level_ordinal: int | None
+    stream_is_full_difficulty: bool
     target_path: tuple[str | int, ...]
     location: str
     context_kind: str
     time: float
     string: int
     fret: int
+    visual_target_ambiguous: bool
     hammer_on: bool
     pull_off: bool
     tap: bool
@@ -106,6 +123,20 @@ class HopoReviewCandidate:
     next_state: str
     blockers: tuple[str, ...]
     decision_names: tuple[str, ...]
+
+    @property
+    def review_item_id(self) -> str:
+        """Stable occurrence identity independent of the stored technique flags."""
+        stable_identity = {
+            "member_path": self.member_path,
+            "target_path": list(self.target_path),
+            "time": self.time,
+            "string": self.string,
+            "fret": self.fret,
+        }
+        return _candidate_digest(stable_identity).replace(
+            "hopo-", "hopo-item-", 1
+        )
 
     def to_dict(self) -> dict:
         stream_label = "Top-level arrangement"
@@ -120,8 +151,72 @@ class HopoReviewCandidate:
                 f"Phrase {self.stream_path[1] + 1}, "
                 f"difficulty {self.stream_path[3] + 1}"
             )
+        stream_context = {
+            "kind": "top_level",
+            "phrase_index": None,
+            "difficulty_index": None,
+            "difficulty_count": None,
+            "difficulty_ordinal": None,
+            "difficulty_scope": "full",
+            "is_full_difficulty": True,
+            "mastery_fraction": 1.0,
+        }
+        if (
+            len(self.stream_path) == 4
+            and self.stream_path[0] == "phrases"
+            and isinstance(self.stream_path[1], int)
+            and self.stream_path[2] == "levels"
+            and isinstance(self.stream_path[3], int)
+        ):
+            level_count = max(1, int(self.stream_level_count or 1))
+            level_ordinal = max(0, int(self.stream_level_ordinal or 0))
+            difficulty_scope = (
+                "full" if self.stream_is_full_difficulty else "lower"
+            )
+            stream_label = (
+                f"Phrase {self.stream_path[1] + 1}, "
+                f"{'full difficulty' if self.stream_is_full_difficulty else 'lower difficulty'} "
+                f"(level {level_ordinal + 1} of {level_count})"
+            )
+            stream_context = {
+                "kind": "phrase_level",
+                "phrase_index": self.stream_path[1],
+                "difficulty_index": self.stream_path[3],
+                "difficulty_count": level_count,
+                "difficulty_ordinal": level_ordinal,
+                "difficulty_scope": difficulty_scope,
+                "is_full_difficulty": self.stream_is_full_difficulty,
+                "mastery_fraction": (
+                    1.0
+                    if self.stream_is_full_difficulty
+                    else min(1.0, (level_ordinal + 0.5) / level_count)
+                ),
+            }
+        target_tail = self.target_path[len(self.stream_path):]
+        runtime_locator = {
+            "kind": self.context_kind,
+            "note_index": None,
+            "chord_index": None,
+            "chord_note_index": None,
+        }
+        if (
+            len(target_tail) == 2
+            and target_tail[0] == "notes"
+            and isinstance(target_tail[1], int)
+        ):
+            runtime_locator["note_index"] = target_tail[1]
+        elif (
+            len(target_tail) == 4
+            and target_tail[0] == "chords"
+            and isinstance(target_tail[1], int)
+            and target_tail[2] == "notes"
+            and isinstance(target_tail[3], int)
+        ):
+            runtime_locator["chord_index"] = target_tail[1]
+            runtime_locator["chord_note_index"] = target_tail[3]
         result = {
             "candidate_id": self.candidate_id,
+            "review_item_id": self.review_item_id,
             "location": self.location,
             "member_path": self.member_path,
             "context_kind": self.context_kind,
@@ -129,6 +224,7 @@ class HopoReviewCandidate:
             "time": self.time,
             "string": self.string,
             "fret": self.fret,
+            "visual_target_ambiguous": self.visual_target_ambiguous,
             "techniques": {
                 "hammer_on": self.hammer_on,
                 "pull_off": self.pull_off,
@@ -142,6 +238,8 @@ class HopoReviewCandidate:
             "next": self.next.to_dict() if self.next else None,
             "blockers": list(self.blockers),
             "decision_names": list(self.decision_names),
+            "stream_context": stream_context,
+            "runtime_locator": runtime_locator,
             "previous_gap_seconds": (
                 round(self.time - self.previous.time, 4)
                 if self.previous else None
@@ -170,6 +268,9 @@ class HopoReviewPage:
     blocked_count: int
     offset: int
     limit: int
+    difficulty_scope: str
+    full_candidate_count: int
+    lower_candidate_count: int
 
 
 @dataclass(frozen=True)
@@ -178,12 +279,16 @@ class _HopoEvent:
     time_tick: int
     string: int
     fret: int
+    sustain: float
+    slide_to: int | None
+    slide_unpitch_to: int | None
     location: str
     path: tuple[str | int, ...] | None
     writable: bool
     hammer_on: bool
     pull_off: bool
     tap: bool
+    link_next: bool
     malformed_techniques: bool
     context_kind: str
 
@@ -252,6 +357,15 @@ def _hopo_events_for_container(
         ):
             return
         technique_values = [raw.get(field) for field in ("ho", "po", "tp")]
+        sustain = _hopo_number(raw.get("sus", 0.0))
+        if sustain is None or sustain < 0:
+            sustain = 0.0
+        slide_to = _hopo_integer(raw.get("sl"))
+        if slide_to is None or slide_to < 0:
+            slide_to = None
+        slide_unpitch_to = _hopo_integer(raw.get("slu"))
+        if slide_unpitch_to is None or slide_unpitch_to < 0:
+            slide_unpitch_to = None
         malformed = any(
             field in raw and not isinstance(raw.get(field), bool)
             for field in ("ho", "po", "tp")
@@ -261,12 +375,16 @@ def _hopo_events_for_container(
             time_tick=round(event_time * 10_000),
             string=string,
             fret=fret,
+            sustain=sustain,
+            slide_to=slide_to,
+            slide_unpitch_to=slide_unpitch_to,
             location=_display_path(member_path, location_path),
             path=path,
             writable=writable,
             hammer_on=technique_values[0] is True,
             pull_off=technique_values[1] is True,
             tap=technique_values[2] is True,
+            link_next=raw.get("ln") is True,
             malformed_techniques=malformed,
             context_kind=context_kind,
         ))
@@ -333,13 +451,31 @@ def _hopo_events_for_container(
     return events
 
 
+def _hopo_effective_fret(event: _HopoEvent) -> int:
+    """Return the fret at which an incoming same-string gesture begins."""
+    return event.slide_to if event.slide_to is not None else event.fret
+
+
+def _hopo_links_to_fret(event: _HopoEvent, fret: int) -> bool:
+    """Whether strict LinkNext makes ``fret`` a non-restruck destination."""
+    return bool(
+        event.link_next
+        and (event.fret == fret or event.slide_to == fret)
+    )
+
+
 def _neighbour(
     onset: list[_HopoEvent] | None,
+    *,
+    compare_slide_landings: bool = False,
 ) -> tuple[HopoNeighbour | None, str]:
     if not onset:
         return None, "missing"
     frets = {event.fret for event in onset}
     if len(frets) != 1:
+        return None, "ambiguous"
+    effective_frets = {_hopo_effective_fret(event) for event in onset}
+    if compare_slide_landings and len(effective_frets) != 1:
         return None, "ambiguous"
     # Multiple authored events at an onset can still provide unambiguous fret
     # evidence. It is writable only when exactly one explicit target exists.
@@ -350,6 +486,11 @@ def _neighbour(
     return HopoNeighbour(
         time=representative.time,
         fret=representative.fret,
+        effective_fret=_hopo_effective_fret(representative),
+        sustain=representative.sustain,
+        link_next=representative.link_next,
+        slide_to=representative.slide_to,
+        slide_unpitch_to=representative.slide_unpitch_to,
         location=location,
         path=path,
         writable=len(writable) == 1,
@@ -357,6 +498,7 @@ def _neighbour(
         pull_off=representative.pull_off,
         tap=representative.tap,
         malformed_techniques=representative.malformed_techniques,
+        context_kind=representative.context_kind,
     ), "usable"
 
 
@@ -365,19 +507,24 @@ def find_hopo_review_candidates(
     *,
     member_path: str = "",
     max_candidates: int = MAX_HOPO_REVIEW_CANDIDATES,
+    difficulty_scope: str = "all_authored",
 ) -> list[HopoReviewCandidate]:
     """Classify authored HO/PO ambiguity without changing the document.
 
     Each top-level arrangement and phrase difficulty is an independent stream.
     The immediately preceding same-string onset determines incoming HO/PO
-    direction. The next onset is deliberately evidence only and long gaps do
-    not suppress a candidate.
+    direction. A valid pitched slide target is the predecessor's effective
+    fret. The next onset is deliberately evidence only and long gaps by
+    themselves do not suppress a candidate. A strict authored LinkNext on the
+    immediately preceding same-fret or matching pitched-slide onset identifies
+    a held continuation.
     """
     page = page_hopo_review_candidates(
         document,
         member_path=member_path,
         offset=0,
         limit=max_candidates,
+        difficulty_scope=difficulty_scope,
     )
     return list(page.candidates)
 
@@ -388,6 +535,7 @@ def page_hopo_review_candidates(
     member_path: str = "",
     offset: int = 0,
     limit: int = MAX_HOPO_REVIEW_CANDIDATES,
+    difficulty_scope: str = "all_authored",
 ) -> HopoReviewPage:
     """Scan every candidate while retaining only one deterministic page."""
     return _scan_hopo_review_candidates(
@@ -396,6 +544,8 @@ def page_hopo_review_candidates(
         offset=offset,
         limit=limit,
         selected_ids=None,
+        selected_paths=None,
+        difficulty_scope=difficulty_scope,
     )
 
 
@@ -404,6 +554,7 @@ def select_hopo_review_candidates(
     *,
     member_path: str = "",
     candidate_ids: set[str] | frozenset[str],
+    difficulty_scope: str = "all_authored",
 ) -> HopoReviewPage:
     """Retain only requested server IDs while still counting every candidate."""
     return _scan_hopo_review_candidates(
@@ -412,6 +563,32 @@ def select_hopo_review_candidates(
         offset=0,
         limit=MAX_HOPO_REVIEW_CANDIDATES,
         selected_ids=frozenset(candidate_ids),
+        selected_paths=None,
+        difficulty_scope=difficulty_scope,
+    )
+
+
+def select_hopo_review_candidates_at_paths(
+    document: dict,
+    *,
+    member_path: str = "",
+    target_paths: set[tuple[str | int, ...]] | frozenset[tuple[str | int, ...]],
+    difficulty_scope: str = "all_authored",
+) -> HopoReviewPage:
+    """Retain candidates at exact mutable paths while still counting all issues.
+
+    Reviewed-repair outcome checks mutate only a bounded set of explicit note
+    objects. Selecting by path lets those checks detect newly created issues
+    without retaining an unbounded package-wide candidate list.
+    """
+    return _scan_hopo_review_candidates(
+        document,
+        member_path=member_path,
+        offset=0,
+        limit=MAX_HOPO_REVIEW_CANDIDATES,
+        selected_ids=None,
+        selected_paths=frozenset(target_paths),
+        difficulty_scope=difficulty_scope,
     )
 
 
@@ -422,6 +599,8 @@ def _scan_hopo_review_candidates(
     offset: int,
     limit: int,
     selected_ids: frozenset[str] | None,
+    selected_paths: frozenset[tuple[str | int, ...]] | None,
+    difficulty_scope: str,
 ) -> HopoReviewPage:
     if (
         not isinstance(document, dict)
@@ -429,12 +608,25 @@ def _scan_hopo_review_candidates(
         or offset < 0
         or not _integer(limit)
         or limit < 1
+        or difficulty_scope not in REVIEW_DIFFICULTY_SCOPES
     ):
-        return HopoReviewPage((), 0, 0, max(offset, 0) if _integer(offset) else 0, 0)
+        return HopoReviewPage(
+            (), 0, 0, max(offset, 0) if _integer(offset) else 0, 0,
+            difficulty_scope if difficulty_scope in REVIEW_DIFFICULTY_SCOPES else "all_authored",
+            0, 0,
+        )
     candidates: list[HopoReviewCandidate] = []
     total_count = 0
     blocked_count = 0
-    for parent_path, container in _arrangement_containers(document):
+    full_candidate_count = 0
+    lower_candidate_count = 0
+    for (
+        parent_path,
+        container,
+        stream_level_count,
+        stream_level_ordinal,
+        stream_is_full_difficulty,
+    ) in _hopo_arrangement_containers(document):
         events = _hopo_events_for_container(
             document, container, parent_path, member_path
         )
@@ -448,8 +640,12 @@ def _scan_hopo_review_candidates(
             ticks = sorted(onsets)
             for tick_index, tick in enumerate(ticks):
                 current_onset = onsets[tick]
-                previous, predecessor_state = _neighbour(
+                previous_onset = (
                     onsets[ticks[tick_index - 1]] if tick_index else None
+                )
+                previous, predecessor_state = _neighbour(
+                    previous_onset,
+                    compare_slide_landings=True,
                 )
                 next_note, next_state = _neighbour(
                     onsets[ticks[tick_index + 1]]
@@ -457,6 +653,11 @@ def _scan_hopo_review_candidates(
                     else None
                 )
                 current_frets = {event.fret for event in current_onset}
+                visual_target_counts: dict[int, int] = {}
+                for current_event in current_onset:
+                    visual_target_counts[current_event.fret] = (
+                        visual_target_counts.get(current_event.fret, 0) + 1
+                    )
                 for event in current_onset:
                     if not event.writable or event.path is None:
                         continue
@@ -474,18 +675,29 @@ def _scan_hopo_review_candidates(
                         blockers.append("malformed_technique_value")
                     if predecessor_state != "usable" or previous is None:
                         reasons.append("no_usable_predecessor")
-                    elif previous.fret == event.fret:
-                        reasons.append("same_fret")
-                    elif (
-                        event.hammer_on
-                        and not event.pull_off
-                        and previous.fret > event.fret
-                    ) or (
-                        event.pull_off
-                        and not event.hammer_on
-                        and previous.fret < event.fret
-                    ):
-                        reasons.append("direction_mismatch")
+                    else:
+                        # Strict LinkNext makes a same-fret continuation or a
+                        # matching pitched-slide landing non-restruck. Do not
+                        # infer a destination from an unpitched slide. Other
+                        # reasons (for example both flags) remain reviewable.
+                        linked_continuation = any(
+                            _hopo_links_to_fret(source, event.fret)
+                            for source in (previous_onset or ())
+                        )
+                        if linked_continuation:
+                            pass
+                        elif previous.effective_fret == event.fret:
+                            reasons.append("same_fret")
+                        elif (
+                            event.hammer_on
+                            and not event.pull_off
+                            and previous.effective_fret > event.fret
+                        ) or (
+                            event.pull_off
+                            and not event.hammer_on
+                            and previous.effective_fret < event.fret
+                        ):
+                            reasons.append("direction_mismatch")
                     if not reasons:
                         continue
 
@@ -505,7 +717,7 @@ def _scan_hopo_review_candidates(
                         )
                     )
                     if can_move:
-                        decisions.insert(-1, "move_to_next")
+                        decisions.append("move_to_next")
                     trigger_codes = tuple(
                         dict.fromkeys(HOPO_REVIEW_RULES[reason] for reason in reasons)
                     )
@@ -520,7 +732,12 @@ def _scan_hopo_review_candidates(
                         "po": event.pull_off,
                         "tp": event.tap,
                         "previous": (
-                            [previous.time, previous.fret, predecessor_state]
+                            [
+                                previous.time,
+                                previous.fret,
+                                previous.effective_fret,
+                                predecessor_state,
+                            ]
                             if previous else [None, None, predecessor_state]
                         ),
                         "next": (
@@ -532,12 +749,18 @@ def _scan_hopo_review_candidates(
                         candidate_id=_candidate_digest(identity),
                         member_path=member_path,
                         stream_path=parent_path,
+                        stream_level_count=stream_level_count,
+                        stream_level_ordinal=stream_level_ordinal,
+                        stream_is_full_difficulty=stream_is_full_difficulty,
                         target_path=event.path,
                         location=event.location,
                         context_kind=event.context_kind,
                         time=event.time,
                         string=string,
                         fret=event.fret,
+                        visual_target_ambiguous=(
+                            visual_target_counts[event.fret] > 1
+                        ),
                         hammer_on=event.hammer_on,
                         pull_off=event.pull_off,
                         tap=event.tap,
@@ -550,10 +773,22 @@ def _scan_hopo_review_candidates(
                         blockers=tuple(blockers),
                         decision_names=tuple(decisions),
                     )
+                    if stream_is_full_difficulty:
+                        full_candidate_count += 1
+                    else:
+                        lower_candidate_count += 1
+                    if (
+                        difficulty_scope == "full_only"
+                        and not stream_is_full_difficulty
+                    ):
+                        continue
                     if candidate.blockers:
                         blocked_count += 1
                     if selected_ids is not None:
                         if candidate.candidate_id in selected_ids:
+                            candidates.append(candidate)
+                    elif selected_paths is not None:
+                        if candidate.target_path in selected_paths:
                             candidates.append(candidate)
                     elif total_count >= offset and len(candidates) < limit:
                         candidates.append(candidate)
@@ -564,19 +799,137 @@ def _scan_hopo_review_candidates(
         blocked_count=blocked_count,
         offset=offset,
         limit=limit,
+        difficulty_scope=difficulty_scope,
+        full_candidate_count=full_candidate_count,
+        lower_candidate_count=lower_candidate_count,
     )
 
 
 def _finite_number(value) -> bool:
-    return (
-        isinstance(value, (int, float))
-        and not isinstance(value, bool)
-        and math.isfinite(value)
-    )
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(float(value))
+    except (OverflowError, ValueError):
+        return False
 
 
 def _integer(value) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _complete_json_value(value) -> bool:
+    """Return whether *value* is a finite value from the JSON data model.
+
+    ``json.dumps`` intentionally accepts a few convenient Python extensions,
+    including tuples and non-string mapping keys. Repair identity must be
+    stricter: it describes data that could have come from a Feedpak JSON
+    document and that can be rendered again without coercion.
+    """
+    if value is None or isinstance(value, (bool, str, int)):
+        return True
+    if isinstance(value, float):
+        return math.isfinite(value)
+    if isinstance(value, list):
+        return all(_complete_json_value(item) for item in value)
+    if isinstance(value, dict):
+        return all(
+            isinstance(key, str) and _complete_json_value(item)
+            for key, item in value.items()
+        )
+    return False
+
+
+def complete_json_identity(value) -> bytes | None:
+    """Return canonical bytes for a complete JSON value, or ``None``.
+
+    Object key order is ignored while array order and stored JSON scalar types
+    remain significant. In particular, Python's otherwise-equal ``True``,
+    ``1``, and ``1.0`` render differently. Unknown object properties are part
+    of the identity rather than being discarded by an event-specific key.
+    """
+    try:
+        if not _complete_json_value(value):
+            return None
+        return json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError, UnicodeEncodeError, RecursionError):
+        return None
+
+
+def repairable_tempo_event(value) -> bool:
+    """Whether one tempo event is safe to retain, deduplicate, or reorder."""
+    return bool(
+        isinstance(value, dict)
+        and _finite_number(value.get("time"))
+        and _finite_number(value.get("bpm"))
+        and value["bpm"] > 0
+    )
+
+
+def repairable_time_signature_event(value) -> bool:
+    """Whether one time-signature event has an unambiguous stored shape."""
+    if not isinstance(value, dict) or not _finite_number(value.get("time")):
+        return False
+    signature = value.get("ts")
+    return bool(
+        isinstance(signature, list)
+        and len(signature) == 2
+        and all(_integer(part) and part > 0 for part in signature)
+    )
+
+
+def repairable_tone_change(value) -> bool:
+    """Whether one tone change uses FeedBack's canonical, writable shape."""
+    if not isinstance(value, dict) or not _finite_number(value.get("t")):
+        return False
+    if not isinstance(value.get("name"), str) or not value["name"]:
+        return False
+    if "rig" not in value:
+        return True
+    rig = value["rig"]
+    return isinstance(rig, str) and bool(rig.strip())
+
+
+def timed_event_stream_eligibility(
+    items,
+    predicate: Callable[[object], bool],
+) -> bool:
+    """Return whether every item can participate in one structural repair.
+
+    Length is deliberately not part of this shared decision. Duplicate and
+    ordering planners independently decide whether a valid stream contains an
+    actual change. Empty and one-entry streams are therefore valid no-ops.
+    """
+    return bool(
+        isinstance(items, list)
+        and all(
+            predicate(item) and complete_json_identity(item) is not None
+            for item in items
+        )
+    )
+
+
+def effective_tones_source(
+    manifest_tones,
+    arrangement_tones,
+) -> tuple[str, dict | None]:
+    """Select the tone block with the same precedence as FeedBack core.
+
+    A nonempty manifest object overrides the arrangement JSON wholesale. An
+    empty manifest object is treated as absent and falls back to the inline
+    arrangement block.
+    """
+    if isinstance(manifest_tones, dict) and manifest_tones:
+        return "manifest", manifest_tones
+    if isinstance(arrangement_tones, dict):
+        return "arrangement", arrangement_tones
+    return "absent", None
 
 
 def _member_path(value) -> str | None:
@@ -622,6 +975,52 @@ def _arrangement_containers(
         for level_index, level in enumerate(levels):
             if isinstance(level, dict):
                 yield ("phrases", phrase_index, "levels", level_index), level
+
+
+def _hopo_arrangement_containers(
+    document: dict,
+) -> Iterator[
+    tuple[tuple[str | int, ...], dict, int | None, int | None, bool]
+]:
+    """Yield only streams the Player can select through Master Difficulty.
+
+    When a usable phrase ladder exists, FeedBack renders one authored level
+    per phrase and does not use the arrangement-root note arrays. The root is
+    the full/fallback stream only for arrangements without a usable ladder.
+    Keeping that distinction here avoids reviewing the same max-difficulty
+    event twice and gives every candidate a stable full-vs-lower label.
+    """
+    phrase_streams: list[
+        tuple[int, list[tuple[int, dict]]]
+    ] = []
+    phrases = document.get("phrases")
+    if isinstance(phrases, list):
+        for phrase_index, phrase in enumerate(phrases):
+            levels = phrase.get("levels") if isinstance(phrase, dict) else None
+            if not isinstance(levels, list):
+                continue
+            authored = [
+                (level_index, level)
+                for level_index, level in enumerate(levels)
+                if isinstance(level, dict)
+            ]
+            if authored:
+                phrase_streams.append((phrase_index, authored))
+
+    if not phrase_streams:
+        yield (), document, None, None, True
+        return
+
+    for phrase_index, authored in phrase_streams:
+        level_count = len(authored)
+        for ordinal, (level_index, level) in enumerate(authored):
+            yield (
+                ("phrases", phrase_index, "levels", level_index),
+                level,
+                level_count,
+                ordinal,
+                ordinal == level_count - 1,
+            )
 
 
 def reported_zero_length_handshape(value) -> bool:

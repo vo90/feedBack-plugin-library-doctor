@@ -82,7 +82,7 @@ export function createStatusView({
   function dashboardViewFor(status) {
     const safe = status || {};
     const total = Number(safe.summary?.total || 0);
-    if (safe.running || safe.repairing || safe.batch?.running) return 'scanning';
+    if (safe.running || ((safe.repairing || safe.batch?.running) && total === 0)) return 'scanning';
     if (['cancelled', 'incomplete', 'error'].includes(safe.stage)) return 'partial';
     if (total > 0 && safe.scan_current === false) return 'stale';
     if (total > 0) return 'complete';
@@ -298,6 +298,13 @@ export function createStatusView({
       }
     } else {
       setHidden(el.scanProvenance, true);
+    }
+    if (!running && status.target?.repairs_available === false) {
+      text(
+        el.scanWarning,
+        'This saved scan is no longer bound to an available folder. Scan that folder or package again before using Library Doctor repairs.',
+      );
+      setHidden(el.scanWarning, false);
     }
     actionRegistry.renderBatchStatus(batch, status);
     updateDashboardShell(status);

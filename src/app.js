@@ -4,6 +4,8 @@ import {
   API_ROOT as API,
   LEGACY_LAYOUT_QUERY,
   PAGE_SIZE,
+  PLAYER_REVIEW_LAYOUT_KEY,
+  REVIEW_DIFFICULTY_SCOPE_KEY,
   SONG_TOOL_PAGE_SIZE,
   WORKER_LIMIT_KEY,
   WORKER_MODE_KEY,
@@ -12,28 +14,37 @@ import { createDomPrimitives } from './dom.js';
 import { createFindingView } from './finding-view.js';
 import { createFormatters } from './formatters.js';
 import { createPlaybackController } from './playback-controller.js';
+import { subscribePlayerReviewPlaybackEvents } from './player-review-playback-events.js';
+import { createPlayerReviewController } from './player-review-controller.js';
 import { createPreviewController } from './preview-controller.js';
 import { createRepairController } from './repair-controller.js';
+import { createReviewDifficultyState } from './review-difficulty-state.js';
 import { createReviewedRepairController } from './reviewed-repair-controller.js';
 import { createResultsController } from './results-controller.js';
 import { createScanController } from './scan-controller.js';
 import { createSongToolsController } from './song-tools-controller.js';
 import { createStatusView } from './status-view.js';
 import { createLibraryDoctorStore } from './store.js';
-
 export function bootLibraryDoctor(hostWindow = window) {
   const window = hostWindow;
   const document = window.document;
   const fetch = window.fetch.bind(window);
   const localStorage = window.localStorage;
-
   const activation = createLibraryDoctorStore({ AbortController: window.AbortController });
   const { state } = activation;
-  const { request, requestGlobal, coreRequest } = createApiClient({
-    fetch,
-    activation,
-    apiRoot: API,
+  const difficultyState = createReviewDifficultyState({
+    document, localStorage, state, storageKey: REVIEW_DIFFICULTY_SCOPE_KEY,
+    refresh() {
+      if (!actions.loadResults) return;
+      state.offset = 0;
+      Promise.all([actions.refreshStatus(), actions.loadRules()]).then(() => actions.loadResults());
+    },
   });
+  const {
+    getReviewDifficultyScope, resetReviewDifficultyScope,
+    setReviewDifficultyDefaultScope, setReviewDifficultyScope,
+  } = difficultyState;
+  const { request, requestGlobal, coreRequest } = createApiClient({ fetch, activation, apiRoot: API });
   const {
     badge,
     createConfirmation,
@@ -89,6 +100,18 @@ export function bootLibraryDoctor(hostWindow = window) {
   });
   const findingView = createFindingView({ actions, document, make, number, state });
   const playback = createPlaybackController({ document, requestGlobal });
+  const playerReviewController = createPlayerReviewController({
+    actions,
+    document,
+    make,
+    number,
+    requestGlobal,
+    getReviewDifficultyScope,
+    layoutStorageKey: PLAYER_REVIEW_LAYOUT_KEY,
+    localStorage,
+    text,
+    window,
+  });
   const repairController = createRepairController({
     actions,
     apiRoot: API,
@@ -120,6 +143,8 @@ export function bootLibraryDoctor(hostWindow = window) {
     request,
     state,
     text,
+    playerReviewController,
+    getReviewDifficultyScope,
   });
   const previewController = createPreviewController({
     actions,
@@ -179,7 +204,6 @@ export function bootLibraryDoctor(hostWindow = window) {
     workerLimitKey: WORKER_LIMIT_KEY,
     workerModeKey: WORKER_MODE_KEY,
   });
-
   function elements() {
     if (el && el.root && el.root.isConnected) return el;
     const root = document.getElementById('plugin-library_doctor');
@@ -217,6 +241,8 @@ export function bootLibraryDoctor(hostWindow = window) {
       workerLimit: root.querySelector('#lh-worker-limit'),
       workerLimitWrap: root.querySelector('#lh-worker-limit-wrap'),
       workerSummary: root.querySelector('#lh-worker-summary'),
+      reviewDifficultyDefaultScope: root.querySelector('#lh-review-difficulty-scope'),
+      reviewDifficultyScope: root.querySelector('#lh-review-list-difficulty-scope'),
       targetPath: root.querySelector('#lh-target-path'),
       pickerNote: root.querySelector('#lh-picker-note'),
       chooseTarget: root.querySelector('#lh-choose-target'),
@@ -230,6 +256,8 @@ export function bootLibraryDoctor(hostWindow = window) {
       scanWarning: root.querySelector('#lh-scan-warning'),
       repairResult: root.querySelector('#lh-repair-result'),
       batchSection: root.querySelector('#lh-batch-section'),
+      batchPanel: root.querySelector('#lh-batch-panel'),
+      batchSummary: root.querySelector('#lh-batch-summary'),
       batchCopy: root.querySelector('#lh-batch-copy'),
       batchPreviewMedia: root.querySelector('#lh-batch-preview-media'),
       batchReview: root.querySelector('#lh-batch-review'),
@@ -262,11 +290,12 @@ export function bootLibraryDoctor(hostWindow = window) {
     };
     return el;
   }
-
   function bind() {
     if (el.root.dataset.libraryDoctorBound === '1') return;
     el.root.dataset.libraryDoctorBound = '1';
     scanController.loadWorkerSettings();
+    el.reviewDifficultyDefaultScope.value = state.reviewDifficultyDefaultScope;
+    el.reviewDifficultyScope.value = getReviewDifficultyScope();
     el.workspaceTabs.addEventListener('click', (event) => {
       const button = event.target.closest('button[data-workspace]');
       if (button) songToolsController.setWorkspace(button.dataset.workspace);
@@ -308,6 +337,12 @@ export function bootLibraryDoctor(hostWindow = window) {
       if (Number.isInteger(maximum) && maximum > 0) state.workerLimit = maximum;
       scanController.saveWorkerSettings();
       scanController.updateWorkerControls();
+    });
+    el.reviewDifficultyDefaultScope.addEventListener('change', () => {
+      setReviewDifficultyDefaultScope(el.reviewDifficultyDefaultScope.value);
+    });
+    el.reviewDifficultyScope.addEventListener('change', () => {
+      setReviewDifficultyScope(el.reviewDifficultyScope.value);
     });
     el.scan.addEventListener('click', () => scanController.startScan(false));
     el.scanAll.addEventListener('click', () => scanController.startScan(true));
@@ -377,6 +412,7 @@ export function bootLibraryDoctor(hostWindow = window) {
     const id = (event && event.detail && event.detail.id) || (event && event.id);
     const from = event && event.detail && event.detail.from;
     playback.handleScreenChanged(id, from);
+    playerReviewController.handleScreenChanged(id);
     if (id === 'plugin-library_doctor') enter();
     else if (state.active) leave();
   }
@@ -391,12 +427,26 @@ export function bootLibraryDoctor(hostWindow = window) {
       window.removeEventListener('feedBack:capabilities:ready', wire);
       [
         ['screen:changed', onScreenChanged],
-        ['song:loading', () => playback.setPlaybackPriority(true)],
-        ['song:stop', () => playback.setPlaybackPriority(false)],
+        ['song:loading', (event) => {
+          playback.setPlaybackPriority(true);
+          playerReviewController.handleSongLoading(event?.detail || event);
+        }],
+        ['song:loaded', (event) => playerReviewController.handleSongLoaded(event?.detail || event)],
+        ['song:ready', (event) => playerReviewController.handleSongReady(event?.detail || event)],
+        ['song:seek', (event) => playerReviewController.handleSongSeek(event?.detail || event)],
+        ['song:position-changed', (event) => playerReviewController.handleSongPosition(event?.detail || event)],
+        ['song:pause', (event) => playerReviewController.handleSongPause(event?.detail || event)],
+        ['song:resume', (event) => playerReviewController.handleSongResume(event?.detail || event)],
+        ['song:ended', () => playerReviewController.handleSongEnded()],
+        ['song:stop', () => {
+          playback.setPlaybackPriority(false);
+          playerReviewController.handleSongStop();
+        }],
       ].forEach(([name, handler]) => {
         const unsubscribe = window.feedBack.on(name, handler);
-        if (typeof unsubscribe === 'function') unsubscribers.push(unsubscribe);
+        unsubscribers.push(typeof unsubscribe === 'function' ? unsubscribe : () => window.feedBack?.off?.(name, handler));
       });
+      unsubscribers.push(...subscribePlayerReviewPlaybackEvents(window.feedBack.capabilities, playerReviewController.handlePlaybackCapabilityEvent));
     } else {
       if (!waitingForCapabilities) {
         waitingForCapabilities = true;
@@ -418,8 +468,8 @@ export function bootLibraryDoctor(hostWindow = window) {
     }
     wired = false;
     playback.destroy();
+    playerReviewController.destroy();
   }
-
   Object.assign(actions, {
     appendRepairPreviewAnswers: repairController.appendRepairPreviewAnswers,
     confirmAutomaticPreviewRepair: previewController.confirmAutomaticPreviewRepair,
@@ -432,6 +482,7 @@ export function bootLibraryDoctor(hostWindow = window) {
     loadRules: resultsController.loadRules,
     refreshSelectedSongTool: songToolsController.refreshSelectedSongTool,
     refreshStatus: scanController.refreshStatus,
+    resetReviewDifficultyScope,
     previewRepair: previewController.previewRepair,
     repairControls: repairController.repairControls,
     reviewedRepairControls: reviewedRepairController.reviewedRepairControls,

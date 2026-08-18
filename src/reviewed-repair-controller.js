@@ -9,6 +9,8 @@ export function createReviewedRepairController({
   request,
   state,
   text,
+  playerReviewController,
+  getReviewDifficultyScope,
 }) {
   let session = 0;
 
@@ -46,16 +48,56 @@ export function createReviewedRepairController({
   }
 
   function reviewedRepairControls(report, adapterId) {
-    if (report.features?.repair_scan_current === false) return null;
+    if (
+      report.features?.repair_scan_current === false
+    ) return null;
     const definition = state.reviewedRepairAdapters?.[adapterId];
     if (!definition) return null;
     const wrapper = make('div', 'lh-repair-action lh-reviewed-action');
-    const button = make('button', 'lh-button lh-button-primary', 'Open Reviewed repair');
-    button.type = 'button';
+    const availability = report.features?.player_review;
+    if (availability?.available === false) {
+      wrapper.appendChild(make(
+        'p',
+        'lh-repair-warning lh-player-review-unavailable',
+        availability.message || 'Manual Player Review is unavailable because this song is outside the configured song library. Automatic and standard repairs are still available.',
+      ));
+      return wrapper;
+    }
+    const difficultyScope = getReviewDifficultyScope();
+    const playerButton = make(
+      'button',
+      'lh-button lh-button-primary',
+      playerReviewController.canResume(report.package, adapterId, difficultyScope)
+        ? 'Resume Player Review'
+        : 'Review in Player',
+    );
+    playerButton.type = 'button';
     const region = make('div', 'lh-repair-preview lh-reviewed-region');
+    playerButton.addEventListener('click', async () => {
+      playerButton.disabled = true;
+      text(playerButton, 'Opening FeedBack Player…');
+      try {
+        region.replaceChildren();
+        const outcome = await playerReviewController.open(report, adapterId, difficultyScope);
+        if (outcome?.opened === false && outcome.message) {
+          region.appendChild(make('p', 'lh-repair-warning', outcome.message));
+        }
+      } finally {
+        playerButton.disabled = false;
+        text(
+          playerButton,
+          playerReviewController.canResume(report.package, adapterId, difficultyScope)
+            ? 'Resume Player Review'
+            : 'Review in Player',
+        );
+      }
+    });
+    const button = make('button', 'lh-button', 'Review with text only');
+    button.type = 'button';
     button.addEventListener('click', () => openReviewedRepair(
       report, adapterId, button, region,
     ));
+    wrapper.appendChild(playerButton);
     wrapper.appendChild(button);
     wrapper.appendChild(region);
     return wrapper;
@@ -70,7 +112,11 @@ export function createReviewedRepairController({
       const inspection = await request('/reviewed-repair/inspect', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ package: report.package, adapter_id: adapterId }),
+        body: JSON.stringify({
+          package: report.package,
+          adapter_id: adapterId,
+          difficulty_scope: getReviewDifficultyScope(),
+        }),
       });
       if (!state.active || mySession !== session) return;
       trigger.hidden = true;
@@ -78,7 +124,7 @@ export function createReviewedRepairController({
     } catch (error) {
       if (mySession !== session) return;
       trigger.disabled = false;
-      text(trigger, 'Open Reviewed repair');
+      text(trigger, 'Review with text only');
       region.appendChild(make('p', 'lh-inline-error', error.message));
     }
   }
@@ -90,9 +136,28 @@ export function createReviewedRepairController({
       (inspection.decision_definitions || []).map((item) => [item.name, item]),
     );
     const selected = new Map();
+    const skipped = new Set();
+    const optionStates = new Map();
     let index = 0;
     let previewNode = null;
+    let previewRevision = 0;
+    let previewTrigger = null;
     let pageRequest = 0;
+
+    function restorePreviewTrigger(button) {
+      if (!button) return;
+      button.disabled = false;
+      text(button, 'Preview selected changes');
+    }
+
+    function invalidatePreview() {
+      previewRevision += 1;
+      previewNode?.remove();
+      previewNode = null;
+      const trigger = previewTrigger;
+      previewTrigger = null;
+      restorePreviewTrigger(trigger);
+    }
 
     const shell = make('section', 'lh-reviewed-shell');
     shell.setAttribute('aria-label', inspection.title || 'Reviewed repair');
@@ -106,7 +171,7 @@ export function createReviewedRepairController({
       region.replaceChildren();
       trigger.hidden = false;
       trigger.disabled = false;
-      text(trigger, 'Open Reviewed repair');
+      text(trigger, 'Review with text only');
       focus(trigger);
     });
     header.appendChild(heading);
@@ -115,8 +180,16 @@ export function createReviewedRepairController({
     shell.appendChild(make(
       'p',
       '',
-      'Library Doctor shows evidence but does not choose a technique. Select an explicit decision for any notes you want to change.',
+      'Library Doctor checks every registered choice on a temporary copy and shows only changes that resolve this issue without introducing another finding. Nothing is preselected.',
     ));
+    const hiddenLower = Number(inspection.hidden_lower_candidate_count || 0);
+    if (hiddenLower > 0) {
+      shell.appendChild(make(
+        'p',
+        'lh-repair-warning',
+        `${number(hiddenLower)} lower-difficulty candidate${hiddenLower === 1 ? '' : 's'} hidden by “Full difficulty only.” Change the saved difficulty filter to show them without scanning again.`,
+      ));
+    }
     if (inspection.inspection_blocker) {
       shell.appendChild(make('p', 'lh-repair-warning', inspection.inspection_blocker));
     }
@@ -133,25 +206,87 @@ export function createReviewedRepairController({
 
     function changingDecisions() {
       return [...selected.entries()]
-        .filter(([, decision]) => decision !== 'leave_unchanged')
         .map(([candidateId, decision]) => ({ candidate_id: candidateId, decision }));
     }
 
     function allDecisions() {
-      return [...selected.entries()].map(([candidateId, decision]) => ({
-        candidate_id: candidateId,
-        decision,
-      }));
+      return changingDecisions();
+    }
+
+    function prefetchNextOptions(candidate) {
+      const nextCandidate = candidates.find(
+        (item) => item.candidate_id !== candidate.candidate_id
+          && !optionStates.has(item.candidate_id),
+      );
+      if (nextCandidate) loadOptions(nextCandidate, { prefetch: true });
+    }
+
+    function loadOptions(candidate, { prefetch = false } = {}) {
+      if (!candidate) return Promise.resolve(null);
+      const existing = optionStates.get(candidate.candidate_id);
+      if (existing?.status === 'ready') {
+        if (!prefetch) prefetchNextOptions(candidate);
+        return Promise.resolve(existing.response);
+      }
+      if (existing?.status === 'loading') return existing.promise;
+      const stateValue = {
+        status: 'loading', response: null, error: null, promise: null,
+      };
+      optionStates.set(candidate.candidate_id, stateValue);
+      stateValue.promise = request('/reviewed-repair/options', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          package: report.package,
+          adapter_id: currentInspection.adapter_id,
+          difficulty_scope: currentInspection.difficulty_scope || getReviewDifficultyScope(),
+          candidate_id: candidate.candidate_id,
+        }),
+      }).then((response) => {
+        if (
+          mySession !== session
+          || response?.candidate_id !== candidate.candidate_id
+          || response?.review_item_id !== candidate.review_item_id
+        ) return null;
+        stateValue.status = 'ready';
+        stateValue.response = response;
+        stateValue.promise = null;
+        (response.decision_definitions || []).forEach((item) => {
+          decisionDefinitions.set(item.name, item);
+        });
+        const selectedDecision = selected.get(candidate.candidate_id);
+        if (selectedDecision && !(response.decision_names || []).includes(selectedDecision)) {
+          invalidatePreview();
+          selected.delete(candidate.candidate_id);
+        }
+        if (!prefetch || candidates[index]?.candidate_id === candidate.candidate_id) {
+          renderCandidate();
+        }
+        if (!prefetch) {
+          prefetchNextOptions(candidate);
+        }
+        return response;
+      }).catch((error) => {
+        if (mySession !== session) return null;
+        stateValue.status = 'error';
+        stateValue.error = error;
+        stateValue.promise = null;
+        if (!prefetch || candidates[index]?.candidate_id === candidate.candidate_id) {
+          renderCandidate();
+        }
+        return null;
+      });
+      return stateValue.promise;
     }
 
     function renderFooter() {
       footer.replaceChildren();
       const changing = changingDecisions().length;
-      const skipped = [...selected.values()].filter((value) => value === 'leave_unchanged').length;
+      const skippedCount = skipped.size;
       footer.appendChild(make(
         'p',
         'lh-muted',
-        `${number(changing)} selected change${changing === 1 ? '' : 's'} · ${number(skipped)} explicitly left unchanged · ${number(Math.max(0, Number(currentInspection.total_candidate_count ?? candidates.length) - selected.size))} unresolved`,
+        `${number(changing)} selected change${changing === 1 ? '' : 's'} · ${number(skippedCount)} skipped for now · ${number(Math.max(0, Number(currentInspection.total_candidate_count ?? candidates.length) - selected.size - skippedCount))} unresolved`,
       ));
       const controls = make('div', 'lh-repair-buttons');
       const previousPage = make('button', 'lh-button', 'Previous page');
@@ -169,8 +304,16 @@ export function createReviewedRepairController({
         currentInspection.previous_offset,
         true,
       ));
-      previous.addEventListener('click', () => { index -= 1; renderCandidate(); });
-      next.addEventListener('click', () => { index += 1; renderCandidate(); });
+      previous.addEventListener('click', () => {
+        invalidatePreview();
+        index -= 1;
+        renderCandidate();
+      });
+      next.addEventListener('click', () => {
+        invalidatePreview();
+        index += 1;
+        renderCandidate();
+      });
       nextPage.addEventListener('click', () => loadPage(
         currentInspection.next_offset,
         false,
@@ -188,10 +331,20 @@ export function createReviewedRepairController({
       controls.appendChild(nextPage);
       controls.appendChild(preview);
       footer.appendChild(controls);
+      if (skippedCount) {
+        const reviewSkipped = make('button', 'lh-button', 'Review skipped issues');
+        reviewSkipped.type = 'button';
+        reviewSkipped.addEventListener('click', async () => {
+          skipped.clear();
+          await loadPage(0, false);
+        });
+        footer.appendChild(reviewSkipped);
+      }
     }
 
     async function loadPage(offset, focusLast) {
       if (!Number.isInteger(offset) || offset < 0) return;
+      invalidatePreview();
       const requestNumber = ++pageRequest;
       text(live, 'Loading another bounded candidate page.');
       try {
@@ -201,6 +354,7 @@ export function createReviewedRepairController({
           body: JSON.stringify({
             package: report.package,
             adapter_id: inspection.adapter_id,
+            difficulty_scope: currentInspection.difficulty_scope || getReviewDifficultyScope(),
             offset,
             limit: currentInspection.limit,
           }),
@@ -303,42 +457,106 @@ export function createReviewedRepairController({
         candidateRegion.appendChild(make(
           'p',
           'lh-inline-error',
-          `This candidate cannot be mutated here: ${candidate.blockers.join(', ')}. You may leave it unchanged and continue.`,
+          `This candidate cannot be mutated here: ${candidate.blockers.join(', ')}. You may skip it for now and continue.`,
         ));
       }
-      const fieldset = make('fieldset', 'lh-reviewed-decisions');
-      fieldset.appendChild(make('legend', '', 'Choose what this note should store'));
-      (candidate.decision_names || []).forEach((name) => {
-        const definition = decisionDefinitions.get(name);
-        if (!definition) return;
-        const label = make('label', 'lh-reviewed-choice');
-        const radio = document.createElement('input');
-        radio.type = 'radio';
-        radio.name = `reviewed-${candidate.candidate_id}`;
-        radio.value = name;
-        radio.checked = selected.get(candidate.candidate_id) === name;
-        radio.disabled = Boolean(candidate.blockers?.length && name !== 'leave_unchanged');
-        radio.addEventListener('change', () => {
-          const candidateLimit = Number(
-            state.reviewedRepairAdapters?.[inspection.adapter_id]?.candidate_limit || 2000,
-          );
-          if (!selected.has(candidate.candidate_id) && selected.size >= candidateLimit) {
-            radio.checked = false;
-            text(live, `This bounded session accepts ${candidateLimit} decisions. Preview and apply those choices before continuing.`);
-            return;
-          }
-          selected.set(candidate.candidate_id, name);
-          text(live, `${definition.label} selected for candidate ${globalIndex}.`);
-          renderFooter();
+      const optionState = optionStates.get(candidate.candidate_id);
+      if (!optionState) loadOptions(candidate);
+      const optionResponse = optionState?.status === 'ready' ? optionState.response : null;
+      if (!optionState || optionState.status === 'loading') {
+        candidateRegion.appendChild(make(
+          'p',
+          'lh-muted',
+          'Checking every possible choice against a temporary copy of this arrangement…',
+        ));
+      } else if (optionState.status === 'error') {
+        const errorPanel = make('div', 'lh-inline-error');
+        errorPanel.appendChild(make(
+          'p',
+          '',
+          optionState.error?.message || 'Library Doctor could not evaluate this issue.',
+        ));
+        const retry = make('button', 'lh-button', 'Retry choice check');
+        retry.type = 'button';
+        retry.addEventListener('click', () => {
+          invalidatePreview();
+          optionStates.delete(candidate.candidate_id);
+          renderCandidate();
         });
-        const copy = make('span');
-        copy.appendChild(make('strong', '', definition.label));
-        copy.appendChild(make('small', '', definition.description));
-        label.appendChild(radio);
-        label.appendChild(copy);
-        fieldset.appendChild(label);
+        errorPanel.appendChild(retry);
+        candidateRegion.appendChild(errorPanel);
+      } else if ((optionResponse?.decision_names || []).length) {
+        const fieldset = make('fieldset', 'lh-reviewed-decisions');
+        fieldset.appendChild(make('legend', '', 'Choose a change that resolves this issue'));
+        optionResponse.decision_names.forEach((name) => {
+          const definition = decisionDefinitions.get(name);
+          if (!definition) return;
+          const label = make('label', 'lh-reviewed-choice');
+          const radio = document.createElement('input');
+          radio.type = 'radio';
+          radio.name = `reviewed-${candidate.candidate_id}`;
+          radio.value = name;
+          radio.checked = selected.get(candidate.candidate_id) === name;
+          radio.disabled = false;
+          radio.addEventListener('change', () => {
+            const candidateLimit = Number(
+              state.reviewedRepairAdapters?.[inspection.adapter_id]?.candidate_limit || 2000,
+            );
+            if (!selected.has(candidate.candidate_id) && selected.size >= candidateLimit) {
+              radio.checked = false;
+              text(live, `This bounded session accepts ${candidateLimit} decisions. Preview and apply those choices before continuing.`);
+              return;
+            }
+            invalidatePreview();
+            skipped.delete(candidate.review_item_id);
+            selected.set(candidate.candidate_id, name);
+            text(live, `${definition.label} selected for candidate ${globalIndex}.`);
+            renderFooter();
+          });
+          const copy = make('span');
+          copy.appendChild(make('strong', '', definition.label));
+          copy.appendChild(make('small', '', definition.description));
+          label.appendChild(radio);
+          label.appendChild(copy);
+          fieldset.appendChild(label);
+        });
+        candidateRegion.appendChild(fieldset);
+      } else {
+        candidateRegion.appendChild(make(
+          'p',
+          'lh-repair-warning',
+          optionResponse?.message
+            || 'No registered HO/PO change resolves this issue without creating another finding. Skip it for now and edit the tab manually.',
+        ));
+      }
+
+      const skipButton = make(
+        'button',
+        'lh-button',
+        skipped.has(candidate.review_item_id) ? 'Review this issue again' : 'Skip for now',
+      );
+      skipButton.type = 'button';
+      skipButton.addEventListener('click', async () => {
+        invalidatePreview();
+        if (skipped.has(candidate.review_item_id)) {
+          skipped.delete(candidate.review_item_id);
+          text(live, `Candidate ${globalIndex} is back in the current review pass.`);
+          renderCandidate();
+          return;
+        }
+        selected.delete(candidate.candidate_id);
+        skipped.add(candidate.review_item_id);
+        text(live, `Candidate ${globalIndex} was skipped for now and remains unresolved.`);
+        if (index < candidates.length - 1) {
+          index += 1;
+          renderCandidate();
+        } else if (currentInspection.has_next) {
+          await loadPage(currentInspection.next_offset, false);
+        } else {
+          renderCandidate();
+        }
       });
-      candidateRegion.appendChild(fieldset);
+      candidateRegion.appendChild(skipButton);
 
       if (state.reviewedRepairAdapters?.[inspection.adapter_id]?.audio_support) {
         const audioButton = make('button', 'lh-button', 'Listen to short passage');
@@ -364,9 +582,11 @@ export function createReviewedRepairController({
     }
 
     async function previewReviewed(reportValue, inspectionValue, decisions, button, activeSession) {
+      invalidatePreview();
+      const activePreviewRevision = previewRevision;
+      previewTrigger = button;
       button.disabled = true;
       text(button, 'Building exact preview...');
-      if (previewNode) previewNode.remove();
       try {
         const plan = await request('/reviewed-repair/preview', {
           method: 'POST',
@@ -374,10 +594,15 @@ export function createReviewedRepairController({
           body: JSON.stringify({
             package: reportValue.package,
             adapter_id: inspectionValue.adapter_id,
+            difficulty_scope: inspectionValue.difficulty_scope || getReviewDifficultyScope(),
             decisions,
           }),
         });
-        if (activeSession !== session || !state.active) return;
+        if (
+          activeSession !== session
+          || !state.active
+          || activePreviewRevision !== previewRevision
+        ) return;
         previewNode = make('section', 'lh-repair-card lh-reviewed-preview');
         const previewHeading = make('h5', '', 'Exact reviewed-repair preview');
         previewHeading.tabIndex = -1;
@@ -385,7 +610,7 @@ export function createReviewedRepairController({
         previewNode.appendChild(make(
           'p',
           '',
-          `${number(plan.changing_count)} note decision${plan.changing_count === 1 ? '' : 's'} will change. ${number(plan.skipped_count)} are explicitly left unchanged, ${number(plan.unresolved_count)} remain unresolved, and ${number(plan.remaining_review_count)} candidates are expected to remain visible after these choices.`,
+          `${number(plan.changing_count)} outcome-checked note decision${plan.changing_count === 1 ? '' : 's'} will change. ${number(plan.unresolved_count)} unselected issue${Number(plan.unresolved_count) === 1 ? '' : 's'} remain in this review pass, and ${number(plan.remaining_review_count)} candidate${Number(plan.remaining_review_count) === 1 ? '' : 's'} are expected to remain after these choices. Skipped issues are not included.`,
         ));
         const list = make('ul', 'lh-all-safe-list');
         Object.entries(plan.decision_counts || {})
@@ -430,6 +655,7 @@ export function createReviewedRepairController({
         cancel.addEventListener('click', () => {
           previewNode.remove();
           previewNode = null;
+          restorePreviewTrigger(button);
           focus(button);
         });
         previewActions.appendChild(apply);
@@ -438,10 +664,14 @@ export function createReviewedRepairController({
         shell.appendChild(previewNode);
         focus(previewHeading);
       } catch (error) {
-        if (activeSession !== session) return;
-        button.disabled = false;
-        text(button, 'Preview selected changes');
+        if (
+          activeSession !== session
+          || activePreviewRevision !== previewRevision
+        ) return;
         footer.appendChild(make('p', 'lh-inline-error', error.message));
+      } finally {
+        restorePreviewTrigger(button);
+        if (previewTrigger === button) previewTrigger = null;
       }
     }
 
@@ -463,6 +693,7 @@ export function createReviewedRepairController({
           body: JSON.stringify({
             package: reportValue.package,
             adapter_id: inspectionValue.adapter_id,
+            difficulty_scope: inspectionValue.difficulty_scope || getReviewDifficultyScope(),
             decisions,
             plan_id: plan.plan_id,
             request_id: `reviewed-${Date.now()}`,
@@ -476,7 +707,7 @@ export function createReviewedRepairController({
         region.replaceChildren();
         trigger.hidden = false;
         trigger.disabled = false;
-        text(trigger, 'Open Reviewed repair');
+        text(trigger, 'Review with text only');
         actions.renderRepairResult(result);
         await actions.refreshStatus();
         await Promise.all([

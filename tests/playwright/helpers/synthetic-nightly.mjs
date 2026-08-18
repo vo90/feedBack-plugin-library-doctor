@@ -178,7 +178,7 @@ export async function openSyntheticLibraryDoctor(page, {
         json: {
           schema: 'library_doctor.reviewed_repair_catalog.v1',
           catalog_version: 'synthetic-contract-v1',
-          registry_version: 'reviewed-repairs-2',
+          registry_version: 'reviewed-repairs-5',
           items: [],
         },
       });
@@ -207,8 +207,23 @@ export async function openSyntheticLibraryDoctor(page, {
   const root = page.locator('#plugin-library_doctor');
   const heading = root.locator('#lh-title');
   await expect(heading, `Host dialogs: ${dialogs.join(' | ')}`).toBeAttached({ timeout: 12_000 });
-  if (!(await root.evaluate((node) => node.classList.contains('active')))) await card.click();
-  await expect(root).toHaveClass(/active/);
+  // The startup-status refetch may replace a newly injected screen until the
+  // module script's load event records this exact version as hydrated. Open
+  // only that final element, otherwise the test can activate a root that the
+  // host legitimately replaces a moment later.
+  await page.waitForFunction(() => {
+    const pluginRoot = document.getElementById('plugin-library_doctor');
+    const loaded = window.feedBack?._loadedPluginScripts;
+    return pluginRoot
+      && loaded instanceof Map
+      && loaded.get('library_doctor') === pluginRoot.dataset.pluginVersion;
+  }, null, { timeout: 12_000 });
+  await expect(root.locator('#lh-module-status')).toBeHidden({ timeout: 12_000 });
+  if (!(await root.evaluate((node) => node.classList.contains('active')))) {
+    await expect(card).toBeVisible();
+    await card.click();
+  }
+  await expect(root).toHaveClass(/active/, { timeout: 12_000 });
   await expect(heading).toBeVisible();
   return { root, requests };
 }

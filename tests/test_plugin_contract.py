@@ -44,11 +44,29 @@ def test_manifest_uses_stable_plugin_namespace_and_existing_files():
     assert manifest["id"] == "library_doctor"
     assert re.fullmatch(r"[a-z][a-z0-9_]*", manifest["id"])
     assert manifest["name"] == "Library Doctor"
-    assert manifest["version"] == "0.44.0"
+    assert manifest["version"] == "0.45.0"
     assert manifest["private"] is False
     assert manifest["scriptType"] == "module"
     assert manifest["minHost"] == "0.3.0-alpha.1"
     assert manifest["diagnostics"] == {"callable": "diagnostics:collect"}
+    assert manifest["standards"] == [
+        "capability-pipelines.v1",
+        "plugin-runtime-idempotent.v1",
+    ]
+    assert manifest["capabilities"]["playback"]["roles"] == [
+        "requester",
+        "observer",
+    ]
+    assert "start" in manifest["capabilities"]["playback"]["requests"]
+    assert manifest["capabilities"]["chart-transform"] == {
+        "roles": ["provider"],
+        "operations": ["chart.transform"],
+        "mode": "active",
+        "compatibility": "none",
+        "ownership": "multi-provider",
+        "safety": "safe",
+        "version": 1,
+    }
     assert manifest["nav"] == {
         "label": "Library Doctor",
         "screen": "plugin-library_doctor",
@@ -69,7 +87,8 @@ def test_screen_contains_every_element_required_by_the_script():
         "lh-scan", "lh-scan-all", "lh-cancel", "lh-status", "lh-scan-live",
         "lh-progress-count", "lh-progress", "lh-error", "lh-search",
         "lh-scan-warning", "lh-repair-result", "lh-scan-provenance",
-        "lh-batch-section", "lh-batch-copy", "lh-batch-preview-media", "lh-batch-review",
+        "lh-batch-section", "lh-batch-panel", "lh-batch-summary", "lh-batch-copy",
+        "lh-batch-preview-media", "lh-batch-review",
         "lh-batch-cancel", "lh-batch-progress", "lh-batch-status",
         "lh-batch-count", "lh-batch-live-counts", "lh-batch-progress-bar", "lh-batch-preview",
         "lh-batch-result",
@@ -106,7 +125,7 @@ def test_phase1_browser_fixtures_cover_every_audited_shell_state():
         assert f"'{state_name}'" in script
 
 
-def test_phase1_shell_is_progressive_result_first_and_reversible():
+def test_phase1_shell_is_progressive_and_reversible():
     screen = _source("screen.html")
     script = _source("screen.js")
 
@@ -114,7 +133,7 @@ def test_phase1_shell_is_progressive_result_first_and_reversible():
     assert '<details id="lh-scan-options"' in screen
     assert '<details id="lh-more-filters"' in screen
     assert '<details id="lh-scan-details"' in screen
-    assert screen.index('id="lh-results"') < screen.index('id="lh-batch-section"')
+    assert screen.index('id="lh-batch-section"') < screen.index('id="lh-results"')
     assert screen.index('id="lh-health-workspace"') < screen.index('id="lh-repair-result"')
     assert screen.index('id="lh-repair-result"') < screen.index('id="lh-song-tools-workspace"')
     assert "libraryDoctorLayout" in script
@@ -177,11 +196,17 @@ def test_screen_prioritizes_active_song_sessions_over_scanning():
     styles = (ROOT / "assets" / "library-doctor.css").read_text(encoding="utf-8")
 
     assert re.search(
-        r"\['song:loading',\s*\(\) => playback\.setPlaybackPriority\(true\)\]",
+        r"\['song:loading',\s*\(event\) => \{\s*"
+        r"playback\.setPlaybackPriority\(true\);\s*"
+        r"playerReviewController\.handleSongLoading\(event\?\.detail \|\| event\);\s*"
+        r"\}\]",
         script,
     )
     assert re.search(
-        r"\['song:stop',\s*\(\) => playback\.setPlaybackPriority\(false\)\]",
+        r"\['song:stop',\s*\(\) => \{\s*"
+        r"playback\.setPlaybackPriority\(false\);\s*"
+        r"playerReviewController\.handleSongStop\(\);\s*"
+        r"\}\]",
         script,
     )
     assert "const unsubscribe = window.feedBack.on(name, handler)" in script
@@ -193,6 +218,27 @@ def test_screen_prioritizes_active_song_sessions_over_scanning():
     assert "Library Doctor scan paused · resumes when you exit" in script
     assert "You can keep playing during a scan" in screen
     assert ".lh-playback-notice" in styles
+
+
+def test_player_review_declares_scope_and_uses_capability_owned_player_surfaces():
+    script = _source("screen.js")
+    screen = _source("screen.html")
+    styles = _source("assets/library-doctor.css")
+
+    assert "Manual Player Review:" in screen
+    assert "only for songs inside the configured song library" in screen
+    assert "Review in Player" in script
+    assert "Accept & Next issue" in script
+    assert "Apply accepted changes" in script
+    assert "Undo applied group" in script
+    assert "Finalize applied group" in script
+    assert "Return to Library Doctor" in script
+    assert "dispatch('playback', 'start'" in script
+    assert "dispatch('chart-transform', 'register-provider'" in script
+    assert "authorization: 'user-action'" in script
+    assert "window.playSong" not in _source("src/player-review-controller.js")
+    assert "window.showScreen" not in _source("src/player-review-controller.js")
+    assert ".lh-player-review-overlay" in styles
 
 
 def test_screen_uses_catalog_labels_and_scoped_accessibility_announcements():

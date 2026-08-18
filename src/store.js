@@ -18,6 +18,7 @@ function initialState() {
     allSafeRepair: null,
     batch: null,
     batchRenderKey: '',
+    batchAttentionKey: '',
     latestRepair: null,
     dismissedRepairId: null,
     dashboardView: '',
@@ -26,6 +27,8 @@ function initialState() {
     targetPaths: { folder: '', file: '' },
     workerMode: 'automatic',
     workerLimit: 1,
+    reviewDifficultyDefaultScope: 'full_only',
+    reviewDifficultyScope: 'full_only',
     workspace: 'health',
     songTools: {
       query: '',

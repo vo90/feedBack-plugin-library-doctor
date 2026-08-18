@@ -93,6 +93,62 @@ def test_hopo_classifier_keeps_phrase_difficulties_independent():
     assert candidates[0].stream_path != candidates[1].stream_path
 
 
+def test_hopo_difficulty_scope_uses_runtime_levels_and_keeps_lower_counts():
+    document = {
+        # FeedBack uses the phrase ladder while one exists, so this authored
+        # root copy must not create a duplicate review candidate.
+        "notes": [
+            {"t": 1.0, "s": 0, "f": 3},
+            {"t": 2.0, "s": 0, "f": 5, "ho": True, "po": True},
+        ],
+        "chords": [],
+        "phrases": [{
+            "levels": [
+                {
+                    "notes": [
+                        {"t": 1.0, "s": 0, "f": 3},
+                        {"t": 2.0, "s": 0, "f": 5, "po": True},
+                    ],
+                    "chords": [],
+                },
+                {
+                    "notes": [
+                        {"t": 1.0, "s": 0, "f": 7},
+                        {"t": 2.0, "s": 0, "f": 5, "ho": True},
+                    ],
+                    "chords": [],
+                },
+            ],
+        }],
+    }
+
+    all_authored = repair_eligibility.page_hopo_review_candidates(
+        document, difficulty_scope="all_authored"
+    )
+    full_only = repair_eligibility.page_hopo_review_candidates(
+        document, difficulty_scope="full_only"
+    )
+
+    assert all_authored.total_count == 2
+    assert all_authored.full_candidate_count == 1
+    assert all_authored.lower_candidate_count == 1
+    assert [
+        candidate.to_dict()["stream_context"]["difficulty_scope"]
+        for candidate in all_authored.candidates
+    ] == ["lower", "full"]
+    assert all_authored.candidates[0].to_dict()["stream_context"][
+        "mastery_fraction"
+    ] == 0.25
+    assert all_authored.candidates[1].to_dict()["stream_context"][
+        "mastery_fraction"
+    ] == 1.0
+    assert full_only.total_count == 1
+    assert full_only.full_candidate_count == 1
+    assert full_only.lower_candidate_count == 1
+    assert len(full_only.candidates) == 1
+    assert full_only.candidates[0].stream_is_full_difficulty is True
+
+
 def test_hopo_candidate_id_is_stable_and_bound_to_member_and_context():
     document = {
         "notes": [
@@ -147,7 +203,6 @@ def test_reviewed_registry_declares_closed_hopo_adapter_contract():
         "convert_to_tap",
         "remove_hopo",
         "move_to_next",
-        "leave_unchanged",
     }
 
 
@@ -162,6 +217,175 @@ def test_correct_direction_lone_hopo_is_not_a_review_candidate():
     }
 
     assert repair_eligibility.find_hopo_review_candidates(document) == []
+
+
+def test_link_next_same_fret_partial_chord_continuation_is_not_a_hopo_issue():
+    document = {
+        "chords": [{
+            "t": 19.756001,
+            "notes": [
+                {"s": 1, "f": 0, "sus": 0.207, "ln": True},
+                {"s": 2, "f": 0, "sus": 0.207, "ln": True},
+                {"s": 3, "f": 1, "sus": 0.207, "ln": True},
+            ],
+        }],
+        "notes": [
+            {"t": 19.962999, "s": 1, "f": 2, "ho": True},
+            {"t": 19.962999, "s": 2, "f": 2, "ho": True},
+            {"t": 19.962999, "s": 3, "f": 1, "ho": True},
+        ],
+    }
+
+    assert repair_eligibility.find_hopo_review_candidates(document) == []
+
+
+@pytest.mark.parametrize(
+    ("source_kind", "target_kind"),
+    [
+        ("standalone", "standalone"),
+        ("standalone", "chord_member"),
+        ("chord_member", "standalone"),
+        ("chord_member", "chord_member"),
+    ],
+)
+def test_link_next_matching_pitched_slide_destination_is_not_a_hopo_issue(
+    source_kind,
+    target_kind,
+):
+    document = {"notes": [], "chords": []}
+    source = {
+        "s": 0,
+        "f": 3,
+        "sus": 1.0,
+        "sl": 7,
+        "ln": True,
+    }
+    target = {"s": 0, "f": 7, "ho": True}
+    if source_kind == "standalone":
+        document["notes"].append({"t": 1.0, **source})
+    else:
+        document["chords"].append({"t": 1.0, "notes": [source]})
+    if target_kind == "standalone":
+        document["notes"].append({"t": 2.0, **target})
+    else:
+        document["chords"].append({"t": 2.0, "notes": [target]})
+
+    assert repair_eligibility.find_hopo_review_candidates(document) == []
+
+
+@pytest.mark.parametrize(
+    ("target_fret", "technique", "expected_reasons"),
+    [
+        (5, {"ho": True}, ("direction_mismatch",)),
+        (5, {"po": True}, None),
+        (7, {"ho": True}, ("same_fret",)),
+    ],
+)
+def test_pitched_slide_landing_fret_drives_incoming_hopo_direction(
+    target_fret,
+    technique,
+    expected_reasons,
+):
+    document = {
+        "notes": [
+            {"t": 1.0, "s": 0, "f": 3, "sus": 1.0, "sl": 7},
+            {"t": 2.0, "s": 0, "f": target_fret, **technique},
+        ],
+        "chords": [],
+    }
+
+    candidates = repair_eligibility.find_hopo_review_candidates(document)
+
+    if expected_reasons is None:
+        assert candidates == []
+        return
+    assert len(candidates) == 1
+    assert candidates[0].reasons == expected_reasons
+    assert candidates[0].previous.fret == 3
+    assert candidates[0].previous.effective_fret == 7
+    assert candidates[0].previous.to_dict()["techniques"]["slide_to"] == 7
+
+
+def test_unpitched_slide_does_not_claim_an_exact_link_next_destination():
+    document = {
+        "notes": [
+            {
+                "t": 1.0,
+                "s": 0,
+                "f": 3,
+                "sus": 1.0,
+                "slu": 7,
+                "ln": True,
+            },
+            {"t": 2.0, "s": 0, "f": 7, "po": True},
+        ],
+        "chords": [],
+    }
+
+    candidate = repair_eligibility.find_hopo_review_candidates(document)[0]
+
+    assert candidate.reasons == ("direction_mismatch",)
+    assert candidate.previous.effective_fret == 3
+    assert candidate.previous.slide_unpitch_to == 7
+
+
+@pytest.mark.parametrize("link_value", [None, "true", 1])
+def test_same_fret_transition_without_strict_link_next_remains_reviewable(
+    link_value,
+):
+    source = {"t": 1.0, "s": 0, "f": 5}
+    if link_value is not None:
+        source["ln"] = link_value
+    document = {
+        "notes": [
+            source,
+            {"t": 2.0, "s": 0, "f": 5, "ho": True},
+        ],
+        "chords": [],
+    }
+
+    candidate = repair_eligibility.find_hopo_review_candidates(document)[0]
+
+    assert candidate.reasons == ("same_fret",)
+
+
+def test_link_next_does_not_hide_conflicting_or_changed_fret_hopo_issues():
+    document = {
+        "notes": [
+            {"t": 1.0, "s": 0, "f": 5, "ln": True},
+            {"t": 2.0, "s": 0, "f": 5, "ho": True, "po": True},
+            {"t": 1.0, "s": 1, "f": 3, "ln": True, "sl": 6},
+            {"t": 2.0, "s": 1, "f": 7, "po": True},
+            {"t": 1.0, "s": 2, "f": 3, "ln": True, "sl": 7},
+            {"t": 2.0, "s": 2, "f": 7, "ho": True, "po": True},
+        ],
+        "chords": [],
+    }
+
+    candidates = repair_eligibility.find_hopo_review_candidates(document)
+
+    assert candidates[0].reasons == ("both_flags",)
+    assert candidates[1].reasons == ("direction_mismatch",)
+    assert candidates[2].reasons == ("both_flags",)
+
+
+def test_hopo_path_selection_retains_only_exact_mutable_targets():
+    document = {
+        "notes": [
+            {"t": 1.0, "s": 0, "f": 3},
+            {"t": 2.0, "s": 0, "f": 5, "po": True},
+            {"t": 1.0, "s": 1, "f": 7, "ho": True},
+        ],
+        "chords": [],
+    }
+
+    selected = repair_eligibility.select_hopo_review_candidates_at_paths(
+        document,
+        target_paths=frozenset({("notes", 1)}),
+    )
+
+    assert selected.total_count == 2
+    assert [item.target_path for item in selected.candidates] == [("notes", 1)]
 
 
 @pytest.mark.parametrize(
@@ -204,6 +428,48 @@ def test_template_chord_is_context_but_explicit_chord_member_is_writable():
     assert candidate.previous.writable is False
     assert candidate.context_kind == "chord_member"
     assert candidate.target_path == ("chords", 1, "notes", 0)
+
+
+@pytest.mark.parametrize(
+    "coincident_chord",
+    [
+        {"t": 2.0, "notes": [{"s": 0, "f": 5}]},
+        {"t": 2.0, "id": 0},
+    ],
+)
+def test_hopo_candidate_marks_coincident_visual_representations_ambiguous(
+    coincident_chord,
+):
+    document = {
+        "templates": [{"frets": [5, -1, -1, -1, -1, -1]}],
+        "notes": [
+            {"t": 1.0, "s": 0, "f": 3},
+            {"t": 2.0, "s": 0, "f": 5, "po": True},
+        ],
+        "chords": [coincident_chord],
+    }
+
+    candidate = repair_eligibility.find_hopo_review_candidates(document)[0]
+
+    assert candidate.visual_target_ambiguous is True
+    assert candidate.to_dict()["visual_target_ambiguous"] is True
+    assert candidate.blockers == ()
+    assert candidate.decision_names
+
+
+def test_hopo_candidate_marks_unique_visual_representation_unambiguous():
+    document = {
+        "notes": [
+            {"t": 1.0, "s": 0, "f": 3},
+            {"t": 2.0, "s": 0, "f": 5, "po": True},
+        ],
+        "chords": [],
+    }
+
+    candidate = repair_eligibility.find_hopo_review_candidates(document)[0]
+
+    assert candidate.visual_target_ambiguous is False
+    assert candidate.to_dict()["visual_target_ambiguous"] is False
 
 
 def test_ambiguous_predecessor_and_malformed_tap_are_visible_blockers():

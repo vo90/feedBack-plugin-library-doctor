@@ -55,6 +55,10 @@ export function createRepairController({
         }
         return 'Restored the exact original preview state from recovery storage. The repaired preview recommendation is expected to return.';
       }
+      if (restoredChange.change_kind === 'omit_empty') {
+        const restoredItem = restoredChange.item_name || 'optional key';
+        return `Restored ${number(repairChangeCount(restoredChange))} original empty optional ${restoredItem}${repairChangeCount(restoredChange) === 1 ? '' : 's'}. The related omission finding is expected to return.`;
+      }
       if (restoredChange.change_kind === 'reorder') {
         const restoredItem = restoredChange.item_name || 'timeline';
         return `Restored the saved original order for ${number(repairChangeCount(restoredChange))} ${restoredItem}${repairChangeCount(restoredChange) === 1 ? '' : 's'}. The repaired ordering finding is expected to return.`;
@@ -73,6 +77,9 @@ export function createRepairController({
     }
     if (receipt.change_kind === 'reviewed_decisions') {
       return `Applied ${number(count)} explicit reviewed HO/PO ${count === 1 ? 'decision' : 'decisions'}. Note timing, string, fret, and every technique outside HO/PO/tap were preserved.`;
+    }
+    if (receipt.change_kind === 'omit_empty') {
+      return `${completedRepairChange(receipt)}.`;
     }
     if (receipt.change_kind === 'reorder') {
       return `${completedRepairChange(receipt)}${positions ? ` at ${number(positions)} musical ${positions === 1 ? 'position' : 'positions'}` : ''}. Every authored entry and property was preserved.`;
@@ -415,7 +422,10 @@ export function createRepairController({
   }
 
   function repairControls(report, finding) {
-    if (report.features?.repair_scan_current === false) return null;
+    if (
+      state.status?.target?.repairs_available === false
+      || report.features?.repair_scan_current === false
+    ) return null;
     const definition = state.repairRules[finding.code];
     if (!definition || !['safe_automatic', 'review_required'].includes(definition.safety)) return null;
     const eligibility = report.features?.repair_eligibility?.[finding.code];
@@ -472,7 +482,10 @@ export function createRepairController({
   }
 
   function safeRepairCodes(report) {
-    if (report.features?.repair_scan_current === false) return new Set();
+    if (
+      state.status?.target?.repairs_available === false
+      || report.features?.repair_scan_current === false
+    ) return new Set();
     return new Set(
       (Array.isArray(report.findings) ? report.findings : [])
         .map((finding) => finding.code)

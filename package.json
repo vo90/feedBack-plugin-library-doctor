@@ -1,10 +1,10 @@
 {
   "name": "feedback-plugin-library-doctor-tests",
-  "version": "0.44.0",
+  "version": "0.45.0",
   "private": true,
   "type": "module",
   "scripts": {
-    "check:frontend": "node --check screen.js && node --check src/api.js && node --check src/app.js && node --check src/batch-controller.js && node --check src/constants.js && node --check src/dom.js && node --check src/finding-view.js && node --check src/formatters.js && node --check src/playback-controller.js && node --check src/repair-controller.js && node --check src/reviewed-repair-controller.js && node --check src/results-controller.js && node --check src/scan-controller.js && node --check src/song-tools-controller.js && node --check src/status-view.js && node --check src/store.js",
+    "check:frontend": "node --check screen.js && node --check src/api.js && node --check src/app.js && node --check src/batch-controller.js && node --check src/constants.js && node --check src/dom.js && node --check src/finding-view.js && node --check src/formatters.js && node --check src/playback-controller.js && node --check src/player-review-chart-transform.js && node --check src/player-review-choice-view.js && node --check src/player-review-clock.js && node --check src/player-review-controller.js && node --check src/player-review-highlight.js && node --check src/player-review-layout.js && node --check src/player-review-navigation.js && node --check src/player-review-options.js && node --check src/player-review-overlay.js && node --check src/player-review-playback-events.js && node --check src/player-review-timeline.js && node --check src/player-review-transform.js && node --check src/player-review-transport.js && node --check src/repair-controller.js && node --check src/review-difficulty-state.js && node --check src/reviewed-repair-controller.js && node --check src/results-controller.js && node --check src/scan-controller.js && node --check src/song-tools-controller.js && node --check src/status-view.js && node --check src/store.js",
     "lint:frontend": "eslint screen.js src",
     "test:frontend": "node --test tests/frontend/*.test.mjs",
     "test:browser": "playwright test",

@@ -36,26 +36,76 @@ export function createBatchController({
     const lastScan = scannerStatus?.last_scan;
     const hasReports = Number(summary.total || 0) > 0;
     const completeScope = !!lastScan?.complete;
+    const repairsAvailable = scannerStatus?.target?.repairs_available !== false;
     const phase = batch?.phase || 'idle';
     const running = !!batch?.running;
+    const recoveryResult = batch?.result || batch?.last_result;
+    const pendingRecoveryCount = Number(recoveryResult?.undoable_count || 0)
+      + Number(recoveryResult?.preview_cleanup_required_count || 0);
+    const hasPendingRecovery = pendingRecoveryCount > 0;
     state.batch = batch || null;
     setHidden(el.batchSection, !hasReports);
-    if (!hasReports) return;
+    if (!hasReports) {
+      state.batchAttentionKey = '';
+      return;
+    }
+
+    const attentionPhases = new Set([
+      'ready', 'completed', 'cancelled', 'error',
+      'undo_ready', 'undo_completed', 'undo_cancelled',
+      'finalize_ready', 'finalize_completed', 'finalize_cancelled',
+    ]);
+    const attentionKey = running
+      ? `running:${phase}:${batch?.mode || ''}`
+      : hasPendingRecovery
+        ? `recovery:${recoveryResult?.id || phase}`
+        : attentionPhases.has(phase)
+          ? [
+            phase,
+            batch?.preview?.batch_plan_id || '',
+            batch?.result?.id || batch?.last_result?.id || '',
+            batch?.undo_preview?.undo_plan_id || batch?.undo_result?.id || '',
+            batch?.finalize_preview?.finalize_plan_id || batch?.finalize_result?.id || '',
+          ].join(':')
+          : '';
+    if (attentionKey && state.batchAttentionKey !== attentionKey && el.batchPanel) {
+      el.batchPanel.open = true;
+    }
+    state.batchAttentionKey = attentionKey;
+
+    text(
+      el.batchSummary,
+      running
+        ? batch?.message || 'A safe-repair operation is in progress.'
+        : hasPendingRecovery
+          ? `${pluralSongs(pendingRecoveryCount)} ${pendingRecoveryCount === 1 ? 'still needs' : 'still need'} Undo or Finalize.`
+          : phase === 'ready' && batch?.preview
+            ? `${pluralSongs(batch.preview.eligible_count)} are ready for review.`
+            : completeScope
+              ? 'Expand to review safe repairs for the current scan.'
+              : 'Finish the current scan before reviewing safe repairs.',
+    );
 
     const target = batch?.target?.label || scannerStatus?.target?.label || 'current scan scope';
     text(
       el.batchCopy,
-      completeScope
+      hasPendingRecovery
+        ? 'Resolve the previous batch first. Undo restores its saved originals; Finalize keeps its repairs and removes the recovery copies.'
+        : !repairsAvailable
+        ? 'This saved scan is no longer bound to an available folder. Scan that folder or package again before using repairs.'
+        : completeScope
         ? `Review every deterministic safe repair in ${target}. You can also explicitly include automatic repairs for previews already flagged by the scan.`
         : 'Complete this scan scope before reviewing a batch repair. Incomplete results are never used for mass changes.',
     );
     setHidden(el.batchReview, running);
     setHidden(el.batchCancel, !running);
-    el.batchReview.disabled = !completeScope || !!scannerStatus?.running || (!!scannerStatus?.repairing && !running);
-    el.batchPreviewMedia.disabled = running || !completeScope || !!scannerStatus?.running;
+    el.batchReview.disabled = hasPendingRecovery || !repairsAvailable || !completeScope || !!scannerStatus?.running || (!!scannerStatus?.repairing && !running);
+    el.batchPreviewMedia.disabled = hasPendingRecovery || !repairsAvailable || running || !completeScope || !!scannerStatus?.running;
     text(
       el.batchReview,
-      phase === 'ready' && batch?.preview
+      hasPendingRecovery
+        ? 'Resolve previous repairs first'
+        : phase === 'ready' && batch?.preview
         ? `Review safe repairs for ${pluralSongs(batch.preview.eligible_count)}`
         : 'Find safe repairs',
     );
@@ -95,11 +145,13 @@ export function createBatchController({
       || (['paused', 'cancelling'].includes(phase) && String(batch?.mode || '').startsWith('undo'));
     const finalizePhase = phase.startsWith('finalize')
       || (['paused', 'cancelling'].includes(phase) && String(batch?.mode || '').startsWith('finalize'));
-    const activeResult = batch?.result || (
+    const activeResult = batch?.result || (hasPendingRecovery
+      ? batch?.last_result
+      : (
       phase === 'idle' || phase === 'stale' || undoPhase || finalizePhase
         || (phase === 'error' && ['undo', 'finalize'].some((mode) => String(batch?.mode || '').startsWith(mode)))
         ? batch?.last_result : null
-    );
+      ));
     const restoredCount = Array.isArray(activeResult?.outcomes)
       ? activeResult.outcomes.filter((item) => item.outcome === 'restored').length
       : 0;

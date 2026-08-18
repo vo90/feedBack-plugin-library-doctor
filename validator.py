@@ -30,8 +30,14 @@ from jsonschema import Draft202012Validator
 try:
     from repair_eligibility import (
         assess_redundant_handshapes,
+        complete_json_identity,
+        effective_tones_source,
         find_hopo_review_candidates,
         preview_source_path,
+        repairable_tempo_event,
+        repairable_time_signature_event,
+        repairable_tone_change,
+        timed_event_stream_eligibility,
     )
 except ModuleNotFoundError:  # Tests and some plugin hosts load files by path.
     _eligibility_name = "_library_doctor_repair_eligibility"
@@ -45,12 +51,22 @@ except ModuleNotFoundError:  # Tests and some plugin hosts load files by path.
         sys.modules[_eligibility_name] = _eligibility
         _eligibility_spec.loader.exec_module(_eligibility)
     assess_redundant_handshapes = _eligibility.assess_redundant_handshapes
+    complete_json_identity = _eligibility.complete_json_identity
+    effective_tones_source = _eligibility.effective_tones_source
     find_hopo_review_candidates = _eligibility.find_hopo_review_candidates
     preview_source_path = _eligibility.preview_source_path
+    repairable_tempo_event = _eligibility.repairable_tempo_event
+    repairable_time_signature_event = (
+        _eligibility.repairable_time_signature_event
+    )
+    repairable_tone_change = _eligibility.repairable_tone_change
+    timed_event_stream_eligibility = (
+        _eligibility.timed_event_stream_eligibility
+    )
 
 
 SPEC_REVISION = "52548b742f64c2a35052a141976ea1b7889f4b1a"
-VALIDATOR_VERSION = f"rules-28:feedpak-{SPEC_REVISION}"
+VALIDATOR_VERSION = f"rules-32:feedpak-{SPEC_REVISION}"
 SUPPORTED_MAJOR = 1
 SCHEMA_DIR = Path(__file__).resolve().parent / "schemas"
 MAX_TEXT_BYTES = 64 * 1024 * 1024
@@ -109,6 +125,7 @@ _RULE_TITLES = {
     "chart.duplicate-anchor": "Identical duplicate anchor",
     "chart.duplicate-handshape": "Identical duplicate handshape",
     "chart.zero-length-handshape": "Zero-length handshape",
+    "chart.empty-phrases-key": "Empty optional phrase ladder",
     "chart.note-duplicates-chord": "Standalone note duplicates a chord",
     "chart.bend-points-out-of-order": "Bend points out of order",
     "chart.negative-muted-fret": "Negative fret on a string mute",
@@ -130,6 +147,9 @@ _RULE_TITLES = {
     "timeline.repeated-beat-time": "Repeated beat time has conflicting data",
     "timeline.duplicate-section": "Identical duplicate section marker",
     "timeline.repeated-section-time": "Repeated section time has conflicting data",
+    "timeline.empty-arrangement-tempos-key": "Empty arrangement tempo override",
+    "timeline.duplicate-tempo": "Identical duplicate tempo event",
+    "timeline.duplicate-time-signature": "Identical duplicate time signature",
     "media.preview-missing": "Song preview is missing",
     "media.preview-too-short": "Preview is unusually short",
     "media.preview-too-long": "Preview needs replacement",
@@ -147,6 +167,7 @@ _RULE_TITLES = {
     "rigs.missing-realization-file": "Rig asset is missing",
     "rigs.realization-hash-mismatch": "Rig asset checksum does not match",
     "tones.missing-rig": "Tone references an unknown rig",
+    "tones.duplicate-change": "Identical duplicate tone change",
 }
 
 _RULE_AREAS = {
@@ -177,6 +198,7 @@ _SAFE_REPAIR_CANDIDATES = {
     "chart.duplicate-anchor",
     "chart.duplicate-handshape",
     "chart.zero-length-handshape",
+    "chart.empty-phrases-key",
     "chart.invalid-handshape-span",
     "chart.note-duplicates-chord",
     "chart.bend-points-out-of-order",
@@ -185,6 +207,13 @@ _SAFE_REPAIR_CANDIDATES = {
     "timeline.beats-out-of-order",
     "timeline.duplicate-section",
     "timeline.sections-out-of-order",
+    "timeline.empty-arrangement-tempos-key",
+    "timeline.duplicate-tempo",
+    "timeline.tempos-out-of-order",
+    "timeline.duplicate-time-signature",
+    "timeline.time-signatures-out-of-order",
+    "tones.duplicate-change",
+    "tones.changes-out-of-order",
     "drums.duplicate-hit",
 }
 
@@ -485,6 +514,15 @@ def rule_metadata(code: str, severity: str = "warning", category: str = "validat
             "exactly one playable matching chord already exists at the same time. "
             "Missing or negative times and unmatched shapes require manual review."
         )
+    elif code in {
+        "chart.empty-phrases-key",
+        "timeline.empty-arrangement-tempos-key",
+    }:
+        repairability = "safe_candidate"
+        guidance = (
+            "Remove only this explicitly empty optional root key. Absence has the "
+            "same runtime meaning and no musical event is changed."
+        )
     elif code == "chart.bend-points-out-of-order":
         repairability = "safe_candidate"
         guidance = (
@@ -523,6 +561,26 @@ def rule_metadata(code: str, severity: str = "warning", category: str = "validat
         guidance = (
             "The stored section markers are identical. Keep the first marker and "
             "remove only later exact copies; leave conflicting section data for review."
+        )
+    elif code in {
+        "timeline.duplicate-tempo",
+        "timeline.duplicate-time-signature",
+        "tones.duplicate-change",
+    }:
+        repairability = "safe_candidate"
+        guidance = (
+            "Keep the first complete JSON-identical event and remove only later "
+            "exact copies. Different properties at the same time are preserved."
+        )
+    elif code in {
+        "timeline.tempos-out-of-order",
+        "timeline.time-signatures-out-of-order",
+        "tones.changes-out-of-order",
+    }:
+        repairability = "safe_candidate"
+        guidance = (
+            "Put the existing valid events in chronological order, preserving every "
+            "property and the authored relative order of equal-time events."
         )
     elif code in {
         "timeline.repeated-beat-time", "timeline.repeated-section-time"
@@ -1091,7 +1149,10 @@ def _pointer(
 def _number(value) -> float | None:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
-    number = float(value)
+    try:
+        number = float(value)
+    except (OverflowError, ValueError):
+        return None
     return number if math.isfinite(number) else None
 
 
@@ -3160,9 +3221,43 @@ def _validate_arrangement_semantics(
     entry=None,
     check_lane_collisions: bool = True,
     check_fretted: bool = True,
+    repair_eligibility: dict | None = None,
+    review_difficulty_counts: dict | None = None,
 ) -> None:
     if not isinstance(data, dict):
         return
+
+    for field, code, message in (
+        (
+            "phrases",
+            "chart.empty-phrases-key",
+            "The optional phrase ladder is present as an empty array; omit the key to represent that this arrangement has no ladder.",
+        ),
+        (
+            "tempos",
+            "timeline.empty-arrangement-tempos-key",
+            "The arrangement tempo override is an empty array; omit the key so this chart follows the song tempo.",
+        ),
+    ):
+        if field not in data or not isinstance(data[field], list) or data[field]:
+            continue
+        findings.add(
+            "warning",
+            code,
+            message,
+            location=f"{relpath}:{field}",
+            arrangement_id=arrangement_id,
+        )
+        automatic, reason_code, blocker_message = _ordinary_json_eligibility(
+            relpath
+        )
+        _merge_structural_repair_eligibility(
+            repair_eligibility,
+            code,
+            automatic=automatic,
+            reason_code=reason_code,
+            message=blocker_message,
+        )
 
     _TabValidator(
         data=data,
@@ -3175,6 +3270,31 @@ def _validate_arrangement_semantics(
     ).validate()
     if check_fretted:
         hopo_candidates = find_hopo_review_candidates(data, member_path=relpath)
+        if isinstance(review_difficulty_counts, dict):
+            for code in (
+                "chart.conflicting-techniques",
+                "review.hopo-direction-mismatch",
+                "review.same-fret-hopo",
+                "review.hopo-without-source",
+            ):
+                bucket = review_difficulty_counts.setdefault(
+                    code, {"full": 0, "lower": 0}
+                )
+                matching = [
+                    candidate
+                    for candidate in hopo_candidates
+                    if code in candidate.trigger_codes
+                ]
+                if not matching:
+                    continue
+                bucket["full"] += sum(
+                    candidate.stream_is_full_difficulty
+                    for candidate in matching
+                )
+                bucket["lower"] += sum(
+                    not candidate.stream_is_full_difficulty
+                    for candidate in matching
+                )
         for code, severity, message in (
             (
                 "review.hopo-direction-mismatch",
@@ -3218,6 +3338,8 @@ def _validate_arrangement_semantics(
             duration,
             findings,
             arrangement_id=arrangement_id,
+            fields=("tempos",),
+            repair_eligibility=repair_eligibility,
         )
 
     templates = data.get("templates", []) if isinstance(data.get("templates"), list) else []
@@ -3651,9 +3773,12 @@ def _validate_tones(
     *,
     location: str,
     arrangement_id: str,
+    source_kind: str,
+    source_relpath: str | None,
     rig_ids: set[str],
     duration: float | None,
     findings: _Findings,
+    repair_eligibility: dict | None,
 ) -> None:
     if not isinstance(tones, dict):
         return
@@ -3673,6 +3798,8 @@ def _validate_tones(
     negative = None
     after = None
     missing = None
+    exact_entries: dict[bytes, int] = {}
+    exact_duplicates: list[tuple[int, int, float]] = []
     for index, change in enumerate(changes):
         if not isinstance(change, dict):
             continue
@@ -3695,6 +3822,27 @@ def _validate_tones(
         rig = change.get("rig")
         if isinstance(rig, str) and rig and rig not in rig_ids and missing is None:
             missing = (index, rig, event_time)
+        if repairable_tone_change(change):
+            identity = complete_json_identity(change)
+            if identity is not None:
+                original_index = exact_entries.get(identity)
+                if original_index is None:
+                    exact_entries[identity] = index
+                else:
+                    exact_duplicates.append((index, original_index, change["t"]))
+
+    if source_kind == "manifest":
+        stream_eligibility = (
+            False,
+            "manifest_tones_require_manual_edit",
+            "The effective tone changes are stored in manifest.yaml, which Library Doctor cannot rewrite losslessly. Edit these tones manually.",
+        )
+    else:
+        stream_eligibility = _structural_stream_eligibility(
+            source_relpath or location,
+            changes,
+            repairable_tone_change,
+        )
 
     for issue, severity, code, message in (
         (inversion, "warning", "tones.changes-out-of-order", "Tone changes are not chronological."),
@@ -3710,6 +3858,42 @@ def _validate_tones(
                 arrangement_id=arrangement_id,
                 time=issue[1],
             )
+            if code == "tones.changes-out-of-order":
+                automatic, reason_code, blocker_message = stream_eligibility
+                _merge_structural_repair_eligibility(
+                    repair_eligibility,
+                    code,
+                    automatic=automatic,
+                    reason_code=reason_code,
+                    message=blocker_message,
+                )
+    if exact_duplicates:
+        index, original_index, event_time = exact_duplicates[0]
+        event_label = "event" if len(exact_duplicates) == 1 else "events"
+        duplicate_verb = (
+            "duplicates" if len(exact_duplicates) == 1 else "duplicate"
+        )
+        findings.add(
+            "warning",
+            "tones.duplicate-change",
+            (
+                f"{len(exact_duplicates)} tone-change {event_label} exactly "
+                f"{duplicate_verb} an earlier entry; first duplicate repeats "
+                f"changes[{original_index}]."
+            ),
+            location=f"{location}.changes[{index}]",
+            arrangement_id=arrangement_id,
+            time=event_time,
+            affected_count=len(exact_duplicates),
+        )
+        automatic, reason_code, blocker_message = stream_eligibility
+        _merge_structural_repair_eligibility(
+            repair_eligibility,
+            "tones.duplicate-change",
+            automatic=automatic,
+            reason_code=reason_code,
+            message=blocker_message,
+        )
     if missing is not None:
         index, rig, event_time = missing
         findings.add(
@@ -3728,9 +3912,10 @@ def _validate_rigs_semantics(
     duration: float | None,
     reader: _PackageReader,
     findings: _Findings,
-    tone_bindings: list[tuple[str, str, dict]],
+    tone_bindings: list[tuple[str, str, dict, str, str | None]],
     *,
     scan_checkpoint=None,
+    repair_eligibility: dict | None = None,
 ) -> None:
     rigs = data.get("rigs") if isinstance(data, dict) and isinstance(data.get("rigs"), list) else []
     rig_ids: set[str] = set()
@@ -3902,14 +4087,17 @@ def _validate_rigs_semantics(
                     location=f"{relpath}:rigs[{rig_index}].graph",
                 )
 
-    for arrangement_id, location, tones in tone_bindings:
+    for arrangement_id, location, tones, source_kind, source_relpath in tone_bindings:
         _validate_tones(
             tones,
             location=location,
             arrangement_id=arrangement_id,
+            source_kind=source_kind,
+            source_relpath=source_relpath,
             rig_ids=rig_ids,
             duration=duration,
             findings=findings,
+            repair_eligibility=repair_eligibility,
         )
 
 
@@ -3920,16 +4108,18 @@ def _validate_song_timeline_semantics(
     findings: _Findings,
     *,
     arrangement_id: str | None = None,
+    fields: tuple[str, ...] | None = None,
+    repair_eligibility: dict | None = None,
 ) -> None:
-    """Validate authored beat/section order without rewriting the timeline.
+    """Validate active authored timeline streams without rewriting them.
 
-    FeedBack consumes both arrays in authored order. The highway uses ordered
-    searches for beats and a forward-only scan for sections, so an inversion
-    can select the wrong tempo, measure, or section. Negative entries are not
-    rejected here because pre-roll grids can be intentional.
+    Callers choose active fields explicitly when source precedence differs.
+    In particular, a declared sidecar's tempo and meter streams are active
+    even when it lacks the complete beats/sections override pair.
     """
     if not isinstance(data, dict):
         return
+    selected_fields = set(fields) if fields is not None else None
 
     rules = (
         (
@@ -3966,9 +4156,21 @@ def _validate_song_timeline_semantics(
         ),
     )
     for field, order_severity, order_code, duration_code, order_message, duration_message in rules:
+        if selected_fields is not None and field not in selected_fields:
+            continue
         items = data.get(field)
         if not isinstance(items, list):
             continue
+
+        event_predicate = {
+            "tempos": repairable_tempo_event,
+            "time_signatures": repairable_time_signature_event,
+        }.get(field)
+        stream_eligibility = (
+            _structural_stream_eligibility(relpath, items, event_predicate)
+            if event_predicate is not None
+            else None
+        )
 
         previous: float | None = None
         first_inversion: tuple[int, float] | None = None
@@ -3985,13 +4187,26 @@ def _validate_song_timeline_semantics(
             if event_time is None:
                 continue
             tick = _time_key(event_time)
-            identity = _exact_json_key(raw)
+            if event_predicate is not None:
+                identity = (
+                    complete_json_identity(raw)
+                    if event_predicate(raw)
+                    else None
+                )
+            else:
+                identity = _exact_json_key(raw)
             first_exact = exact_entries.get(identity) if identity is not None else None
             earlier_at_time = entries_by_time.get(tick)
-            if field in {"beats", "sections"} and identity is not None:
+            if field in {
+                "beats", "sections", "tempos", "time_signatures"
+            } and identity is not None:
                 if first_exact is not None:
                     exact_duplicates.append((index, first_exact, event_time))
-                elif earlier_at_time and previous_tick != tick:
+                elif (
+                    field in {"beats", "sections"}
+                    and earlier_at_time
+                    and previous_tick != tick
+                ):
                     first_conflict = next(iter(earlier_at_time.values()))
                     repeated_time_conflicts.append(
                         (index, first_conflict, event_time)
@@ -4024,14 +4239,31 @@ def _validate_song_timeline_semantics(
                 arrangement_id=arrangement_id,
                 time=event_time,
             )
+            if stream_eligibility is not None:
+                automatic, reason_code, blocker_message = stream_eligibility
+                _merge_structural_repair_eligibility(
+                    repair_eligibility,
+                    order_code,
+                    automatic=automatic,
+                    reason_code=reason_code,
+                    message=blocker_message,
+                )
         if exact_duplicates:
             index, original_index, event_time = exact_duplicates[0]
-            label = "beat" if field == "beats" else "section"
-            marker_label = "marker" if len(exact_duplicates) == 1 else "markers"
+            label, duplicate_code = {
+                "beats": ("beat", "timeline.duplicate-beat"),
+                "sections": ("section", "timeline.duplicate-section"),
+                "tempos": ("tempo", "timeline.duplicate-tempo"),
+                "time_signatures": (
+                    "time-signature",
+                    "timeline.duplicate-time-signature",
+                ),
+            }[field]
+            marker_label = "event" if len(exact_duplicates) == 1 else "events"
             duplicate_verb = "duplicates" if len(exact_duplicates) == 1 else "duplicate"
             findings.add(
                 "warning",
-                f"timeline.duplicate-{label}",
+                duplicate_code,
                 (
                     f"{len(exact_duplicates)} {label} {marker_label} exactly {duplicate_verb} "
                     f"an earlier entry; first duplicate repeats {field}[{original_index}]."
@@ -4041,6 +4273,15 @@ def _validate_song_timeline_semantics(
                 time=event_time,
                 affected_count=len(exact_duplicates),
             )
+            if stream_eligibility is not None:
+                automatic, reason_code, blocker_message = stream_eligibility
+                _merge_structural_repair_eligibility(
+                    repair_eligibility,
+                    duplicate_code,
+                    automatic=automatic,
+                    reason_code=reason_code,
+                    message=blocker_message,
+                )
         if repeated_time_conflicts:
             index, original_index, event_time = repeated_time_conflicts[0]
             label = "beat" if field == "beats" else "section"
@@ -4084,6 +4325,8 @@ def _validate_song_timeline_semantics(
         ),
     )
     for field, value_key, code, message in conflict_rules:
+        if selected_fields is not None and field not in selected_fields:
+            continue
         items = data.get(field)
         if not isinstance(items, list):
             continue
@@ -4536,6 +4779,146 @@ def _merge_handshape_eligibility(
         current["message"] = assessment.get("message") or current["message"]
 
 
+_STRUCTURAL_BLOCKER_PRIORITY = {
+    "malformed_timed_events": 10,
+    "unsupported_text_format": 20,
+    "jsonc_requires_lossless_writer": 20,
+    "manifest_tones_require_manual_edit": 30,
+}
+
+
+def _merge_structural_repair_eligibility(
+    eligibility: dict | None,
+    rule_code: str,
+    *,
+    automatic: bool,
+    reason_code: str | None = None,
+    message: str = "",
+) -> None:
+    """Merge occurrence eligibility, failing closed for a mixed package rule."""
+    if eligibility is None:
+        return
+    current = eligibility.setdefault(rule_code, {
+        "status": "automatic",
+        "reported_count": 0,
+        "safe_count": 0,
+        "unsafe_count": 0,
+        "reason_code": None,
+        "message": "",
+    })
+    current["reported_count"] += 1
+    if automatic:
+        current["safe_count"] += 1
+        return
+
+    current["unsafe_count"] += 1
+    current["status"] = "unavailable"
+    existing_reason = current.get("reason_code")
+    if (
+        existing_reason is None
+        or _STRUCTURAL_BLOCKER_PRIORITY.get(reason_code or "", 0)
+        > _STRUCTURAL_BLOCKER_PRIORITY.get(existing_reason, 0)
+    ):
+        current["reason_code"] = reason_code
+        current["message"] = message
+
+
+def _structural_stream_eligibility(
+    relpath: str,
+    items,
+    predicate,
+) -> tuple[bool, str | None, str]:
+    if relpath.lower().endswith(".jsonc"):
+        return (
+            False,
+            "jsonc_requires_lossless_writer",
+            "This issue is stored in JSONC. Automatic repair needs a lossless JSONC writer, so edit this source manually.",
+        )
+    if not relpath.lower().endswith(".json"):
+        return (
+            False,
+            "unsupported_text_format",
+            "Automatic structural repair requires an ordinary JSON source file. Edit this source manually.",
+        )
+    if not timed_event_stream_eligibility(items, predicate):
+        return (
+            False,
+            "malformed_timed_events",
+            "At least one event in this list has malformed or non-canonical data, so Library Doctor will not partially repair the stream.",
+        )
+    return True, None, ""
+
+
+def _ordinary_json_eligibility(relpath: str) -> tuple[bool, str | None, str]:
+    if relpath.lower().endswith(".jsonc"):
+        return (
+            False,
+            "jsonc_requires_lossless_writer",
+            "This issue is stored in JSONC. Automatic repair needs a lossless JSONC writer, so edit this source manually.",
+        )
+    if not relpath.lower().endswith(".json"):
+        return (
+            False,
+            "unsupported_text_format",
+            "Automatic structural repair requires an ordinary JSON source file. Edit this source manually.",
+        )
+    return True, None, ""
+
+
+def validate_reviewed_arrangement(
+    document: dict,
+    *,
+    relpath: str,
+    arrangement_id: str = "",
+    duration: float | None = None,
+    entry: dict | None = None,
+) -> dict:
+    """Validate one in-memory Reviewed-repair candidate arrangement.
+
+    Outcome filtering must be fast enough to run for several possible choices
+    without rebuilding or rereading a complete Feedpak each time. This wrapper
+    deliberately executes the same arrangement schema and semantic validators
+    used by :func:`validate_feedpak`, while package-wide validation still runs
+    for the complete selected group during Preview and again during Apply.
+    The input document is read-only.
+    """
+    if not isinstance(document, dict):
+        raise TypeError("reviewed arrangement must be a mapping")
+    if not isinstance(relpath, str) or not relpath:
+        raise ValueError("reviewed arrangement path must be non-empty")
+    safe_arrangement_id = (
+        arrangement_id if isinstance(arrangement_id, str) else ""
+    )
+    safe_entry = entry if isinstance(entry, dict) else None
+    safe_duration = _number(duration)
+    findings = _Findings()
+    _validate_schema(
+        document,
+        "arrangement.schema.json",
+        relpath,
+        findings,
+    )
+    _report_nonfinite(document, relpath, findings)
+    is_keyboard = _is_keyboard_arrangement(safe_entry, document, None)
+    _validate_arrangement_semantics(
+        document,
+        relpath,
+        safe_arrangement_id,
+        safe_duration,
+        findings,
+        entry=safe_entry,
+        check_lane_collisions=not is_keyboard,
+        check_fretted=_is_fretted_arrangement(safe_entry, document, None),
+    )
+    findings.finish()
+    return {
+        "schema": "library_doctor.reviewed_arrangement_validation.v1",
+        "validator_version": VALIDATOR_VERSION,
+        "counts": dict(findings.counts),
+        "findings": [finding.to_dict() for finding in findings.items],
+    }
+
+
 def validate_feedpak(
     package: Path,
     package_name: str | None = None,
@@ -4556,6 +4939,7 @@ def validate_feedpak(
         "preview_available": False,
         "preview_source_available": False,
         "repair_eligibility": {},
+        "review_difficulty_counts": {},
         "deep_audio_checked": bool(deep_audio),
         "deep_audio_files": 0,
         "deep_audio_skipped": 0,
@@ -4564,7 +4948,7 @@ def validate_feedpak(
     loaded_json: dict[tuple[str, str], object | None] = {}
     validated_sidecars: set[tuple[str, str]] = set()
     ogg_facts: dict[str, _OggFacts | None] = {}
-    tone_bindings: list[tuple[str, str, dict]] = []
+    tone_bindings: list[tuple[str, str, dict, str, str | None]] = []
 
     try:
         with _PackageReader(package, findings) as reader:
@@ -4698,6 +5082,8 @@ def validate_feedpak(
                         entry=entry,
                         check_lane_collisions=not is_keyboard,
                         check_fretted=_is_fretted_arrangement(entry, data, notation_data),
+                        repair_eligibility=features["repair_eligibility"],
+                        review_difficulty_counts=features["review_difficulty_counts"],
                     )
                     if isinstance(data, dict):
                         _merge_handshape_eligibility(
@@ -4727,14 +5113,25 @@ def validate_feedpak(
                                     events,
                                 )
 
-                effective_tones = entry.get("tones")
-                tones_location = f"manifest.yaml:arrangements[{index}].tones"
-                if not isinstance(effective_tones, dict) and isinstance(data, dict):
-                    effective_tones = data.get("tones")
+                tone_source, effective_tones = effective_tones_source(
+                    entry.get("tones"),
+                    data.get("tones") if isinstance(data, dict) else None,
+                )
+                if tone_source == "manifest":
+                    tones_location = f"manifest.yaml:arrangements[{index}].tones"
+                    tone_source_relpath = None
+                else:
                     tones_location = f"{arrangement_rel}:tones"
-                if isinstance(effective_tones, dict):
+                    tone_source_relpath = arrangement_rel
+                if tone_source != "absent" and isinstance(effective_tones, dict):
                     tone_bindings.append(
-                        (arrangement_id, tones_location, effective_tones)
+                        (
+                            arrangement_id,
+                            tones_location,
+                            effective_tones,
+                            tone_source,
+                            tone_source_relpath,
+                        )
                     )
 
                 drum_rel = _pointer(
@@ -4998,16 +5395,35 @@ def validate_feedpak(
                             key, data, relpath, duration, findings
                         )
                     if key == "song_timeline":
-                        # Match FeedBack's loader: a readable sidecar overrides
-                        # legacy embedded grids only when both arrays exist.
+                        # Beats and sections override the legacy embedded grids
+                        # only as a complete pair. FeedBack consumes sidecar
+                        # tempos and meters independently whenever the sidecar
+                        # itself is a readable object.
                         song_timeline_overrides_legacy = (
                             isinstance(data, dict)
                             and isinstance(data.get("beats"), list)
                             and isinstance(data.get("sections"), list)
                         )
-                        if song_timeline_overrides_legacy:
+                        if isinstance(data, dict):
+                            active_fields = (
+                                (
+                                    "beats",
+                                    "sections",
+                                    "tempos",
+                                    "time_signatures",
+                                )
+                                if song_timeline_overrides_legacy
+                                else ("tempos", "time_signatures")
+                            )
                             _validate_song_timeline_semantics(
-                                data, relpath, duration, findings
+                                data,
+                                relpath,
+                                duration,
+                                findings,
+                                fields=active_fields,
+                                repair_eligibility=features[
+                                    "repair_eligibility"
+                                ],
                             )
                     elif key == "rigs":
                         rigs_data = data
@@ -5015,7 +5431,13 @@ def validate_feedpak(
             drum_tones = manifest.get("drum_tones")
             if isinstance(drum_tones, dict):
                 tone_bindings.append(
-                    ("drums", "manifest.yaml:drum_tones", drum_tones)
+                    (
+                        "drums",
+                        "manifest.yaml:drum_tones",
+                        drum_tones,
+                        "manifest",
+                        None,
+                    )
                 )
             if rigs_data is not None or tone_bindings:
                 _validate_rigs_semantics(
@@ -5026,6 +5448,7 @@ def validate_feedpak(
                     findings,
                     tone_bindings,
                     scan_checkpoint=scan_checkpoint,
+                    repair_eligibility=features["repair_eligibility"],
                 )
 
             if not song_timeline_overrides_legacy:
@@ -5037,6 +5460,7 @@ def validate_feedpak(
                         duration,
                         findings,
                         arrangement_id=arrangement_id,
+                        fields=(field,),
                     )
 
             cover = manifest.get("cover")

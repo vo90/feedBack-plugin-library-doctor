@@ -304,6 +304,20 @@ class BatchRepairManager:
                 raise BatchRepairError(
                     "batch_busy", "A Library Doctor batch operation is already running."
                 )
+            previous_result = self._state.get("result") or self._state.get(
+                "last_result"
+            )
+            if isinstance(previous_result, dict):
+                self._refresh_result_counts(previous_result)
+                retained_recovery_count = int(
+                    previous_result.get("undoable_count") or 0
+                ) + int(previous_result.get("preview_cleanup_required_count") or 0)
+                if retained_recovery_count:
+                    raise BatchRepairError(
+                        "batch_recovery_pending",
+                        "Undo or finalize the remaining repairs from the previous batch "
+                        "before reviewing another batch.",
+                    )
             reserved, reason = self._scanner.begin_batch_operation()
             if not reserved:
                 raise BatchRepairError("library_busy", reason)

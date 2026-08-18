@@ -386,10 +386,27 @@ class _ReportCache:
                     severity TEXT NOT NULL,
                     category TEXT NOT NULL,
                     finding_count INTEGER NOT NULL DEFAULT 1,
+                    difficulty_scoped INTEGER NOT NULL DEFAULT 0,
+                    full_difficulty_count INTEGER NOT NULL DEFAULT 0,
+                    lower_difficulty_count INTEGER NOT NULL DEFAULT 0,
                     PRIMARY KEY (package, code)
                 )
                 """
             )
+            finding_columns = {
+                row["name"]
+                for row in conn.execute("PRAGMA table_info(report_findings)")
+            }
+            for name in (
+                "difficulty_scoped",
+                "full_difficulty_count",
+                "lower_difficulty_count",
+            ):
+                if name not in finding_columns:
+                    conn.execute(
+                        f"ALTER TABLE report_findings ADD COLUMN {name} "
+                        "INTEGER NOT NULL DEFAULT 0"
+                    )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS report_findings_code_idx "
                 "ON report_findings(code, package)"
@@ -423,6 +440,7 @@ class _ReportCache:
                         ("scope_initialized", "1"),
                         ("target_kind", "library"),
                         ("target_label", "Whole library"),
+                        ("target_repairs_available", "1"),
                     ),
                 )
             coverage_index = conn.execute(
@@ -457,7 +475,7 @@ class _ReportCache:
             finding_index = conn.execute(
                 "SELECT value FROM cache_state WHERE key = 'finding_index_version'"
             ).fetchone()
-            if finding_index is None or finding_index["value"] != "2":
+            if finding_index is None or finding_index["value"] != "3":
                 conn.execute("DELETE FROM report_findings")
                 for row in conn.execute("SELECT package, report_json FROM reports"):
                     try:
@@ -466,19 +484,26 @@ class _ReportCache:
                         continue
                     conn.executemany(
                         "INSERT INTO report_findings "
-                        "(package, code, severity, category, finding_count) "
-                        "VALUES (?, ?, ?, ?, ?)",
+                        "(package, code, severity, category, finding_count, "
+                        "difficulty_scoped, full_difficulty_count, lower_difficulty_count) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                         self._finding_rows(row["package"], report),
                     )
                 conn.execute(
                     "INSERT OR REPLACE INTO cache_state(key, value) VALUES (?, ?)",
-                    ("finding_index_version", "2"),
+                    ("finding_index_version", "3"),
                 )
 
     @staticmethod
-    def _finding_rows(package: str, report: dict) -> list[tuple[str, str, str, str, int]]:
+    def _finding_rows(package: str, report: dict) -> list[tuple]:
         grouped: dict[str, dict] = {}
         findings = report.get("findings") if isinstance(report.get("findings"), list) else []
+        features = report.get("features") if isinstance(report.get("features"), dict) else {}
+        difficulty_counts = (
+            features.get("review_difficulty_counts")
+            if isinstance(features.get("review_difficulty_counts"), dict)
+            else {}
+        )
         for finding in findings:
             if not isinstance(finding, dict):
                 continue
@@ -494,7 +519,16 @@ class _ReportCache:
                 affected_count = 1
             row["count"] += affected_count
         return [
-            (package, code, row["severity"], row["category"], row["count"])
+            (
+                package,
+                code,
+                row["severity"],
+                row["category"],
+                row["count"],
+                int(code in difficulty_counts),
+                int((difficulty_counts.get(code) or {}).get("full") or 0),
+                int((difficulty_counts.get(code) or {}).get("lower") or 0),
+            )
             for code, row in grouped.items()
         ]
 
@@ -624,8 +658,9 @@ class _ReportCache:
             conn.execute("DELETE FROM report_findings WHERE package = ?", (package,))
             conn.executemany(
                 "INSERT INTO report_findings "
-                "(package, code, severity, category, finding_count) "
-                "VALUES (?, ?, ?, ?, ?)",
+                "(package, code, severity, category, finding_count, "
+                "difficulty_scoped, full_difficulty_count, lower_difficulty_count) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
                 self._finding_rows(package, report),
             )
 
@@ -638,7 +673,15 @@ class _ReportCache:
                 conn.executemany("DELETE FROM reports WHERE package = ?", stale)
         return len(stale)
 
-    def replace_scope(self, packages: set[str], *, kind: str, label: str) -> None:
+    def replace_scope(
+        self,
+        packages: set[str],
+        *,
+        kind: str,
+        label: str,
+        root: Path,
+        repairs_available: bool = True,
+    ) -> None:
         with self._lock, self._conn as conn:
             conn.execute("DELETE FROM current_scope")
             if packages:
@@ -648,8 +691,23 @@ class _ReportCache:
                 )
             conn.executemany(
                 "INSERT OR REPLACE INTO cache_state(key, value) VALUES (?, ?)",
-                (("target_kind", kind), ("target_label", label)),
+                (
+                    ("target_kind", kind),
+                    ("target_label", label),
+                    ("target_root", str(root)),
+                    ("target_repairs_available", "1" if repairs_available else "0"),
+                ),
             )
+
+    def current_scope_root(self) -> str | None:
+        """Return the private filesystem root bound to the visible scan scope."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT value FROM cache_state WHERE key = 'target_root'"
+            ).fetchone()
+        if row is None or not isinstance(row["value"], str) or not row["value"]:
+            return None
+        return row["value"]
 
     def record_scan(self, state: dict) -> None:
         """Persist enough provenance to distinguish complete and partial results."""
@@ -683,15 +741,88 @@ class _ReportCache:
         with self._lock:
             rows = self._conn.execute(
                 "SELECT key, value FROM cache_state "
-                "WHERE key IN ('target_kind', 'target_label')"
+                "WHERE key IN ("
+                "'target_kind', 'target_label', 'target_repairs_available'"
+                ")"
             ).fetchall()
         values = {row["key"]: row["value"] for row in rows}
-        return {
+        target = {
             "kind": values.get("target_kind", "library"),
             "label": values.get("target_label", "Whole library"),
         }
+        if values.get("target_repairs_available", "1") == "0":
+            target["repairs_available"] = False
+        return target
 
-    def summary(self) -> dict:
+    def summary(self, review_difficulty_scope: str = "all_authored") -> dict:
+        if review_difficulty_scope not in {"full_only", "all_authored"}:
+            raise ValueError("Unknown review difficulty scope")
+        if review_difficulty_scope == "full_only":
+            visible_count = (
+                "CASE WHEN rf.difficulty_scoped = 1 "
+                "THEN rf.full_difficulty_count ELSE rf.finding_count END"
+            )
+            with self._lock:
+                row = self._conn.execute(
+                    f"""
+                    WITH package_visibility AS (
+                        SELECT
+                            r.package,
+                            r.lyrics_declared,
+                            r.preview_declared,
+                            r.deep_audio_skipped,
+                            r.deep_audio_unsupported,
+                            r.scanned_at,
+                            MAX(CASE WHEN ({visible_count}) > 0
+                                AND rf.severity = 'error' THEN 1 ELSE 0 END) AS has_error,
+                            MAX(CASE WHEN ({visible_count}) > 0
+                                AND rf.severity = 'warning' THEN 1 ELSE 0 END) AS has_warning,
+                            MAX(CASE WHEN ({visible_count}) > 0
+                                AND rf.severity = 'info' THEN 1 ELSE 0 END) AS has_review,
+                            SUM(CASE WHEN ({visible_count}) > 0
+                                AND rf.severity = 'error' THEN 1 ELSE 0 END) AS error_findings,
+                            SUM(CASE WHEN ({visible_count}) > 0
+                                AND rf.severity = 'warning' THEN 1 ELSE 0 END) AS warning_findings,
+                            SUM(CASE WHEN ({visible_count}) > 0
+                                AND rf.severity = 'info' THEN 1 ELSE 0 END) AS review_findings
+                        FROM reports AS r
+                        INNER JOIN current_scope AS s ON s.package = r.package
+                        LEFT JOIN report_findings AS rf ON rf.package = r.package
+                        GROUP BY r.package
+                    )
+                    SELECT
+                        COUNT(*) AS total,
+                        SUM(CASE WHEN has_error = 0 AND has_warning = 0
+                            AND has_review = 0 THEN 1 ELSE 0 END) AS healthy,
+                        SUM(CASE WHEN has_error > 0 THEN 1 ELSE 0 END) AS errors,
+                        SUM(CASE WHEN has_error = 0 AND has_warning > 0
+                            THEN 1 ELSE 0 END) AS warnings,
+                        SUM(CASE WHEN has_review > 0 THEN 1 ELSE 0 END) AS reviews,
+                        COALESCE(SUM(error_findings), 0) AS error_findings,
+                        COALESCE(SUM(warning_findings), 0) AS warning_findings,
+                        COALESCE(SUM(review_findings), 0) AS review_findings,
+                        SUM(CASE WHEN lyrics_declared = 0 THEN 1 ELSE 0 END) AS no_lyrics,
+                        SUM(CASE WHEN preview_declared = 0 THEN 1 ELSE 0 END) AS no_preview,
+                        SUM(CASE WHEN deep_audio_skipped > 0 OR deep_audio_unsupported > 0
+                            THEN 1 ELSE 0 END) AS deep_audio_partial,
+                        MAX(scanned_at) AS last_scanned_at
+                    FROM package_visibility
+                    """
+                ).fetchone()
+            return {
+                "total": int(row["total"] or 0),
+                "healthy": int(row["healthy"] or 0),
+                "errors": int(row["errors"] or 0),
+                "warnings": int(row["warnings"] or 0),
+                "reviews": int(row["reviews"] or 0),
+                "error_findings": int(row["error_findings"] or 0),
+                "warning_findings": int(row["warning_findings"] or 0),
+                "review_findings": int(row["review_findings"] or 0),
+                "no_lyrics": int(row["no_lyrics"] or 0),
+                "no_preview": int(row["no_preview"] or 0),
+                "deep_audio_partial": int(row["deep_audio_partial"] or 0),
+                "last_scanned_at": row["last_scanned_at"],
+            }
         with self._lock:
             row = self._conn.execute(
                 """
@@ -733,19 +864,41 @@ class _ReportCache:
         result_filter: str,
         query: str,
         rule_code: str = "",
+        review_difficulty_scope: str = "all_authored",
     ) -> tuple[str, list[str]]:
         clauses = []
         params: list[str] = []
+        visible = (
+            "(rf.difficulty_scoped = 0 OR rf.full_difficulty_count > 0)"
+            if review_difficulty_scope == "full_only"
+            else "(rf.difficulty_scoped = 0 OR "
+            "rf.full_difficulty_count + rf.lower_difficulty_count > 0)"
+        )
+        visible_exists = (
+            "EXISTS (SELECT 1 FROM report_findings AS rf "
+            f"WHERE rf.package = r.package AND {visible})"
+        )
         if result_filter == "problems":
-            clauses.append("(r.error_count > 0 OR r.warning_count > 0 OR r.info_count > 0)")
+            clauses.append(visible_exists)
         elif result_filter == "errors":
-            clauses.append("r.error_count > 0")
+            clauses.append(
+                "EXISTS (SELECT 1 FROM report_findings AS rf WHERE rf.package = r.package "
+                f"AND rf.severity = 'error' AND {visible})"
+            )
         elif result_filter == "warnings":
-            clauses.append("r.error_count = 0 AND r.warning_count > 0")
+            clauses.append(
+                "NOT EXISTS (SELECT 1 FROM report_findings AS rf WHERE rf.package = r.package "
+                f"AND rf.severity = 'error' AND {visible}) AND "
+                "EXISTS (SELECT 1 FROM report_findings AS rf WHERE rf.package = r.package "
+                f"AND rf.severity = 'warning' AND {visible})"
+            )
         elif result_filter == "review":
-            clauses.append("r.info_count > 0")
+            clauses.append(
+                "EXISTS (SELECT 1 FROM report_findings AS rf WHERE rf.package = r.package "
+                f"AND rf.severity = 'info' AND {visible})"
+            )
         elif result_filter == "healthy":
-            clauses.append("r.error_count = 0 AND r.warning_count = 0 AND r.info_count = 0")
+            clauses.append(f"NOT {visible_exists}")
         elif result_filter == "no_lyrics":
             clauses.append("r.lyrics_declared = 0")
         elif result_filter == "no_preview":
@@ -757,7 +910,7 @@ class _ReportCache:
         if rule_code:
             clauses.append(
                 "EXISTS (SELECT 1 FROM report_findings AS rf "
-                "WHERE rf.package = r.package AND rf.code = ?)"
+                f"WHERE rf.package = r.package AND rf.code = ? AND {visible})"
             )
             params.append(rule_code)
         if query:
@@ -775,10 +928,16 @@ class _ReportCache:
         result_filter: str,
         query: str,
         rule_code: str,
+        review_difficulty_scope: str,
         limit: int,
         offset: int,
     ) -> dict:
-        where, params = self._where(result_filter, query, rule_code)
+        where, params = self._where(
+            result_filter,
+            query,
+            rule_code,
+            review_difficulty_scope,
+        )
         order = (
             " ORDER BY CASE WHEN r.error_count > 0 THEN 0 "
             "WHEN r.warning_count > 0 THEN 1 WHEN r.info_count > 0 THEN 2 ELSE 3 END, "
@@ -803,21 +962,94 @@ class _ReportCache:
             except (TypeError, json.JSONDecodeError):
                 continue
             report["scanned_at"] = row["scanned_at"]
+            report = self._review_difficulty_report(
+                report, review_difficulty_scope
+            )
             items.append(report)
         return {"total": int(total), "limit": limit, "offset": offset, "items": items}
 
-    def rules(self) -> list[dict]:
+    @staticmethod
+    def _review_difficulty_report(report: dict, scope: str) -> dict:
+        scoped = dict(report)
+        features = dict(report.get("features") or {})
+        counts_by_code = features.get("review_difficulty_counts")
+        if not isinstance(counts_by_code, dict):
+            return scoped
+        visible_findings = []
+        hidden_lower = 0
+        for finding in report.get("findings") or []:
+            if not isinstance(finding, dict):
+                continue
+            difficulty = counts_by_code.get(finding.get("code"))
+            if not isinstance(difficulty, dict):
+                visible_findings.append(finding)
+                continue
+            full_count = max(0, int(difficulty.get("full") or 0))
+            lower_count = max(0, int(difficulty.get("lower") or 0))
+            hidden_lower += lower_count
+            visible_count = (
+                full_count if scope == "full_only" else full_count + lower_count
+            )
+            if visible_count == 0:
+                continue
+            visible = dict(finding)
+            visible["affected_count"] = visible_count
+            message = str(visible.get("message") or "")
+            first, separator, rest = message.partition(" ")
+            if separator and first.isdigit():
+                visible["message"] = f"{visible_count} {rest}"
+            visible_findings.append(visible)
+        scoped["findings"] = visible_findings
+        scoped["counts"] = {
+            severity: sum(
+                finding.get("severity") == severity
+                for finding in visible_findings
+                if isinstance(finding, dict)
+            )
+            for severity in ("error", "warning", "info")
+        }
+        if scoped["counts"]["error"]:
+            scoped["status"] = "error"
+        elif scoped["counts"]["warning"]:
+            scoped["status"] = "warning"
+        elif scoped["counts"]["info"]:
+            scoped["status"] = "review"
+        else:
+            scoped["status"] = "healthy"
+        features["review_difficulty_filter"] = {
+            "scope": scope,
+            "hidden_lower_count": hidden_lower if scope == "full_only" else 0,
+        }
+        scoped["features"] = features
+        return scoped
+
+    def rules(self, review_difficulty_scope: str = "all_authored") -> list[dict]:
+        visible = (
+            "WHERE (rf.difficulty_scoped = 0 OR rf.full_difficulty_count > 0)"
+            if review_difficulty_scope == "full_only"
+            else "WHERE (rf.difficulty_scoped = 0 OR "
+            "rf.full_difficulty_count + rf.lower_difficulty_count > 0)"
+        )
+        finding_count = (
+            "CASE WHEN rf.difficulty_scoped = 1 "
+            "THEN rf.full_difficulty_count ELSE rf.finding_count END"
+            if review_difficulty_scope == "full_only"
+            else "CASE WHEN rf.difficulty_scoped = 1 THEN "
+            "rf.full_difficulty_count + rf.lower_difficulty_count "
+            "ELSE rf.finding_count END"
+        )
         with self._lock:
             rows = self._conn.execute(
-                """
+                f"""
                 SELECT
                     rf.code,
                     rf.severity,
                     rf.category,
                     COUNT(*) AS package_count,
-                    COALESCE(SUM(rf.finding_count), 0) AS finding_count
+                    COALESCE(SUM({finding_count}), 0) AS finding_count
                 FROM report_findings AS rf
                 INNER JOIN current_scope AS s ON s.package = rf.package
+                {visible}
                 GROUP BY rf.code, rf.severity, rf.category
                 ORDER BY
                     CASE rf.severity WHEN 'error' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END,
@@ -842,9 +1074,12 @@ class _ReportCache:
         result_filter: str,
         query: str,
         rule_code: str,
+        review_difficulty_scope: str = "all_authored",
         include_signature: bool = False,
     ) -> list[dict]:
-        where, params = self._where(result_filter, query, rule_code)
+        where, params = self._where(
+            result_filter, query, rule_code, review_difficulty_scope
+        )
         source = (
             " FROM reports AS r "
             "INNER JOIN current_scope AS s ON s.package = r.package"
@@ -873,9 +1108,12 @@ class _ReportCache:
         result_filter: str,
         query: str,
         rule_code: str,
+        review_difficulty_scope: str = "all_authored",
     ):
         """Yield export reports without retaining the whole result set in memory."""
-        where, params = self._where(result_filter, query, rule_code)
+        where, params = self._where(
+            result_filter, query, rule_code, review_difficulty_scope
+        )
         source = (
             " FROM reports AS r "
             "INNER JOIN current_scope AS s ON s.package = r.package"
@@ -951,7 +1189,9 @@ class LibraryScanner:
         self._run_started_monotonic: float | None = None
         self._thread: threading.Thread | None = None
         self._worker_pool = None
-        self._status = self._initial_status(self._cache.current_target())
+        cached_target = self._cache.current_target()
+        self._scope_root = self._resolve_cached_scope_root(cached_target)
+        self._status = self._initial_status(cached_target)
 
     @staticmethod
     def _initial_status(target: dict | None = None) -> dict:
@@ -1010,7 +1250,9 @@ class LibraryScanner:
             "target": target or {"kind": "library", "label": "Whole library"},
         }
 
-    def status(self) -> dict:
+    def status(self, review_difficulty_scope: str = "all_authored") -> dict:
+        if review_difficulty_scope not in {"full_only", "all_authored"}:
+            raise ValueError("Unknown review difficulty scope")
         with self._lock:
             status = dict(self._status)
         with self._playback_condition:
@@ -1018,7 +1260,8 @@ class LibraryScanner:
         status["playback_paused"] = bool(
             status["running"] and status["stage"] == "paused"
         )
-        status["summary"] = self._cache.summary()
+        status["summary"] = self._cache.summary(review_difficulty_scope)
+        status["review_difficulty_scope"] = review_difficulty_scope
         last_scan = self._cache.last_scan()
         scan_current = bool(
             isinstance(last_scan, dict)
@@ -1031,7 +1274,130 @@ class LibraryScanner:
             status.get("scope_complete") and scan_current
         )
         status["last_scan"] = last_scan
+        target = dict(status.get("target") or {})
+        if self.repairs_available():
+            target.pop("repairs_available", None)
+        else:
+            target["repairs_available"] = False
+        status["target"] = target
         return status
+
+    def _resolve_cached_scope_root(self, target: dict) -> Path | None:
+        if target.get("repairs_available") is False:
+            return None
+        root_value = self._cache.current_scope_root()
+        if root_value:
+            try:
+                root = Path(root_value).resolve(strict=True)
+            except OSError:
+                return None
+            return root if root.is_dir() else None
+        # Caches created before targeted external scans stored no private root.
+        # Their package identifiers are safe to bind to the configured library
+        # only when that older cache did not explicitly mark itself read-only.
+        configured = self._get_dlc_dir()
+        if not configured:
+            return None
+        try:
+            root = Path(configured).resolve(strict=True)
+        except OSError:
+            return None
+        return root if root.is_dir() else None
+
+    def current_repair_root(self) -> Path | None:
+        """Return the private root that owns package IDs in the current scope."""
+        with self._lock:
+            root = self._scope_root
+        if root is None:
+            return None
+        try:
+            resolved = root.resolve(strict=True)
+        except OSError:
+            return None
+        return resolved if resolved.is_dir() else None
+
+    def repairs_available(self) -> bool:
+        """Return whether package IDs are bound to an available scan root."""
+        return self.current_repair_root() is not None
+
+    def _current_package_path(self, package: str) -> tuple[Path, str]:
+        """Resolve one public package id inside the current private scan scope."""
+        relative = PurePosixPath(str(package))
+        if (
+            relative.is_absolute()
+            or "\\" in str(package)
+            or any(part in {"", ".", ".."} for part in relative.parts)
+            or relative.suffix.lower() not in SONG_SUFFIXES
+        ):
+            raise ValueError("The package path is invalid.")
+        root = self.current_repair_root()
+        if root is None:
+            raise ValueError("Scan the selected target again before using repairs.")
+        try:
+            package_path = root.joinpath(*relative.parts).resolve(strict=True)
+            package_path.relative_to(root)
+        except (OSError, ValueError) as exc:
+            raise ValueError("The package is unavailable in the current scan.") from exc
+        if not (package_path.is_file() or package_path.is_dir()):
+            raise ValueError("The package is unavailable in the current scan.")
+        return package_path, relative.as_posix()
+
+    def player_review_availability(self, package: str) -> dict:
+        """Return a privacy-safe normal-Player binding for one scanned package.
+
+        Normal FeedBack playback intentionally resolves only inside the configured
+        song library. Library Doctor may scan and repair an explicitly selected
+        external scope, but it must not weaken that playback boundary.
+        """
+        unavailable = {
+            "schema": "library_doctor.player_review_availability.v1",
+            "available": False,
+            "reason": "outside_configured_library",
+            "message": (
+                "Library Doctor found repairs that require manual review, but "
+                "Player Review is unavailable because this song is outside the "
+                "configured song library. Automatic and standard repairs remain "
+                "available, and no manual change was made."
+            ),
+        }
+        try:
+            package_path, package_name = self._current_package_path(package)
+        except ValueError:
+            return {
+                **unavailable,
+                "reason": "scan_scope_unavailable",
+                "message": (
+                    "Player Review is unavailable because this package is no "
+                    "longer bound to the current scan. Scan it again first."
+                ),
+            }
+        configured_value = self._get_dlc_dir()
+        if not configured_value:
+            return unavailable
+        try:
+            configured_root = Path(configured_value).resolve(strict=True)
+            relative = package_path.relative_to(configured_root)
+        except (OSError, ValueError):
+            return unavailable
+        if not configured_root.is_dir():
+            return unavailable
+        # The player filename is library-relative and contains no private root.
+        # Resolve equality with the current package name only when the current
+        # scan root is the configured library; nested scans may legitimately use
+        # a different public package id for the same in-library package.
+        playback_filename = PurePosixPath(*relative.parts).as_posix()
+        if not playback_filename or playback_filename.startswith("../"):
+            return unavailable
+        return {
+            "schema": "library_doctor.player_review_availability.v1",
+            "available": True,
+            "reason": "",
+            "message": (
+                "Player Review can open this song in FeedBack's normal Player."
+            ),
+            "playback_filename": playback_filename,
+            "package": package_name,
+        }
 
     def start(
         self,
@@ -1052,6 +1418,7 @@ class LibraryScanner:
             if self._status["running"] or self._status.get("repairing"):
                 return False
             root, target_path, target = self._resolve_target(target_kind, selected_path)
+            self._scope_root = root
             self._cancel.clear()
             started_at = time.time()
             self._run_started_monotonic = time.monotonic()
@@ -1133,23 +1500,10 @@ class LibraryScanner:
         deep_audio: bool = False,
     ) -> dict:
         """Replace one cached report after a separately validated repair."""
-        relative = PurePosixPath(str(package))
-        if (
-            relative.is_absolute()
-            or "\\" in str(package)
-            or any(part in {"", ".", ".."} for part in relative.parts)
-            or relative.suffix.lower() not in SONG_SUFFIXES
-        ):
-            raise ValueError("The repaired package path is invalid.")
-        root_value = self._get_dlc_dir()
-        if not root_value:
-            raise ValueError("No song library folder is configured in FeedBack Settings.")
-        root = Path(root_value).resolve(strict=True)
-        package_path = root.joinpath(*relative.parts).resolve(strict=True)
-        package_path.relative_to(root)
-        if not (package_path.is_file() or package_path.is_dir()):
-            raise ValueError("The repaired package is unavailable.")
-        package_name = relative.as_posix()
+        package_path, package_name = self._current_package_path(package)
+        root = self.current_repair_root()
+        if root is None:  # Kept explicit for type narrowing and race safety.
+            raise ValueError("Scan the selected target again before using repairs.")
         root_namespace = hashlib.blake2b(
             str(root).casefold().encode("utf-8", "surrogatepass"), digest_size=12
         ).hexdigest()
@@ -1267,6 +1621,7 @@ class LibraryScanner:
         result_filter: str = "all",
         query: str = "",
         rule_code: str = "",
+        review_difficulty_scope: str = "all_authored",
         limit: int = 50,
         offset: int = 0,
     ) -> dict:
@@ -1276,10 +1631,13 @@ class LibraryScanner:
         offset = max(0, int(offset))
         query = str(query).strip()[:200]
         rule_code = str(rule_code).strip()[:200]
+        if review_difficulty_scope not in {"full_only", "all_authored"}:
+            raise ValueError("Unknown review difficulty scope")
         payload = self._cache.results(
             result_filter=result_filter,
             query=query,
             rule_code=rule_code,
+            review_difficulty_scope=review_difficulty_scope,
             limit=limit,
             offset=offset,
         )
@@ -1293,6 +1651,11 @@ class LibraryScanner:
         preview_rule_codes=(),
     ) -> dict:
         """Return a bounded snapshot of repairable packages in current scan scope."""
+        if not self.repairs_available():
+            raise ValueError(
+                "The selected scan root is unavailable. Scan that target again "
+                "before reviewing a batch repair."
+            )
         safe_codes = {
             str(code) for code in safe_rule_codes
             if isinstance(code, str) and code
@@ -1443,10 +1806,9 @@ class LibraryScanner:
         ):
             return False
         try:
-            root_value = self._get_dlc_dir()
-            if not root_value:
+            root = self.current_repair_root()
+            if root is None:
                 return False
-            root = Path(root_value).resolve(strict=True)
             package_path = root.joinpath(*relative.parts).resolve(strict=True)
             package_path.relative_to(root)
             if not (package_path.is_file() or package_path.is_dir()):
@@ -1518,6 +1880,23 @@ class LibraryScanner:
         features["repair_scan_current"] = (
             report.get("validator_version") == self._validator_version
         )
+        package = report.get("package")
+        player_review = (
+            self.player_review_availability(package)
+            if isinstance(package, str) and package
+            else {
+                "schema": "library_doctor.player_review_availability.v1",
+                "available": False,
+                "reason": "scan_scope_unavailable",
+                "message": "Player Review is unavailable until this package is scanned again.",
+            }
+        )
+        # The normal-player filename is only needed by the explicit, guarded
+        # Player Review endpoint. Reports and exports carry capability state but
+        # never an additional source locator.
+        player_review.pop("playback_filename", None)
+        player_review.pop("package", None)
+        features["player_review"] = player_review
         report["features"] = features
         for finding in findings:
             if not isinstance(finding, dict):
@@ -1537,10 +1916,14 @@ class LibraryScanner:
             if isinstance(repair_status, dict) and isinstance(rule, dict):
                 status = repair_status.get("status")
                 if status == "author_review":
-                    rule["repairability"] = "review_required"
-                    rule["guidance"] = repair_status.get("message") or (
-                        "This occurrence needs author review before it is changed."
-                    )
+                    if player_review.get("available") is False:
+                        rule["repairability"] = "manual"
+                        rule["guidance"] = player_review["message"]
+                    else:
+                        rule["repairability"] = "review_required"
+                        rule["guidance"] = repair_status.get("message") or (
+                            "This occurrence needs author review before it is changed."
+                        )
                 elif status == "unavailable":
                     rule["repairability"] = "manual"
                     rule["guidance"] = repair_status.get("message") or (
@@ -1548,6 +1931,14 @@ class LibraryScanner:
                     )
                 elif status == "automatic":
                     rule["repairability"] = "safe_candidate"
+            if (
+                isinstance(rule, dict)
+                and player_review.get("available") is False
+                and category == "authoring_review"
+                and rule.get("repairability") == "review_required"
+            ):
+                rule["repairability"] = "manual"
+                rule["guidance"] = player_review["message"]
             finding.setdefault("affected_count", 1)
             finding.setdefault("evidence", {
                 key: value
@@ -1560,8 +1951,10 @@ class LibraryScanner:
                 if value not in (None, "")
             })
 
-    def rules(self) -> dict:
-        items = self._cache.rules()
+    def rules(self, review_difficulty_scope: str = "all_authored") -> dict:
+        if review_difficulty_scope not in {"full_only", "all_authored"}:
+            raise ValueError("Unknown review difficulty scope")
+        items = self._cache.rules(review_difficulty_scope)
         if self._rule_metadata is not None:
             for item in items:
                 item["rule"] = self._rule_metadata(
@@ -1585,6 +1978,7 @@ class LibraryScanner:
         result_filter: str = "all",
         query: str = "",
         rule_code: str = "",
+        review_difficulty_scope: str = "all_authored",
     ) -> tuple[str, str, str]:
         if result_filter not in RESULT_FILTERS:
             raise ValueError(f"Unknown result filter: {result_filter}")
@@ -1593,11 +1987,20 @@ class LibraryScanner:
             raise ValueError("Choose JSON or CSV export format.")
         query = str(query).strip()[:200]
         rule_code = str(rule_code).strip()[:200]
+        if review_difficulty_scope not in {"full_only", "all_authored"}:
+            raise ValueError("Unknown review difficulty scope")
         reports = self._cache.matching_reports(
             result_filter=result_filter,
             query=query,
             rule_code=rule_code,
+            review_difficulty_scope=review_difficulty_scope,
         )
+        reports = [
+            self._cache._review_difficulty_report(
+                report, review_difficulty_scope
+            )
+            for report in reports
+        ]
         if export_format == "json":
             if rule_code:
                 for report in reports:
@@ -1616,6 +2019,7 @@ class LibraryScanner:
                     "result": result_filter,
                     "query": query,
                     "rule": rule_code,
+                    "review_difficulty_scope": review_difficulty_scope,
                 },
                 "packages": reports,
             }
@@ -1679,6 +2083,7 @@ class LibraryScanner:
         result_filter: str = "all",
         query: str = "",
         rule_code: str = "",
+        review_difficulty_scope: str = "all_authored",
     ) -> tuple[str, str, object]:
         """Return a bounded-memory iterator for an in-game report download."""
         if result_filter not in RESULT_FILTERS:
@@ -1688,13 +2093,19 @@ class LibraryScanner:
             raise ValueError("Choose JSON or CSV export format.")
         query = str(query).strip()[:200]
         rule_code = str(rule_code).strip()[:200]
+        if review_difficulty_scope not in {"full_only", "all_authored"}:
+            raise ValueError("Unknown review difficulty scope")
 
         def reports():
             for report in self._cache.iter_matching_reports(
                 result_filter=result_filter,
                 query=query,
                 rule_code=rule_code,
+                review_difficulty_scope=review_difficulty_scope,
             ):
+                report = self._cache._review_difficulty_report(
+                    report, review_difficulty_scope
+                )
                 self._enrich_report(report)
                 if rule_code:
                     findings = report.get("findings")
@@ -1716,6 +2127,7 @@ class LibraryScanner:
                     "result": result_filter,
                     "query": query,
                     "rule": rule_code,
+                    "review_difficulty_scope": review_difficulty_scope,
                 },
             }
 
@@ -1812,58 +2224,82 @@ class LibraryScanner:
             raise ValueError("Choose the whole library, a folder, or a Feedpak file.")
 
         root_value = self._get_dlc_dir()
-        if not root_value:
-            raise ValueError("No song library folder is configured in FeedBack Settings.")
-        configured_root = Path(root_value).absolute()
-        try:
-            root = configured_root.resolve(strict=True)
-        except OSError as exc:
-            raise ValueError("The configured song library folder is unavailable.") from exc
-        if not root.is_dir():
-            raise ValueError("The configured song library folder is unavailable.")
+        configured_root = None
+        if root_value:
+            try:
+                candidate_root = Path(root_value).absolute().resolve(strict=True)
+            except OSError:
+                candidate_root = None
+            if candidate_root is not None and candidate_root.is_dir():
+                configured_root = candidate_root
 
         if kind == "library":
-            return root, root, {"kind": kind, "label": "Whole library"}
+            if configured_root is None:
+                if root_value:
+                    raise ValueError("The configured song library folder is unavailable.")
+                raise ValueError("No song library folder is configured in FeedBack Settings.")
+            return configured_root, configured_root, {
+                "kind": kind,
+                "label": "Whole library",
+            }
 
         if not isinstance(selected_path, str) or not selected_path.strip():
             noun = "folder" if kind == "folder" else "Feedpak file"
-            raise ValueError(f"Choose a {noun} inside the configured song library.")
+            raise ValueError(f"Choose a {noun} to scan.")
         if len(selected_path) > 4_096 or "\0" in selected_path:
             raise ValueError("The selected path is invalid.")
 
         candidate = Path(selected_path.strip())
         if not candidate.is_absolute():
-            candidate = configured_root / candidate
-        lexical = candidate.absolute()
-        try:
-            lexical.relative_to(configured_root)
-        except ValueError:
-            try:
-                lexical.relative_to(root)
-            except ValueError as exc:
+            if configured_root is None:
                 raise ValueError(
-                    "Choose an item inside the configured song library."
-                ) from exc
+                    "Choose an absolute folder or package path when no song library "
+                    "folder is available."
+                )
+            candidate = configured_root / candidate
 
         try:
             resolved = candidate.resolve(strict=True)
-            relative = resolved.relative_to(root)
-        except (OSError, ValueError) as exc:
-            raise ValueError(
-                "The selected item is unavailable or outside the configured song library."
-            ) from exc
+        except OSError as exc:
+            raise ValueError("The selected item is unavailable.") from exc
 
         if kind == "folder":
             if not resolved.is_dir():
                 raise ValueError("The selected scan target is not a folder.")
-            if resolved == root:
-                return root, root, {"kind": "library", "label": "Whole library"}
         else:
             if not resolved.is_file() or resolved.suffix.lower() not in SONG_SUFFIXES:
                 raise ValueError("Choose a .feedpak or .sloppak file.")
 
-        label = relative.as_posix() or "Whole library"
-        return root, resolved, {"kind": kind, "label": label}
+        relative = None
+        if configured_root is not None:
+            try:
+                relative = resolved.relative_to(configured_root)
+            except ValueError:
+                pass
+
+        if relative is not None:
+            if kind == "folder" and resolved == configured_root:
+                return configured_root, configured_root, {
+                    "kind": "library",
+                    "label": "Whole library",
+                }
+            return configured_root, resolved, {
+                "kind": kind,
+                "label": relative.as_posix(),
+            }
+
+        # An explicitly selected external target is a self-contained scan and
+        # repair scope. Package identifiers remain relative and never expose the
+        # user's absolute path in status, reports, logs, or exports. The private
+        # root is retained separately so every repair remains bound to exactly
+        # the filesystem scope that produced the report.
+        package_directory = resolved.name.lower().endswith(SONG_SUFFIXES)
+        root = resolved.parent if kind == "file" or package_directory else resolved
+        label = resolved.name or ("Selected folder" if kind == "folder" else "Selected package")
+        return root, resolved, {
+            "kind": kind,
+            "label": label,
+        }
 
     @staticmethod
     def _discover(
@@ -2033,6 +2469,7 @@ class LibraryScanner:
     def _finish_cancelled(
         self,
         *,
+        root: Path,
         target: dict,
         deep_audio: bool,
         started_at: float,
@@ -2047,6 +2484,8 @@ class LibraryScanner:
                 completed_packages,
                 kind=target["kind"],
                 label=target["label"],
+                root=root,
+                repairs_available=target.get("repairs_available") is not False,
             )
         completed_at = time.time()
         self._set_status(
@@ -2255,6 +2694,7 @@ class LibraryScanner:
             self._set_status(performance=public_performance())
             if self._cancel.is_set():
                 self._finish_cancelled(
+                    root=root,
                     target=target,
                     deep_audio=deep_audio,
                     started_at=started_at,
@@ -2349,6 +2789,7 @@ class LibraryScanner:
                 self._playback_checkpoint()
                 if self._cancel.is_set():
                     self._finish_cancelled(
+                        root=root,
                         target=target,
                         deep_audio=deep_audio,
                         started_at=started_at,
@@ -2712,6 +3153,7 @@ class LibraryScanner:
 
             if self._cancel.is_set():
                 self._finish_cancelled(
+                    root=root,
                     target=target,
                     deep_audio=deep_audio,
                     started_at=started_at,
@@ -2744,6 +3186,8 @@ class LibraryScanner:
                     completed_packages,
                     kind=target["kind"],
                     label=target["label"],
+                    root=root,
+                    repairs_available=target.get("repairs_available") is not False,
                 )
             finally:
                 timed_phase("scope_update_seconds", operation_started)

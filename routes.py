@@ -153,14 +153,26 @@ def setup(app, context):
         log=log,
         probe_duration=validator.probe_ogg_duration,
     )
+
+    def get_repair_dlc_dir():
+        root = scanner.current_repair_root()
+        if root is None:
+            raise repair_module.RepairPlanningError(
+                "repair_scope_unavailable",
+                "The selected scan target is unavailable. Scan that folder or package "
+                "again before using repairs.",
+            )
+        return root
+
     repair_service = repair_module.RepairService(
         config_dir=Path(context["config_dir"]),
-        get_dlc_dir=get_dlc_dir,
+        get_dlc_dir=get_repair_dlc_dir,
         validate_feedpak=validator.validate_feedpak,
         validator_version=validator.VALIDATOR_VERSION,
         log=log,
         legacy_schemas=migration.LEGACY_SCHEMAS,
         preview_repair=preview_repair,
+        validate_reviewed_arrangement=validator.validate_reviewed_arrangement,
     )
     batch_manager = batch_module.BatchRepairManager(
         config_dir=Path(context["config_dir"]),
@@ -223,15 +235,22 @@ def setup(app, context):
         )
 
     @router.get("/status", response_model=contracts.StatusContract)
-    def get_status():
-        status = scanner.status()
+    def get_status(
+        review_difficulty_scope: str = Query(default="all_authored"),
+    ):
+        try:
+            status = scanner.status(review_difficulty_scope)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
         status["batch"] = batch_manager.status()
         return status
 
     @router.put("/playback")
     def set_playback_state(state: contracts.PlaybackStateRequestContract):
         changed = scanner.set_playback_active(state.active)
-        return {"changed": changed, "status": get_status()}
+        status = scanner.status()
+        status["batch"] = batch_manager.status()
+        return {"changed": changed, "status": status}
 
     @router.post("/scan", status_code=202)
     def start_scan(
@@ -259,18 +278,23 @@ def setup(app, context):
                 file_state="unchanged",
                 next_action="correct_request",
             ) from exc
-        return {"started": started, "status": get_status()}
+        status = scanner.status()
+        status["batch"] = batch_manager.status()
+        return {"started": started, "status": status}
 
     @router.post("/cancel", status_code=202)
     def cancel_scan():
         accepted = scanner.cancel()
-        return {"accepted": accepted, "status": get_status()}
+        status = scanner.status()
+        status["batch"] = batch_manager.status()
+        return {"accepted": accepted, "status": status}
 
     @router.get("/results", response_model=contracts.ResultsContract)
     def get_results(
         result_filter: str = Query(default="all", alias="filter"),
         query: str = Query(default="", max_length=200),
         rule: str = Query(default="", max_length=200),
+        review_difficulty_scope: str = Query(default="all_authored"),
         limit: int = Query(default=50, ge=1, le=100),
         offset: int = Query(default=0, ge=0),
     ):
@@ -279,6 +303,7 @@ def setup(app, context):
                 result_filter=result_filter,
                 query=query,
                 rule_code=rule,
+                review_difficulty_scope=review_difficulty_scope,
                 limit=limit,
                 offset=offset,
             )
@@ -292,8 +317,19 @@ def setup(app, context):
             ) from exc
 
     @router.get("/rules")
-    def get_rules():
-        return scanner.rules()
+    def get_rules(
+        review_difficulty_scope: str = Query(default="all_authored"),
+    ):
+        try:
+            return scanner.rules(review_difficulty_scope)
+        except ValueError as exc:
+            raise http_error(
+                400,
+                "invalid_results_query",
+                str(exc),
+                file_state="unchanged",
+                next_action="correct_request",
+            ) from exc
 
     @router.get("/repairs", response_model=contracts.RepairCatalogContract)
     def get_repairs():
@@ -576,23 +612,76 @@ def setup(app, context):
 
     @router.post("/reviewed-repair/inspect")
     def inspect_reviewed_repair(payload: contracts.ReviewedInspectRequestContract):
+        require_player_review(payload.package)
         try:
             return repair_service.inspect_reviewed(
                 payload.package,
                 payload.adapter_id,
+                difficulty_scope=payload.difficulty_scope,
                 offset=payload.offset,
                 limit=payload.limit,
             )
         except repair_module.RepairPlanningError as exc:
             raise HTTPException(status_code=400, detail=repair_error(exc)) from exc
 
+    def require_player_review(package: str) -> dict:
+        availability = scanner.player_review_availability(package)
+        if not availability.get("available"):
+            raise http_error(
+                409,
+                "player_review_outside_library",
+                availability.get("message")
+                or "Player Review is unavailable for this package.",
+                file_state="unchanged",
+                retryable=False,
+                next_action="use_standard_repairs",
+            )
+        return availability
+
+    @router.post(
+        "/reviewed-repair/player-context",
+        response_model=contracts.ReviewedPlayerContextContract,
+    )
+    def inspect_reviewed_player(
+        payload: contracts.ReviewedPlayerContextRequestContract,
+    ):
+        availability = require_player_review(payload.package)
+        try:
+            return repair_service.inspect_reviewed_player(
+                payload.package,
+                payload.adapter_id,
+                availability["playback_filename"],
+                difficulty_scope=payload.difficulty_scope,
+                offset=payload.offset,
+                limit=payload.limit,
+            )
+        except repair_module.RepairPlanningError as exc:
+            raise HTTPException(status_code=400, detail=repair_error(exc)) from exc
+
+    @router.post("/reviewed-repair/options")
+    def reviewed_repair_options(
+        payload: contracts.ReviewedOptionsRequestContract,
+    ):
+        require_player_review(payload.package)
+        try:
+            return repair_service.reviewed_options(
+                payload.package,
+                payload.adapter_id,
+                payload.candidate_id,
+                difficulty_scope=payload.difficulty_scope,
+            )
+        except repair_module.RepairPlanningError as exc:
+            raise HTTPException(status_code=400, detail=repair_error(exc)) from exc
+
     @router.post("/reviewed-repair/preview")
     def preview_reviewed_repair(payload: contracts.ReviewedPreviewRequestContract):
+        require_player_review(payload.package)
         try:
             return repair_service.preview_reviewed(
                 payload.package,
                 payload.adapter_id,
                 [decision.model_dump() for decision in payload.decisions],
+                difficulty_scope=payload.difficulty_scope,
             )
         except repair_module.RepairPlanningError as exc:
             raise HTTPException(status_code=400, detail=repair_error(exc)) from exc
@@ -601,6 +690,7 @@ def setup(app, context):
     def generate_reviewed_passage_audio(
         payload: contracts.ReviewedAudioRequestContract,
     ):
+        require_player_review(payload.package)
         try:
             return repair_service.reviewed_passage(
                 payload.package,
@@ -671,6 +761,7 @@ def setup(app, context):
         all_safe: bool = False,
         reviewed_adapter_id: str | None = None,
         reviewed_decisions: list[dict] | None = None,
+        reviewed_difficulty_scope: str = "full_only",
         ticket: dict | None = None,
     ):
         if ticket is not None and ticket.get("replay") is not None:
@@ -699,6 +790,7 @@ def setup(app, context):
                     reviewed_adapter_id,
                     reviewed_decisions or [],
                     plan_id,
+                    difficulty_scope=reviewed_difficulty_scope,
                     deep_audio=deep_audio,
                     request_id=ticket and ticket["request_id"],
                     request_fingerprint=ticket and ticket["fingerprint"],
@@ -791,6 +883,7 @@ def setup(app, context):
         payload: contracts.ReviewedApplyRequestContract,
         idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     ):
+        require_player_review(payload.package)
         decisions = [decision.model_dump() for decision in payload.decisions]
         ticket = begin_idempotent_mutation(
             "reviewed-repair.apply",
@@ -800,6 +893,7 @@ def setup(app, context):
                 "package": payload.package,
                 "adapter_id": payload.adapter_id,
                 "decisions": decisions,
+                "difficulty_scope": payload.difficulty_scope,
                 "plan_id": payload.plan_id,
             },
         )
@@ -808,6 +902,7 @@ def setup(app, context):
             payload.plan_id,
             reviewed_adapter_id=payload.adapter_id,
             reviewed_decisions=decisions,
+            reviewed_difficulty_scope=payload.difficulty_scope,
             ticket=ticket,
         )
 
@@ -1043,6 +1138,7 @@ def setup(app, context):
         result_filter: str = Query(default="all", alias="filter"),
         query: str = Query(default="", max_length=200),
         rule: str = Query(default="", max_length=200),
+        review_difficulty_scope: str = Query(default="all_authored"),
     ):
         try:
             filename, media_type, content = scanner.export_stream(
@@ -1050,6 +1146,7 @@ def setup(app, context):
                 result_filter=result_filter,
                 query=query,
                 rule_code=rule,
+                review_difficulty_scope=review_difficulty_scope,
             )
         except ValueError as exc:
             raise http_error(

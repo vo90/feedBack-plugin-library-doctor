@@ -115,6 +115,8 @@ export function createPreviewController({
             : `Replace the existing ${duration(plan.media?.original_duration_seconds)} preview with this ${duration(plan.media?.candidate_duration_seconds || 30)} excerpt selected from the full song mix. The proposed clip starts at ${duration(plan.media?.start_seconds)} and is about ${plan.media?.candidate_size || 'a short clip'} instead of ${plan.media?.original_size || 'the current preview'}.`
           : plan.change_kind === 'normalize'
             ? `Change ${number(repairChangeCount(plan))} negative ${itemName}${repairChangeCount(plan) === 1 ? '' : 's'} to fret 0 at ${number(plan.musical_positions)} musical ${plan.musical_positions === 1 ? 'position' : 'positions'}, across ${number(plan.arrays_affected)} stored ${plan.arrays_affected === 1 ? 'list' : 'lists'}. Every other property is kept unchanged.`
+            : plan.change_kind === 'omit_empty'
+              ? `Omit ${number(repairChangeCount(plan))} empty optional ${itemName}${repairChangeCount(plan) === 1 ? '' : 's'} across ${number(plan.member_count)} song-data ${plan.member_count === 1 ? 'file' : 'files'}. Each value is exactly an empty array; no musical event or position is removed.`
             : plan.change_kind === 'reorder'
             ? `Put ${number(repairChangeCount(plan))} ${itemName}${repairChangeCount(plan) === 1 ? '' : 's'} into chronological order across ${number(plan.arrays_affected)} stored ${plan.arrays_affected === 1 ? 'list' : 'lists'}, affecting ${number(plan.musical_positions)} musical ${plan.musical_positions === 1 ? 'position' : 'positions'}. Every entry and stored property is kept.`
             : plan.change_kind === 'remove_redundant'

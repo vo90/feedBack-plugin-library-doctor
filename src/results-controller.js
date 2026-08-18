@@ -13,6 +13,7 @@ export function createResultsController({
   state,
   text,
 }) {
+  let rulesRequest = 0;
   const el = new Proxy({}, {
     get(_target, key) { return getElements()?.[key]; },
   });
@@ -78,6 +79,16 @@ export function createResultsController({
 
     const body = make('div', 'lh-package-body');
     body.appendChild(make('p', 'lh-package-path', report.package || ''));
+    const hiddenLower = Number(
+      report.features?.review_difficulty_filter?.hidden_lower_count || 0,
+    );
+    if (hiddenLower > 0) {
+      body.appendChild(make(
+        'p',
+        'lh-repair-warning lh-review-difficulty-hidden',
+        `${number(hiddenLower)} lower-difficulty manual-review finding${hiddenLower === 1 ? '' : 's'} hidden by “Max difficulty only.” Use the Manual Player Review filter above to show them immediately; automatic safe repairs remain visible and no rescan is needed.`,
+      ));
+    }
     const allSafe = actionRegistry.allSafeRepairControls(report);
     if (allSafe) body.appendChild(allSafe);
     if (findings.length) {
@@ -89,7 +100,9 @@ export function createResultsController({
       body.appendChild(make(
         'p',
         'lh-healthy-copy',
-        partial
+        hiddenLower
+          ? 'No max-difficulty issues were found. Lower-difficulty manual-review findings are hidden by the current filter; automatic safe repairs are unaffected.'
+          : partial
           ? 'No issues were found by the checks that completed. Deep audio verification was partial for this package.'
           : 'No issues were found by the current checks.',
       ));
@@ -164,10 +177,14 @@ export function createResultsController({
   }
 
   async function loadRules() {
+    const requestId = ++rulesRequest;
     setHidden(el.ruleError, true);
     try {
-      const payload = await request('/rules');
-      if (!state.active) return;
+      const params = new URLSearchParams({
+        review_difficulty_scope: state.reviewDifficultyScope,
+      });
+      const payload = await request(`/rules?${params}`);
+      if (!state.active || requestId !== rulesRequest) return;
       state.ruleMetadata = {};
       (payload.items || []).forEach((item) => {
         if (item?.code && item?.rule) state.ruleMetadata[item.code] = item.rule;
@@ -176,7 +193,7 @@ export function createResultsController({
       if (state.ruleCode && !available) state.ruleCode = '';
       renderRules(payload);
     } catch (error) {
-      if (isAbortError(error) || !state.active) return;
+      if (isAbortError(error) || !state.active || requestId !== rulesRequest) return;
       state.ruleMetadata = {};
       text(el.ruleError, error.message);
       setHidden(el.ruleError, false);
@@ -237,6 +254,7 @@ export function createResultsController({
       filter: state.filter,
       query: state.query,
       rule: state.ruleCode,
+      review_difficulty_scope: state.reviewDifficultyScope,
     });
     const link = document.createElement('a');
     link.href = `${apiRoot}/export?${params}`;
@@ -256,6 +274,7 @@ export function createResultsController({
       rule: state.ruleCode,
       limit: String(pageSize),
       offset: String(state.offset),
+      review_difficulty_scope: state.reviewDifficultyScope,
     });
     try {
       const payload = await request(`/results?${params}`);

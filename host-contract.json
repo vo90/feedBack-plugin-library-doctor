@@ -2,9 +2,9 @@
   "schema": "library_doctor.host_contract.v1",
   "declaredMinHost": "0.3.0-alpha.1",
   "minimumCompatibleBuild": {
-    "commit": "950e3483573e458cc2aa7bc255d9590808947faa",
-    "date": "2026-07-08",
-    "description": "First FeedBack build with native plugin-module loading and sandboxed src serving."
+    "commit": "05be9ebdbe5f77310178772089655dab8f415246",
+    "date": "2026-07-19",
+    "description": "First FeedBack build with native plugin modules plus the playback and chart-transform capability domains required by Player Review."
   },
   "capabilities": [
     {
@@ -47,6 +47,74 @@
         {
           "path": "plugins/__init__.py",
           "contains": "_parse_diagnostics_callable"
+        }
+      ]
+    },
+    {
+      "id": "capability-pipelines-v1",
+      "evidence": [
+        {
+          "path": "plugins/__init__.py",
+          "contains": "_CAPABILITY_STANDARD = \"capability-pipelines.v1\""
+        },
+        {
+          "path": "static/capabilities.js",
+          "contains": [
+            "async function dispatch(request = {})",
+            "function subscribe(event, fn)"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "playback-requester-v1",
+      "evidence": [
+        {
+          "path": "static/capabilities/playback.js",
+          "contains": [
+            "async function _start(ctx)",
+            "window.feedBack.playback = api"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "player-autoplay-hold-v1",
+      "evidence": [
+        {
+          "path": "static/js/session.js",
+          "contains": [
+            "window.feedBack.holdAutoplay = function ()",
+            "release.settle = function ()"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "chart-transform-provider-v1",
+      "evidence": [
+        {
+          "path": "static/capabilities/chart-transform.js",
+          "contains": [
+            "function _registerProvider(ctx = {})",
+            "capabilities.registerOwner('chart-transform'"
+          ]
+        }
+      ]
+    },
+    {
+      "id": "highway-note-state-provider-v1",
+      "evidence": [
+        {
+          "path": "static/highway.js",
+          "contains": [
+            "setNoteStateProvider(fn)",
+            "getNoteStateProvider()"
+          ]
+        },
+        {
+          "path": "static/js/highway-state-primitives.js",
+          "contains": "export function _noteState(hwState, note, chartTime)"
         }
       ]
     }

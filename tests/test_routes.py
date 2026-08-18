@@ -442,22 +442,144 @@ def test_single_file_scan_accepts_one_feedpak(tmp_path):
     client.close()
 
 
-def test_scan_rejects_targets_outside_the_configured_library(tmp_path):
-    client, _library = _client(tmp_path)
+def test_external_folder_scan_repairs_external_package_not_library_collision(tmp_path):
+    client, library = _client(tmp_path)
+    configured = _valid_package(library, "Collision.feedpak")
     outside = tmp_path / "outside"
-    outside.mkdir()
+    external = _valid_package(outside, "Collision.feedpak")
+    note = {"t": 2.0, "s": 1, "f": 5}
+    external_arrangement = external / "arrangements" / "lead.json"
+    external_arrangement.write_text(
+        json.dumps({"notes": [note, dict(note)], "chords": []}),
+        encoding="utf-8",
+    )
 
     response = client.post(
         "/api/plugins/library_doctor/scan",
         json={"scope": "folder", "path": str(outside)},
     )
+    assert response.status_code == 202
+    status = _wait_for_scan(client)
+    results = client.get("/api/plugins/library_doctor/results").json()
 
-    assert response.status_code == 400
-    assert (
-        "inside the configured song library"
-        in response.json()["detail"]["message"]
+    assert status["target"] == {"kind": "folder", "label": "outside"}
+    assert results["total"] == 1
+    assert results["items"][0]["package"] == "Collision.feedpak"
+    assert str(outside) not in json.dumps(status)
+
+    repair = client.post(
+        "/api/plugins/library_doctor/repair/preview",
+        json={
+            "package": "Collision.feedpak",
+            "rule_code": "chart.duplicate-note",
+        },
     )
-    assert str(outside) not in response.text
+    assert repair.status_code == 200
+    plan = repair.json()
+    applied = client.post(
+        "/api/plugins/library_doctor/repair/apply",
+        json={
+            "package": "Collision.feedpak",
+            "rule_code": "chart.duplicate-note",
+            "plan_id": plan["plan_id"],
+        },
+    )
+    assert applied.status_code == 200
+    assert len(json.loads(external_arrangement.read_text(encoding="utf-8"))["notes"]) == 1
+    configured_arrangement = configured / "arrangements" / "lead.json"
+    assert json.loads(configured_arrangement.read_text(encoding="utf-8"))["notes"] == []
+
+    restored = client.post(
+        "/api/plugins/library_doctor/repair/restore",
+        json={
+            "package": "Collision.feedpak",
+            "backup_id": applied.json()["backup_id"],
+        },
+    )
+    assert restored.status_code == 200
+    assert len(json.loads(external_arrangement.read_text(encoding="utf-8"))["notes"]) == 2
+    client.close()
+
+
+def test_scan_accepts_external_folder_without_a_configured_library(tmp_path):
+    client, _library = _client(tmp_path, with_library=False)
+    outside = tmp_path / "standalone"
+    _valid_package(outside, "External.feedpak")
+
+    response = client.post(
+        "/api/plugins/library_doctor/scan",
+        json={"scope": "folder", "path": str(outside)},
+    )
+    assert response.status_code == 202
+    status = _wait_for_scan(client)
+
+    assert status["stage"] == "complete"
+    assert status["summary"]["total"] == 1
+    assert status["target"] == {"kind": "folder", "label": "standalone"}
+    assert str(outside) not in json.dumps(status)
+    client.close()
+
+
+def test_scan_accepts_external_feedpak_file_without_a_configured_library(tmp_path):
+    client, _library = _client(tmp_path, with_library=False)
+    staging = _valid_package(tmp_path / "source", "staging")
+    note = {"t": 2.0, "s": 1, "f": 5}
+    (staging / "arrangements" / "lead.json").write_text(
+        json.dumps({"notes": [note, dict(note)], "chords": []}),
+        encoding="utf-8",
+    )
+    chosen = tmp_path / "External.feedpak"
+    with zipfile.ZipFile(chosen, "w") as archive:
+        for member in staging.rglob("*"):
+            if member.is_file():
+                archive.write(member, member.relative_to(staging).as_posix())
+
+    response = client.post(
+        "/api/plugins/library_doctor/scan",
+        json={"scope": "file", "path": str(chosen)},
+    )
+    assert response.status_code == 202
+    status = _wait_for_scan(client)
+    results = client.get("/api/plugins/library_doctor/results").json()
+
+    assert status["stage"] == "complete"
+    assert status["target"] == {"kind": "file", "label": "External.feedpak"}
+    assert results["total"] == 1
+    assert results["items"][0]["package"] == "External.feedpak"
+    assert str(tmp_path) not in json.dumps(status)
+
+    preview = client.post(
+        "/api/plugins/library_doctor/repair/preview",
+        json={
+            "package": "External.feedpak",
+            "rule_code": "chart.duplicate-note",
+        },
+    )
+    assert preview.status_code == 200
+    applied = client.post(
+        "/api/plugins/library_doctor/repair/apply",
+        json={
+            "package": "External.feedpak",
+            "rule_code": "chart.duplicate-note",
+            "plan_id": preview.json()["plan_id"],
+        },
+    )
+    assert applied.status_code == 200
+    with zipfile.ZipFile(chosen, "r") as archive:
+        repaired = json.loads(archive.read("arrangements/lead.json"))
+    assert len(repaired["notes"]) == 1
+
+    restored = client.post(
+        "/api/plugins/library_doctor/repair/restore",
+        json={
+            "package": "External.feedpak",
+            "backup_id": applied.json()["backup_id"],
+        },
+    )
+    assert restored.status_code == 200
+    with zipfile.ZipFile(chosen, "r") as archive:
+        original = json.loads(archive.read("arrangements/lead.json"))
+    assert len(original["notes"]) == 2
     client.close()
 
 
@@ -544,6 +666,25 @@ def test_reviewed_repair_routes_inspect_preview_apply_and_stay_out_of_safe_catal
     )
     assert inspection.status_code == 200
     candidate = inspection.json()["candidates"][0]
+    options = client.post(
+        "/api/plugins/library_doctor/reviewed-repair/options",
+        json={
+            "package": "Artist/Song.feedpak",
+            "adapter_id": "review.hopo-techniques",
+            "candidate_id": candidate["candidate_id"],
+        },
+    )
+    assert options.status_code == 200, options.text
+    option_body = options.json()
+    assert option_body["schema"] == (
+        "library_doctor.reviewed_repair_options.v1"
+    )
+    assert option_body["candidate_id"] == candidate["candidate_id"]
+    assert option_body["review_item_id"] == candidate["review_item_id"]
+    assert "set_hammer_on" in option_body["decision_names"]
+    assert "set_pull_off" not in option_body["decision_names"]
+    assert "leave_unchanged" not in option_body["decision_names"]
+    assert option_body["source"]["sha256"]
     decisions = [{
         "candidate_id": candidate["candidate_id"],
         "decision": "set_hammer_on",
@@ -600,6 +741,266 @@ def test_reviewed_repair_routes_inspect_preview_apply_and_stay_out_of_safe_catal
     )
     assert replay.status_code == 200
     assert replay.json()["idempotent_replay"] is True
+    client.close()
+
+
+def test_player_review_context_maps_normal_player_and_holds_one_undo_checkpoint(
+    tmp_path,
+):
+    client, library = _client(tmp_path)
+    package = _valid_package(library)
+    manifest_path = package / "manifest.yaml"
+    manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    manifest["arrangements"][0]["name"] = "Lead"
+    manifest["arrangements"].append({
+        "id": "bonus-lead",
+        "name": "Bonus Lead",
+        "file": "arrangements/lead.json",
+    })
+    manifest_path.write_text(
+        yaml.safe_dump(manifest, sort_keys=False), encoding="utf-8"
+    )
+    arrangement_path = package / "arrangements" / "lead.json"
+    arrangement_path.write_text(
+        json.dumps({
+            "notes": [
+                {"t": 1.0, "s": 0, "f": 3},
+                {"t": 2.0, "s": 0, "f": 5, "po": True},
+                {"t": 1.0, "s": 1, "f": 8},
+                {"t": 2.0, "s": 1, "f": 5, "ho": True},
+            ],
+            "chords": [],
+        }),
+        encoding="utf-8",
+    )
+
+    context_response = client.post(
+        "/api/plugins/library_doctor/reviewed-repair/player-context",
+        json={
+            "package": "Artist/Song.feedpak",
+            "adapter_id": "review.hopo-techniques",
+        },
+    )
+
+    assert context_response.status_code == 200, context_response.text
+    context = context_response.json()
+    assert context["schema"] == "library_doctor.player_review_context.v1"
+    assert context["playback_filename"] == "Artist/Song.feedpak"
+    assert context["capabilities"] == {
+        "normal_player": True,
+        "live_highway_preview": True,
+        "full_tab_live_preview": False,
+        "partial_apply": True,
+        "single_undo_checkpoint": True,
+    }
+    assert context["pending_recovery"] is None
+    candidates = context["inspection"]["candidates"]
+    assert len(candidates) == 2
+    assert candidates[0]["review_item_id"].startswith("hopo-item-")
+    assert candidates[0]["stream_context"] == {
+        "kind": "top_level",
+        "phrase_index": None,
+        "difficulty_index": None,
+        "difficulty_count": None,
+        "difficulty_ordinal": None,
+        "difficulty_scope": "full",
+        "is_full_difficulty": True,
+        "mastery_fraction": 1.0,
+    }
+    assert [item["index"] for item in candidates[0]["player"]["arrangements"]] == [
+        0,
+        1,
+    ]
+    assert [item["name"] for item in candidates[0]["player"]["arrangements"]] == [
+        "Lead",
+        "Bonus Lead",
+    ]
+
+    first_decision = [{
+        "candidate_id": candidates[0]["candidate_id"],
+        "decision": "set_hammer_on",
+    }]
+    first_preview = client.post(
+        "/api/plugins/library_doctor/reviewed-repair/preview",
+        json={
+            "package": "Artist/Song.feedpak",
+            "adapter_id": "review.hopo-techniques",
+            "decisions": first_decision,
+        },
+    ).json()
+    first_apply = client.post(
+        "/api/plugins/library_doctor/reviewed-repair/apply",
+        json={
+            "package": "Artist/Song.feedpak",
+            "adapter_id": "review.hopo-techniques",
+            "decisions": first_decision,
+            "plan_id": first_preview["plan_id"],
+            "request_id": "player-review-first-0001",
+        },
+    )
+    assert first_apply.status_code == 200, first_apply.text
+
+    after = client.post(
+        "/api/plugins/library_doctor/reviewed-repair/player-context",
+        json={
+            "package": "Artist/Song.feedpak",
+            "adapter_id": "review.hopo-techniques",
+        },
+    ).json()
+    assert after["pending_recovery"]["backup_id"] == first_apply.json()["backup_id"]
+    remaining = after["inspection"]["candidates"][0]
+    second_decision = [{
+        "candidate_id": remaining["candidate_id"],
+        "decision": "set_pull_off",
+    }]
+    second_preview = client.post(
+        "/api/plugins/library_doctor/reviewed-repair/preview",
+        json={
+            "package": "Artist/Song.feedpak",
+            "adapter_id": "review.hopo-techniques",
+            "decisions": second_decision,
+        },
+    )
+    assert second_preview.status_code == 200
+    blocked = client.post(
+        "/api/plugins/library_doctor/reviewed-repair/apply",
+        json={
+            "package": "Artist/Song.feedpak",
+            "adapter_id": "review.hopo-techniques",
+            "decisions": second_decision,
+            "plan_id": second_preview.json()["plan_id"],
+            "request_id": "player-review-second-0001",
+        },
+    )
+    assert blocked.status_code == 409
+    assert blocked.json()["detail"]["code"] == "reviewed_recovery_pending"
+    client.close()
+
+
+def test_player_review_difficulty_scope_filters_existing_authored_levels(tmp_path):
+    client, library = _client(tmp_path)
+    package = _valid_package(library)
+    arrangement_path = package / "arrangements" / "lead.json"
+    arrangement_path.write_text(
+        json.dumps({
+            "notes": [],
+            "chords": [],
+            "phrases": [{
+                "levels": [
+                    {
+                        "notes": [
+                            {"t": 1.0, "s": 0, "f": 3},
+                            {"t": 2.0, "s": 0, "f": 5, "po": True},
+                        ],
+                        "chords": [],
+                    },
+                    {
+                        "notes": [
+                            {"t": 1.0, "s": 0, "f": 7},
+                            {"t": 2.0, "s": 0, "f": 5, "ho": True},
+                        ],
+                        "chords": [],
+                    },
+                ],
+            }],
+        }),
+        encoding="utf-8",
+    )
+
+    full = client.post(
+        "/api/plugins/library_doctor/reviewed-repair/player-context",
+        json={
+            "package": "Artist/Song.feedpak",
+            "adapter_id": "review.hopo-techniques",
+        },
+    )
+    all_authored = client.post(
+        "/api/plugins/library_doctor/reviewed-repair/player-context",
+        json={
+            "package": "Artist/Song.feedpak",
+            "adapter_id": "review.hopo-techniques",
+            "difficulty_scope": "all_authored",
+        },
+    )
+
+    assert full.status_code == 200, full.text
+    assert all_authored.status_code == 200, all_authored.text
+    full_payload = full.json()
+    all_payload = all_authored.json()
+    assert full_payload["difficulty_scope"] == "full_only"
+    assert len(full_payload["inspection"]["candidates"]) == 1
+    assert full_payload["inspection"]["hidden_lower_candidate_count"] == 1
+    assert full_payload["inspection"]["candidates"][0]["stream_context"][
+        "difficulty_scope"
+    ] == "full"
+    assert all_payload["difficulty_scope"] == "all_authored"
+    assert len(all_payload["inspection"]["candidates"]) == 2
+    assert {
+        item["stream_context"]["difficulty_scope"]
+        for item in all_payload["inspection"]["candidates"]
+    } == {"full", "lower"}
+    by_scope = {
+        item["stream_context"]["difficulty_scope"]: item
+        for item in all_payload["inspection"]["candidates"]
+    }
+    assert by_scope["full"]["stream_context"]["mastery_fraction"] == 1.0
+    assert by_scope["full"]["player"]["mastery_fraction"] == 1.0
+    assert 0 < by_scope["lower"]["player"]["mastery_fraction"] < 1.0
+    client.close()
+
+
+def test_external_scan_reports_manual_review_but_disables_reviewed_routes(tmp_path):
+    client, _library = _client(tmp_path)
+    outside = tmp_path / "outside-review"
+    package = _valid_package(outside, "External.feedpak")
+    (package / "arrangements" / "lead.json").write_text(
+        json.dumps({
+            "notes": [
+                {"t": 1.0, "s": 0, "f": 3},
+                {"t": 2.0, "s": 0, "f": 5, "po": True},
+            ],
+            "chords": [],
+        }),
+        encoding="utf-8",
+    )
+    started = client.post(
+        "/api/plugins/library_doctor/scan",
+        json={"scope": "folder", "path": str(outside)},
+    )
+    assert started.status_code == 202
+    _wait_for_scan(client)
+    report = client.get(
+        "/api/plugins/library_doctor/results?filter=all"
+    ).json()["items"][0]
+    assert report["features"]["player_review"]["available"] is False
+    assert report["features"]["player_review"]["reason"] == (
+        "outside_configured_library"
+    )
+    reviewed = [
+        finding for finding in report["findings"]
+        if finding["code"].startswith("review.")
+    ]
+    assert reviewed
+    assert all(
+        finding["rule"]["repairability"] == "manual"
+        for finding in reviewed
+    )
+    for endpoint in (
+        "/api/plugins/library_doctor/reviewed-repair/inspect",
+        "/api/plugins/library_doctor/reviewed-repair/player-context",
+    ):
+        response = client.post(
+            endpoint,
+            json={
+                "package": "External.feedpak",
+                "adapter_id": "review.hopo-techniques",
+            },
+        )
+        assert response.status_code == 409
+        assert response.json()["detail"]["code"] == (
+            "player_review_outside_library"
+        )
+        assert str(outside) not in response.text
     client.close()
 
 
@@ -787,6 +1188,9 @@ def test_openapi_exposes_typed_mutations_and_one_error_contract(tmp_path):
         "/api/plugins/library_doctor/reviewed-repair/apply": (
             "ReviewedApplyRequestContract"
         ),
+        "/api/plugins/library_doctor/reviewed-repair/player-context": (
+            "ReviewedPlayerContextRequestContract"
+        ),
     }
     for path, schema_name in expected_requests.items():
         schema = paths[path]["post" if path != "/api/plugins/library_doctor/playback" else "put"][
@@ -806,11 +1210,29 @@ def test_openapi_exposes_typed_mutations_and_one_error_contract(tmp_path):
     client.close()
 
 
+def test_status_accepts_the_independent_review_difficulty_view(tmp_path):
+    client, _library = _client(tmp_path)
+
+    full = client.get(
+        "/api/plugins/library_doctor/status",
+        params={"review_difficulty_scope": "full_only"},
+    )
+    invalid = client.get(
+        "/api/plugins/library_doctor/status",
+        params={"review_difficulty_scope": "not-a-scope"},
+    )
+
+    assert full.status_code == 200, full.text
+    assert full.json()["review_difficulty_scope"] == "full_only"
+    assert invalid.status_code == 400
+    client.close()
+
+
 def test_unexpected_database_fault_stays_inside_the_error_contract(tmp_path):
     private_detail = "C:/Private Artist/Unreleased Song.feedpak database malformed"
 
     def scanner_hook(module):
-        def fail_status(_scanner):
+        def fail_status(_scanner, _review_difficulty_scope="all_authored"):
             raise module.sqlite3.DatabaseError(private_detail)
 
         module.LibraryScanner.status = fail_status
@@ -2948,6 +3370,55 @@ def test_batch_finalizes_every_verified_recovery_copy_without_changing_feedpaks(
     client.close()
 
 
+def test_batch_requires_recovery_resolution_before_another_preview(tmp_path):
+    client, library = _client(tmp_path)
+    package = _valid_package(library, "Pending recovery.feedpak")
+    arrangement_path = package / "arrangements" / "lead.json"
+    duplicate = {"t": 3.0, "s": 2, "f": 7}
+    arrangement_path.write_text(
+        json.dumps({"notes": [duplicate, dict(duplicate)], "chords": []}),
+        encoding="utf-8",
+    )
+    client.post("/api/plugins/library_doctor/scan")
+    _wait_for_scan(client)
+    client.post("/api/plugins/library_doctor/repair/batch/preview")
+    preview = _wait_for_batch(client, "ready")["preview"]
+    client.post(
+        "/api/plugins/library_doctor/repair/batch/apply",
+        json={"batch_plan_id": preview["batch_plan_id"]},
+    )
+    completed = _wait_for_batch(client, "completed")
+    original_result_id = completed["result"]["id"]
+    backup_dir = tmp_path / "config" / "library_doctor" / "repair_backups"
+
+    blocked = client.post("/api/plugins/library_doctor/repair/batch/preview")
+    status = client.get(
+        "/api/plugins/library_doctor/repair/batch/status"
+    ).json()
+
+    assert blocked.status_code == 409
+    assert blocked.json()["detail"]["code"] == "batch_recovery_pending"
+    assert status["phase"] == "completed"
+    assert status["result"]["id"] == original_result_id
+    assert status["result"]["undoable_count"] == 1
+    assert len(list(backup_dir.glob("*.zip"))) == 1
+
+    client.post("/api/plugins/library_doctor/repair/batch/finalize/preview")
+    finalize_preview = _wait_for_batch(client, "finalize_ready")["finalize_preview"]
+    client.post(
+        "/api/plugins/library_doctor/repair/batch/finalize/apply",
+        json={"finalize_plan_id": finalize_preview["finalize_plan_id"]},
+    )
+    finalized = _wait_for_batch(client, "finalize_completed")
+    assert finalized["result"]["undoable_count"] == 0
+    assert list(backup_dir.glob("*.zip")) == []
+
+    allowed = client.post("/api/plugins/library_doctor/repair/batch/preview")
+    assert allowed.status_code == 202
+    _wait_for_batch(client, "ready")
+    client.close()
+
+
 def test_batch_repair_counts_and_undo_include_lossless_reordering(tmp_path):
     client, library = _client(tmp_path)
     package = _valid_package(library, "Bends.feedpak")
@@ -3548,6 +4019,272 @@ def test_failed_candidate_validation_keeps_the_original_and_creates_no_backup(tm
     assert response.status_code == 409
     assert "introduced a new validation finding" in response.json()["detail"]["message"]
     assert json.loads(arrangement.read_text(encoding="utf-8")) == original_document
+    assert not (tmp_path / "config" / "library_doctor" / "repair_backups").exists()
+    client.close()
+
+
+def test_structural_repairs_are_one_validated_reversible_route_transaction(tmp_path):
+    client, library = _client(tmp_path)
+    package = _valid_package(library)
+    manifest_path = package / "manifest.yaml"
+    manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    manifest["arrangements"].append({
+        "id": "rhythm",
+        "file": "arrangements/rhythm.json",
+    })
+    manifest["song_timeline"] = "song_timeline.json"
+    manifest_path.write_text(
+        yaml.safe_dump(manifest, sort_keys=False), encoding="utf-8"
+    )
+    original_manifest = manifest_path.read_bytes()
+
+    lead_path = package / "arrangements" / "lead.json"
+    lead_document = {
+        "notes": [],
+        "chords": [],
+        "phrases": [],
+        "tempos": [],
+    }
+    original_lead = (json.dumps(lead_document, indent=2) + "\n").encode("utf-8")
+    lead_path.write_bytes(original_lead)
+
+    arrangement_late_tempo = {
+        "time": 10,
+        "bpm": 120,
+        "unknown": {"source": "arrangement"},
+    }
+    arrangement_early_tempo = {
+        "time": 2,
+        "bpm": 90,
+        "unknown": {"source": "arrangement-early"},
+    }
+    late_tone = {"t": 10, "name": "Clean", "unknown": [1, 2]}
+    early_tone = {"t": 2, "name": "Lead", "unknown": [3, 4]}
+    rhythm_document = {
+        "notes": [],
+        "chords": [],
+        "tempos": [
+            arrangement_late_tempo,
+            arrangement_early_tempo,
+            dict(arrangement_late_tempo),
+        ],
+        "tones": {
+            "changes": [late_tone, early_tone, dict(late_tone)],
+        },
+    }
+    rhythm_path = package / "arrangements" / "rhythm.json"
+    original_rhythm = json.dumps(
+        rhythm_document, ensure_ascii=False, separators=(",", ":")
+    ).encode("utf-8")
+    rhythm_path.write_bytes(original_rhythm)
+
+    sidecar_late_tempo = {"time": 8, "bpm": 140, "unknown": "late"}
+    sidecar_early_tempo = {"time": 1, "bpm": 100, "unknown": "early"}
+    late_meter = {"time": 8, "ts": [4, 4], "unknown": "late"}
+    early_meter = {"time": 0, "ts": [3, 4], "unknown": "early"}
+    timeline_document = {
+        "version": 1,
+        "tempos": [
+            sidecar_late_tempo,
+            sidecar_early_tempo,
+            dict(sidecar_late_tempo),
+        ],
+        "time_signatures": [late_meter, early_meter, dict(late_meter)],
+    }
+    timeline_path = package / "song_timeline.json"
+    original_timeline = (
+        json.dumps(timeline_document, ensure_ascii=False, indent=4) + "\n"
+    ).encode("utf-8")
+    timeline_path.write_bytes(original_timeline)
+
+    expected_rule_codes = [
+        "chart.empty-phrases-key",
+        "timeline.empty-arrangement-tempos-key",
+        "timeline.duplicate-tempo",
+        "timeline.tempos-out-of-order",
+        "timeline.duplicate-time-signature",
+        "timeline.time-signatures-out-of-order",
+        "tones.duplicate-change",
+        "tones.changes-out-of-order",
+    ]
+    expected_rule_code_set = set(expected_rule_codes)
+
+    client.post("/api/plugins/library_doctor/scan")
+    _wait_for_scan(client)
+    original_report = client.get("/api/plugins/library_doctor/results").json()[
+        "items"
+    ][0]
+    original_structural_findings = [
+        finding
+        for finding in original_report["findings"]
+        if finding["code"] in expected_rule_code_set
+    ]
+    assert {
+        finding["code"] for finding in original_structural_findings
+    } == expected_rule_code_set
+    assert all(
+        finding["rule"]["repairability"] == "safe_candidate"
+        for finding in original_structural_findings
+    )
+
+    preview = client.post(
+        "/api/plugins/library_doctor/repair/all/preview",
+        json={"package": "Artist/Song.feedpak"},
+    )
+
+    assert preview.status_code == 200
+    plan = preview.json()
+    assert plan["available"] is True
+    assert plan["blockers"] == []
+    assert plan["rule_codes"] == expected_rule_codes
+    assert plan["rule_count"] == 8
+    assert plan["member_count"] == 3
+
+    applied = client.post(
+        "/api/plugins/library_doctor/repair/all/apply",
+        json={
+            "package": "Artist/Song.feedpak",
+            "plan_id": plan["plan_id"],
+        },
+    )
+
+    assert applied.status_code == 200
+    result = applied.json()
+    assert result["rule_codes"] == expected_rule_codes
+    assert result["cache_updated"] is True
+    assert manifest_path.read_bytes() == original_manifest
+    repaired_lead = json.loads(lead_path.read_text(encoding="utf-8"))
+    assert repaired_lead == {"notes": [], "chords": []}
+    repaired_rhythm = json.loads(rhythm_path.read_text(encoding="utf-8"))
+    assert repaired_rhythm["tempos"] == [
+        arrangement_early_tempo,
+        arrangement_late_tempo,
+    ]
+    assert repaired_rhythm["tones"]["changes"] == [early_tone, late_tone]
+    repaired_timeline = json.loads(timeline_path.read_text(encoding="utf-8"))
+    assert repaired_timeline["tempos"] == [
+        sidecar_early_tempo,
+        sidecar_late_tempo,
+    ]
+    assert repaired_timeline["time_signatures"] == [early_meter, late_meter]
+    assert "beats" not in repaired_timeline
+    assert "sections" not in repaired_timeline
+    assert not (
+        expected_rule_code_set
+        & {finding["code"] for finding in result["report"]["findings"]}
+    )
+
+    backup_root = tmp_path / "config" / "library_doctor" / "repair_backups"
+    backups = list(backup_root.glob("*.zip"))
+    assert len(backups) == 1
+    with zipfile.ZipFile(backups[0], "r") as backup:
+        metadata = json.loads(backup.read("repair.json"))
+        assert metadata["rule_codes"] == expected_rule_codes
+        assert {
+            member["member_path"] for member in metadata["members"]
+        } == {
+            "arrangements/lead.json",
+            "arrangements/rhythm.json",
+            "song_timeline.json",
+        }
+
+    restored = client.post(
+        "/api/plugins/library_doctor/repair/restore",
+        json={
+            "package": "Artist/Song.feedpak",
+            "backup_id": result["backup_id"],
+        },
+    )
+
+    assert restored.status_code == 200
+    restore_result = restored.json()
+    assert restore_result["rule_codes"] == expected_rule_codes
+    assert expected_rule_code_set <= {
+        finding["code"] for finding in restore_result["report"]["findings"]
+    }
+    assert manifest_path.read_bytes() == original_manifest
+    assert lead_path.read_bytes() == original_lead
+    assert rhythm_path.read_bytes() == original_rhythm
+    assert timeline_path.read_bytes() == original_timeline
+    assert restore_result["file_handling"]["backup_removed"] is True
+    assert not backups[0].exists()
+    client.close()
+
+
+def test_manifest_tone_repair_is_blocked_before_a_backup_is_created(tmp_path):
+    client, library = _client(tmp_path)
+    package = _valid_package(library)
+    manifest_path = package / "manifest.yaml"
+    manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+    late_tone = {"t": 10, "name": "Clean", "unknown": [1, 2]}
+    manifest["arrangements"][0]["tones"] = {
+        "changes": [
+            late_tone,
+            {"t": 2, "name": "Lead"},
+            dict(late_tone),
+        ]
+    }
+    manifest_path.write_text(
+        yaml.safe_dump(manifest, sort_keys=False), encoding="utf-8"
+    )
+    original_manifest = manifest_path.read_bytes()
+    arrangement_path = package / "arrangements" / "lead.json"
+    original_arrangement = arrangement_path.read_bytes()
+
+    client.post("/api/plugins/library_doctor/scan")
+    _wait_for_scan(client)
+    report = client.get("/api/plugins/library_doctor/results").json()["items"][0]
+    tone_findings = {
+        finding["code"]: finding
+        for finding in report["findings"]
+        if finding["code"] in {
+            "tones.duplicate-change",
+            "tones.changes-out-of-order",
+        }
+    }
+    assert set(tone_findings) == {
+        "tones.duplicate-change",
+        "tones.changes-out-of-order",
+    }
+    assert all(
+        finding["rule"]["repairability"] == "manual"
+        for finding in tone_findings.values()
+    )
+
+    preview = client.post(
+        "/api/plugins/library_doctor/repair/preview",
+        json={
+            "package": "Artist/Song.feedpak",
+            "rule_code": "tones.duplicate-change",
+        },
+    )
+
+    assert preview.status_code == 200
+    plan = preview.json()
+    assert plan["available"] is False
+    assert plan["member_plans"] == []
+    assert plan["blockers"] == [{
+        "member_path": "manifest.yaml",
+        "code": "manifest_tones_require_manual_edit",
+        "message": (
+            "This tone issue is stored in manifest.yaml, which cannot be "
+            "rewritten losslessly yet."
+        ),
+    }]
+
+    applied = client.post(
+        "/api/plugins/library_doctor/repair/apply",
+        json={
+            "package": "Artist/Song.feedpak",
+            "rule_code": "tones.duplicate-change",
+            "plan_id": plan["plan_id"],
+        },
+    )
+
+    assert applied.status_code == 409
+    assert applied.json()["detail"]["code"] == "nothing_to_repair"
+    assert manifest_path.read_bytes() == original_manifest
+    assert arrangement_path.read_bytes() == original_arrangement
     assert not (tmp_path / "config" / "library_doctor" / "repair_backups").exists()
     client.close()
 

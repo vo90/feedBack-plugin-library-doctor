@@ -1,3 +1,4 @@
+import copy
 import importlib.util
 import json
 import sys
@@ -140,6 +141,7 @@ def test_valid_minimal_package_is_healthy_without_optional_media(tmp_path, valid
         "preview_declared": False,
         "preview_available": False,
         "preview_source_available": False,
+        "review_difficulty_counts": {},
         "repair_eligibility": {
             "media.preview-missing": {
                 "status": "unavailable",
@@ -676,6 +678,105 @@ def test_hopo_review_findings_are_explicitly_review_required(tmp_path, validator
         "Reviewed repair" in findings[code]["rule"]["guidance"]
         for code in expected
     )
+
+
+def test_link_next_continuation_does_not_create_same_fret_hopo_finding(
+    tmp_path, validator
+):
+    arrangement = {
+        "chords": [{
+            "t": 19.756001,
+            "notes": [
+                {"s": 1, "f": 0, "sus": 0.207, "ln": True},
+                {"s": 2, "f": 0, "sus": 0.207, "ln": True},
+                {"s": 3, "f": 1, "sus": 0.207, "ln": True},
+            ],
+        }],
+        "notes": [
+            {"t": 19.962999, "s": 1, "f": 2, "ho": True},
+            {"t": 19.962999, "s": 2, "f": 2, "ho": True},
+            {"t": 19.962999, "s": 3, "f": 1, "ho": True},
+        ],
+    }
+
+    report = validator.validate_feedpak(
+        _package(tmp_path, arrangement=arrangement)
+    )
+
+    assert "review.same-fret-hopo" not in _codes(report)
+    assert report["validator_version"].startswith("rules-32:")
+
+
+def test_targeted_reviewed_arrangement_validation_is_read_only(validator):
+    arrangement = {
+        "notes": [
+            {"t": 1.0, "s": 0, "f": 3},
+            {"t": 2.0, "s": 0, "f": 5, "po": True},
+        ],
+        "chords": [],
+    }
+    original = copy.deepcopy(arrangement)
+
+    report = validator.validate_reviewed_arrangement(
+        arrangement,
+        relpath="arrangements/lead.json",
+        arrangement_id="lead",
+        duration=60.0,
+        entry={"id": "lead", "type": "guitar"},
+    )
+
+    assert arrangement == original
+    assert report["schema"] == (
+        "library_doctor.reviewed_arrangement_validation.v1"
+    )
+    assert "review.hopo-direction-mismatch" in _codes(report)
+
+
+def test_hopo_review_counts_separate_full_and_lower_phrase_difficulties(
+    tmp_path, validator
+):
+    arrangement = {
+        "notes": [
+            {"t": 1.0, "s": 0, "f": 3},
+            {"t": 2.0, "s": 0, "f": 5, "ho": True, "po": True},
+        ],
+        "chords": [],
+        "phrases": [{
+            "start_time": 0.0,
+            "end_time": 3.0,
+            "levels": [
+                {
+                    "notes": [
+                        {"t": 1.0, "s": 0, "f": 3},
+                        {"t": 2.0, "s": 0, "f": 5, "po": True},
+                    ],
+                    "chords": [],
+                },
+                {
+                    "notes": [
+                        {"t": 1.0, "s": 0, "f": 7},
+                        {"t": 2.0, "s": 0, "f": 5, "ho": True},
+                    ],
+                    "chords": [],
+                },
+            ],
+        }],
+    }
+
+    report = validator.validate_feedpak(
+        _package(tmp_path, arrangement=arrangement)
+    )
+    counts = report["features"]["review_difficulty_counts"]
+
+    assert counts["review.hopo-direction-mismatch"] == {
+        "full": 1,
+        "lower": 1,
+    }
+    # The flat arrangement-root max copy is not a third Player Review stream.
+    assert counts["chart.conflicting-techniques"] == {
+        "full": 0,
+        "lower": 0,
+    }
 
 
 def test_capo_tuning_and_tempo_highway_limits_are_checked(tmp_path, validator):
@@ -2441,3 +2542,572 @@ def test_case_colliding_archive_members_are_reported(tmp_path, validator):
 
     assert "package.case-colliding-archive-member" in _codes(report)
     assert report["title"] == "Test Song"
+
+
+def test_structural_repair_helpers_require_strict_complete_json(validator):
+    complete_identity = validator.complete_json_identity
+
+    assert complete_identity({"b": [True, 1, 1.0], "a": "x"}) == (
+        complete_identity({"a": "x", "b": [True, 1, 1.0]})
+    )
+    assert complete_identity({"value": 120}) != complete_identity(
+        {"value": 120.0}
+    )
+    assert complete_identity({"value": True}) != complete_identity({"value": 1})
+    assert complete_identity({"value": float("nan")}) is None
+    assert complete_identity((1, 2)) is None
+    assert complete_identity({1: "not a JSON object key"}) is None
+
+    assert validator.repairable_tempo_event({"time": 0, "bpm": 120})
+    assert validator.repairable_tempo_event(
+        {"time": 0.0, "bpm": 120.0, "unknown": {"kept": True}}
+    )
+    assert not validator.repairable_tempo_event({"time": True, "bpm": 120})
+    assert not validator.repairable_tempo_event({"time": 0, "bpm": 0})
+    assert not validator.repairable_tempo_event({"time": "0", "bpm": 120})
+
+    assert validator.repairable_time_signature_event(
+        {"time": 0, "ts": [4, 4]}
+    )
+    assert not validator.repairable_time_signature_event(
+        {"time": 0, "ts": [True, 4]}
+    )
+    assert not validator.repairable_time_signature_event(
+        {"time": 0, "ts": [4, 0]}
+    )
+
+    assert validator.repairable_tone_change({"t": 0, "name": "Clean"})
+    assert validator.repairable_tone_change(
+        {"t": 0, "name": "Clean", "rig": " amp "}
+    )
+    assert not validator.repairable_tone_change(
+        {"time": 0, "name": "Clean"}
+    )
+    assert not validator.repairable_tone_change({"t": 0, "name": ""})
+    assert not validator.repairable_tone_change(
+        {"t": 0, "name": "Clean", "rig": None}
+    )
+    assert not validator.repairable_tone_change(
+        {"t": 0, "name": "Clean", "rig": "  "}
+    )
+    assert validator.timed_event_stream_eligibility(
+        [], validator.repairable_tempo_event
+    )
+    assert not validator.timed_event_stream_eligibility(
+        [{"time": 0, "bpm": 120, "unknown": float("inf")}],
+        validator.repairable_tempo_event,
+    )
+
+
+def test_oversized_json_integer_fails_closed_without_aborting_scan(
+    tmp_path, validator,
+):
+    oversized = 10 ** 1000
+
+    assert not validator.repairable_tempo_event(
+        {"time": oversized, "bpm": 120}
+    )
+    assert not validator.repairable_tempo_event(
+        {"time": 0, "bpm": oversized}
+    )
+    assert not validator.repairable_time_signature_event(
+        {"time": oversized, "ts": [4, 4]}
+    )
+    assert not validator.repairable_tone_change(
+        {"t": oversized, "name": "Clean"}
+    )
+    assert not validator.timed_event_stream_eligibility(
+        [{"time": oversized, "bpm": 120}],
+        validator.repairable_tempo_event,
+    )
+
+    arrangement = {
+        "notes": [],
+        "chords": [],
+        "tempos": [
+            {"time": 10, "bpm": 120},
+            {"time": 2, "bpm": 90},
+            {"time": 10, "bpm": 120},
+            {"time": oversized, "bpm": 100},
+        ],
+    }
+    report = validator.validate_feedpak(_package(tmp_path, arrangement=arrangement))
+
+    assert "scan.validation-failed" not in _codes(report)
+    for code in ("timeline.duplicate-tempo", "timeline.tempos-out-of-order"):
+        finding = next(item for item in report["findings"] if item["code"] == code)
+        eligibility = report["features"]["repair_eligibility"][code]
+        assert finding["rule"]["repairability"] == "manual"
+        assert eligibility["status"] == "unavailable"
+        assert eligibility["reason_code"] == "malformed_timed_events"
+
+
+def test_effective_tone_source_matches_core_precedence(validator):
+    inline = {"changes": [{"t": 1, "name": "Inline"}]}
+    manifest = {"changes": [{"t": 2, "name": "Manifest"}]}
+
+    assert validator.effective_tones_source(manifest, inline) == (
+        "manifest",
+        manifest,
+    )
+    assert validator.effective_tones_source({}, inline) == (
+        "arrangement",
+        inline,
+    )
+    assert validator.effective_tones_source(None, inline) == (
+        "arrangement",
+        inline,
+    )
+    assert validator.effective_tones_source({}, None) == ("absent", None)
+
+
+def test_empty_optional_arrangement_keys_have_dedicated_safe_findings(
+    tmp_path, validator,
+):
+    arrangement = {
+        "notes": [],
+        "chords": [],
+        "phrases": [],
+        "tempos": [],
+    }
+
+    report = validator.validate_feedpak(_package(tmp_path, arrangement=arrangement))
+    findings = {item["code"]: item for item in report["findings"]}
+
+    for code, field in (
+        ("chart.empty-phrases-key", "phrases"),
+        ("timeline.empty-arrangement-tempos-key", "tempos"),
+    ):
+        assert findings[code]["location"] == f"arrangements/lead.json:{field}"
+        assert findings[code]["arrangement_id"] == "lead"
+        assert findings[code]["affected_count"] == 1
+        assert findings[code]["rule"]["repairability"] == "safe_candidate"
+        assert report["features"]["repair_eligibility"][code]["status"] == (
+            "automatic"
+        )
+
+
+def test_absent_nonempty_and_wrong_shaped_optional_keys_are_not_omission_findings(
+    tmp_path, validator,
+):
+    arrangements = (
+        {"notes": [], "chords": []},
+        {
+            "notes": [],
+            "chords": [],
+            "phrases": [{
+                "start_time": 0,
+                "end_time": 1,
+                "max_difficulty": 0,
+                "levels": [],
+            }],
+            "tempos": [{"time": 0, "bpm": 120}],
+        },
+        {"notes": [], "chords": [], "phrases": None, "tempos": None},
+    )
+
+    for index, arrangement in enumerate(arrangements):
+        report = validator.validate_feedpak(
+            _package(tmp_path / str(index), arrangement=arrangement)
+        )
+        assert "chart.empty-phrases-key" not in _codes(report)
+        assert "timeline.empty-arrangement-tempos-key" not in _codes(report)
+
+
+def test_jsonc_empty_optional_keys_are_diagnostic_but_not_automatic(
+    tmp_path, validator,
+):
+    manifest = _manifest(arrangements=[{
+        "id": "lead",
+        "name": "Lead",
+        "file": "arrangements/lead.jsonc",
+    }])
+    source = """{
+      // Explicit empty optionals should be omitted by an authoring tool.
+      \"notes\": [],
+      \"chords\": [],
+      \"phrases\": [],
+      \"tempos\": []
+    }"""
+
+    report = validator.validate_feedpak(_package(
+        tmp_path,
+        manifest=manifest,
+        files={"arrangements/lead.jsonc": source},
+    ))
+
+    for code in (
+        "chart.empty-phrases-key",
+        "timeline.empty-arrangement-tempos-key",
+    ):
+        finding = next(item for item in report["findings"] if item["code"] == code)
+        eligibility = report["features"]["repair_eligibility"][code]
+        assert finding["rule"]["repairability"] == "manual"
+        assert eligibility["status"] == "unavailable"
+        assert eligibility["reason_code"] == "jsonc_requires_lossless_writer"
+
+
+def test_non_json_source_does_not_promise_an_empty_key_repair(tmp_path, validator):
+    manifest = _manifest(arrangements=[{
+        "id": "lead",
+        "file": "arrangements/lead.txt",
+    }])
+    arrangement = json.dumps({
+        "notes": [],
+        "chords": [],
+        "phrases": [],
+    })
+
+    report = validator.validate_feedpak(_package(
+        tmp_path,
+        manifest=manifest,
+        files={"arrangements/lead.txt": arrangement},
+    ))
+    finding = next(
+        item for item in report["findings"]
+        if item["code"] == "chart.empty-phrases-key"
+    )
+    eligibility = report["features"]["repair_eligibility"][
+        "chart.empty-phrases-key"
+    ]
+
+    assert finding["rule"]["repairability"] == "manual"
+    assert eligibility["reason_code"] == "unsupported_text_format"
+
+
+def test_arrangement_tempos_report_exact_duplicates_and_order_independently(
+    tmp_path, validator,
+):
+    duplicate = {"time": 10, "bpm": 120, "unknown": {"kept": True}}
+    arrangement = {
+        "notes": [],
+        "chords": [],
+        "tempos": [
+            duplicate,
+            {"time": 2, "bpm": 90},
+            {"unknown": {"kept": True}, "bpm": 120, "time": 10},
+            {"time": 10, "bpm": 120.0, "unknown": {"kept": True}},
+        ],
+    }
+
+    report = validator.validate_feedpak(_package(tmp_path, arrangement=arrangement))
+    findings = {item["code"]: item for item in report["findings"]}
+
+    assert findings["timeline.duplicate-tempo"]["affected_count"] == 1
+    assert findings["timeline.duplicate-tempo"]["location"].endswith(
+        "tempos[2]"
+    )
+    assert findings["timeline.tempos-out-of-order"]["location"].endswith(
+        "tempos[1]"
+    )
+    assert findings["timeline.duplicate-tempo"]["arrangement_id"] == "lead"
+    assert report["features"]["repair_eligibility"][
+        "timeline.duplicate-tempo"
+    ]["status"] == "automatic"
+    assert "timeline.conflicting-tempos" not in _codes(report)
+
+
+def test_malformed_tempo_sibling_blocks_duplicate_and_order_repairs(
+    tmp_path, validator,
+):
+    arrangement = {
+        "notes": [],
+        "chords": [],
+        "tempos": [
+            {"time": 10, "bpm": 120},
+            {"time": 2, "bpm": 90},
+            {"time": 10, "bpm": 120},
+            {"time": "3", "bpm": 100},
+        ],
+    }
+
+    report = validator.validate_feedpak(_package(tmp_path, arrangement=arrangement))
+
+    for code in ("timeline.duplicate-tempo", "timeline.tempos-out-of-order"):
+        finding = next(item for item in report["findings"] if item["code"] == code)
+        eligibility = report["features"]["repair_eligibility"][code]
+        assert finding["rule"]["repairability"] == "manual"
+        assert eligibility["status"] == "unavailable"
+        assert eligibility["reason_code"] == "malformed_timed_events"
+
+
+def test_incomplete_song_timeline_still_validates_tempo_and_meter_streams(
+    tmp_path, validator,
+):
+    arrangement = {
+        "notes": [],
+        "chords": [],
+        "beats": [
+            {"time": 2, "measure": 1},
+            {"time": 1, "measure": 0},
+        ],
+    }
+    timeline = {
+        "version": 1,
+        "tempos": [
+            {"time": 5, "bpm": 120},
+            {"time": 1, "bpm": 100},
+            {"time": 5, "bpm": 120},
+        ],
+        "time_signatures": [
+            {"time": 8, "ts": [4, 4]},
+            {"time": 0, "ts": [3, 4]},
+            {"time": 8, "ts": [4, 4]},
+        ],
+    }
+
+    report = validator.validate_feedpak(_package(
+        tmp_path,
+        manifest=_manifest(song_timeline="song_timeline.json"),
+        arrangement=arrangement,
+        files={"song_timeline.json": json.dumps(timeline)},
+    ))
+
+    assert {
+        "timeline.beats-out-of-order",
+        "timeline.duplicate-tempo",
+        "timeline.tempos-out-of-order",
+        "timeline.duplicate-time-signature",
+        "timeline.time-signatures-out-of-order",
+    }.issubset(_codes(report))
+    for code in (
+        "timeline.duplicate-tempo",
+        "timeline.tempos-out-of-order",
+        "timeline.duplicate-time-signature",
+        "timeline.time-signatures-out-of-order",
+    ):
+        assert report["features"]["repair_eligibility"][code]["status"] == (
+            "automatic"
+        )
+
+
+def test_jsonc_song_timeline_findings_are_not_automatic(tmp_path, validator):
+    timeline = """{
+      // Tempo and meter are active without a beat/section pair.
+      \"version\": 1,
+      \"tempos\": [
+        {\"time\": 5, \"bpm\": 120},
+        {\"time\": 1, \"bpm\": 100},
+        {\"time\": 5, \"bpm\": 120}
+      ]
+    }"""
+
+    report = validator.validate_feedpak(_package(
+        tmp_path,
+        manifest=_manifest(song_timeline="song_timeline.jsonc"),
+        files={"song_timeline.jsonc": timeline},
+    ))
+
+    for code in ("timeline.duplicate-tempo", "timeline.tempos-out-of-order"):
+        finding = next(item for item in report["findings"] if item["code"] == code)
+        eligibility = report["features"]["repair_eligibility"][code]
+        assert finding["rule"]["repairability"] == "manual"
+        assert eligibility["reason_code"] == "jsonc_requires_lossless_writer"
+
+
+def test_malformed_meter_sibling_blocks_duplicate_and_order_repairs(
+    tmp_path, validator,
+):
+    timeline = {
+        "version": 1,
+        "time_signatures": [
+            {"time": 8, "ts": [4, 4]},
+            {"time": 0, "ts": [3, 4]},
+            {"time": 8, "ts": [4, 4]},
+            {"time": 12, "ts": [True, 4]},
+        ],
+    }
+
+    report = validator.validate_feedpak(_package(
+        tmp_path,
+        manifest=_manifest(song_timeline="song_timeline.json"),
+        files={"song_timeline.json": json.dumps(timeline)},
+    ))
+
+    for code in (
+        "timeline.duplicate-time-signature",
+        "timeline.time-signatures-out-of-order",
+    ):
+        finding = next(item for item in report["findings"] if item["code"] == code)
+        eligibility = report["features"]["repair_eligibility"][code]
+        assert finding["rule"]["repairability"] == "manual"
+        assert eligibility["reason_code"] == "malformed_timed_events"
+
+
+def _tone_issue_changes():
+    return [
+        {"t": 10, "name": "Clean", "unknown": [1, 2]},
+        {"t": 2, "name": "Lead"},
+        {"unknown": [1, 2], "name": "Clean", "t": 10},
+    ]
+
+
+def test_inline_tone_duplicates_and_order_are_automatic(tmp_path, validator):
+    arrangement = {
+        "notes": [],
+        "chords": [],
+        "tones": {"changes": _tone_issue_changes()},
+    }
+
+    report = validator.validate_feedpak(_package(tmp_path, arrangement=arrangement))
+    findings = {item["code"]: item for item in report["findings"]}
+
+    assert findings["tones.duplicate-change"]["affected_count"] == 1
+    assert findings["tones.duplicate-change"]["location"].endswith(
+        "tones.changes[2]"
+    )
+    assert findings["tones.changes-out-of-order"]["location"].endswith(
+        "tones.changes[1]"
+    )
+    assert report["features"]["repair_eligibility"][
+        "tones.duplicate-change"
+    ]["status"] == "automatic"
+
+
+def test_jsonc_inline_tone_findings_are_not_automatic(tmp_path, validator):
+    manifest = _manifest(arrangements=[{
+        "id": "lead",
+        "file": "arrangements/lead.jsonc",
+    }])
+    arrangement = json.dumps({
+        "notes": [],
+        "chords": [],
+        "tones": {"changes": _tone_issue_changes()},
+    })
+
+    report = validator.validate_feedpak(_package(
+        tmp_path,
+        manifest=manifest,
+        files={"arrangements/lead.jsonc": arrangement},
+    ))
+
+    for code in ("tones.duplicate-change", "tones.changes-out-of-order"):
+        finding = next(item for item in report["findings"] if item["code"] == code)
+        eligibility = report["features"]["repair_eligibility"][code]
+        assert finding["rule"]["repairability"] == "manual"
+        assert eligibility["reason_code"] == "jsonc_requires_lossless_writer"
+
+
+def test_empty_manifest_tones_fall_back_to_inline_tones(tmp_path, validator):
+    manifest = _manifest(arrangements=[{
+        "id": "lead",
+        "name": "Lead",
+        "file": "arrangements/lead.json",
+        "tones": {},
+    }])
+    arrangement = {
+        "notes": [],
+        "chords": [],
+        "tones": {"changes": _tone_issue_changes()},
+    }
+
+    report = validator.validate_feedpak(_package(
+        tmp_path, manifest=manifest, arrangement=arrangement,
+    ))
+
+    finding = next(
+        item for item in report["findings"]
+        if item["code"] == "tones.duplicate-change"
+    )
+    assert finding["location"].startswith("arrangements/lead.json:tones")
+    assert finding["rule"]["repairability"] == "safe_candidate"
+
+
+def test_nonempty_manifest_tones_override_inline_and_require_manual_edit(
+    tmp_path, validator,
+):
+    manifest = _manifest(arrangements=[{
+        "id": "lead",
+        "name": "Lead",
+        "file": "arrangements/lead.json",
+        "tones": {"changes": _tone_issue_changes()},
+    }])
+    hidden_inline = {
+        "notes": [],
+        "chords": [],
+        "tones": {"changes": [{"t": 1, "name": "Hidden"}]},
+    }
+
+    report = validator.validate_feedpak(_package(
+        tmp_path, manifest=manifest, arrangement=hidden_inline,
+    ))
+
+    for code in ("tones.duplicate-change", "tones.changes-out-of-order"):
+        finding = next(item for item in report["findings"] if item["code"] == code)
+        eligibility = report["features"]["repair_eligibility"][code]
+        assert finding["location"].startswith("manifest.yaml:arrangements[0].tones")
+        assert finding["rule"]["repairability"] == "manual"
+        assert eligibility["reason_code"] == (
+            "manifest_tones_require_manual_edit"
+        )
+
+
+def test_legacy_tone_time_alias_remains_diagnostic_but_not_automatic(
+    tmp_path, validator,
+):
+    arrangement = {
+        "notes": [],
+        "chords": [],
+        "tones": {"changes": [
+            {"time": 10, "name": "Clean"},
+            {"time": 2, "name": "Lead"},
+        ]},
+    }
+
+    report = validator.validate_feedpak(_package(tmp_path, arrangement=arrangement))
+    finding = next(
+        item for item in report["findings"]
+        if item["code"] == "tones.changes-out-of-order"
+    )
+    eligibility = report["features"]["repair_eligibility"][
+        "tones.changes-out-of-order"
+    ]
+
+    assert finding["rule"]["repairability"] == "manual"
+    assert eligibility["reason_code"] == "malformed_timed_events"
+    assert "tones.duplicate-change" not in _codes(report)
+
+
+def test_mixed_inline_and_manifest_tone_issues_block_the_package_rule(
+    tmp_path, validator,
+):
+    manifest = _manifest(arrangements=[
+        {
+            "id": "lead",
+            "file": "arrangements/lead.json",
+            "tones": {"changes": _tone_issue_changes()},
+        },
+        {"id": "rhythm", "file": "arrangements/rhythm.json"},
+    ])
+    rhythm = {
+        "notes": [],
+        "chords": [],
+        "tones": {"changes": _tone_issue_changes()},
+    }
+
+    report = validator.validate_feedpak(_package(
+        tmp_path,
+        manifest=manifest,
+        files={"arrangements/rhythm.json": json.dumps(rhythm)},
+    ))
+
+    eligibility = report["features"]["repair_eligibility"][
+        "tones.duplicate-change"
+    ]
+    duplicate_findings = [
+        item for item in report["findings"]
+        if item["code"] == "tones.duplicate-change"
+    ]
+    assert len(duplicate_findings) == 2
+    assert all(
+        item["rule"]["repairability"] == "manual"
+        for item in duplicate_findings
+    )
+    assert eligibility["reported_count"] == 2
+    assert eligibility["safe_count"] == 1
+    assert eligibility["unsafe_count"] == 1
+    assert eligibility["reason_code"] == "manifest_tones_require_manual_edit"
+
+
+def test_validator_rule_version_is_bumped_for_structural_findings(validator):
+    assert validator.VALIDATOR_VERSION.startswith("rules-32:")

@@ -26,6 +26,9 @@ export function createFormatters({ number }) {
   function plannedRepairChange(value) {
     const count = repairChangeCount(value);
     const itemName = value?.item_name || 'item';
+    if (value?.change_kind === 'omit_empty') {
+      return `omit ${number(count)} empty optional ${itemName}${count === 1 ? '' : 's'}`;
+    }
     if (value?.change_kind === 'reorder') {
       return `put ${number(count)} ${itemName}${count === 1 ? '' : 's'} into chronological order`;
     }
@@ -44,6 +47,9 @@ export function createFormatters({ number }) {
   function completedRepairChange(value) {
     const count = repairChangeCount(value);
     const itemName = value?.item_name || 'item';
+    if (value?.change_kind === 'omit_empty') {
+      return `Omitted ${number(count)} empty optional ${itemName}${count === 1 ? '' : 's'} without deleting any musical event`;
+    }
     if (value?.change_kind === 'reorder') {
       return `Reordered ${number(count)} ${itemName}${count === 1 ? '' : 's'} chronologically without deleting or altering any authored entries`;
     }

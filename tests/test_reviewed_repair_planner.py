@@ -32,6 +32,73 @@ def _plan(document, decision, *, index=0):
     )
 
 
+def _service_for_document(
+    tmp_path,
+    document,
+    *,
+    validate_reviewed_arrangement=None,
+    validate_extra=None,
+):
+    library = tmp_path / "library"
+    package = library / "Song.feedpak"
+    arrangements = package / "arrangements"
+    arrangements.mkdir(parents=True)
+    (package / "manifest.yaml").write_text(
+        "title: Test Song\n"
+        "artist: Test Artist\n"
+        "duration: 30\n"
+        "arrangements:\n"
+        "  - id: lead\n"
+        "    type: guitar\n"
+        "    file: arrangements/lead.json\n",
+        encoding="utf-8",
+    )
+    arrangement_path = arrangements / "lead.json"
+    arrangement_path.write_bytes(_raw(document))
+
+    def validate(path, _package_name, *, deep_audio=False):
+        candidate_document = json.loads(
+            (path / "arrangements" / "lead.json").read_text(encoding="utf-8")
+        )
+        candidates = repair_eligibility.find_hopo_review_candidates(
+            candidate_document,
+            member_path="arrangements/lead.json",
+        )
+        code_counts = {}
+        for candidate in candidates:
+            for code in candidate.trigger_codes:
+                code_counts[code] = code_counts.get(code, 0) + 1
+        findings = [
+            {"code": code, "severity": "info", "affected_count": count}
+            for code, count in sorted(code_counts.items())
+        ]
+        if callable(validate_extra):
+            findings.extend(validate_extra(candidate_document))
+        return {
+            "validator_version": "rules-test",
+            "features": {"deep_audio_checked": deep_audio},
+            "findings": findings,
+            "counts": {
+                "error": sum(item.get("severity") == "error" for item in findings),
+                "warning": sum(item.get("severity") == "warning" for item in findings),
+                "info": sum(item.get("severity") == "info" for item in findings),
+            },
+            "status": "review" if findings else "healthy",
+            "title": "Test Song",
+            "artist": "Test Artist",
+        }
+
+    service = repair.RepairService(
+        config_dir=tmp_path / "config",
+        get_dlc_dir=lambda: library,
+        validate_feedpak=validate,
+        validate_reviewed_arrangement=validate_reviewed_arrangement,
+        validator_version="rules-test",
+        log=logging.getLogger("reviewed-outcome-tests"),
+    )
+    return service, arrangement_path
+
+
 @pytest.mark.parametrize(
     ("decision", "expected"),
     [
@@ -96,16 +163,239 @@ def test_move_to_next_relocates_directional_flag_to_unambiguous_explicit_note():
     assert repaired["notes"][2]["sus"] == 0.5
 
 
-def test_leave_unchanged_is_source_bound_but_has_no_mutation_action():
+def test_leave_unchanged_is_not_a_backend_repair_decision():
     document = {
         "notes": [{"t": 1.0, "s": 0, "f": 5, "ho": True}],
         "chords": [],
     }
-    plan = _plan(document, "leave_unchanged")
+    with pytest.raises(repair.RepairPlanningError) as error:
+        _plan(document, "leave_unchanged")
 
-    assert plan["decisions"][0]["decision"] == "leave_unchanged"
-    assert plan["actions"] == []
-    assert repair.apply_json_member(_raw(document), plan) == _raw(document)
+    assert error.value.code == "invalid_decisions"
+
+
+def test_reviewed_plan_rejects_a_no_op_choice_and_does_not_count_it():
+    document = {
+        "notes": [
+            {"t": 1.0, "s": 0, "f": 5},
+            {"t": 2.0, "s": 0, "f": 5, "ho": True},
+        ],
+        "chords": [],
+    }
+
+    with pytest.raises(repair.RepairPlanningError) as error:
+        _plan(document, "set_hammer_on")
+
+    assert error.value.code == "decision_no_effect"
+
+
+def test_no_op_only_preview_creates_no_action_history_or_backup(tmp_path):
+    document = {
+        "notes": [
+            {"t": 1.0, "s": 0, "f": 5},
+            {"t": 2.0, "s": 0, "f": 5, "ho": True},
+        ],
+        "chords": [],
+    }
+    service, _arrangement_path = _service_for_document(tmp_path, document)
+    candidate_id = service.inspect_reviewed(
+        "Song.feedpak", "review.hopo-techniques"
+    )["candidates"][0]["candidate_id"]
+
+    with pytest.raises(repair.RepairPlanningError) as error:
+        service.preview_reviewed(
+            "Song.feedpak",
+            "review.hopo-techniques",
+            [{"candidate_id": candidate_id, "decision": "set_hammer_on"}],
+        )
+
+    assert error.value.code == "decision_outcome_rejected"
+    assert service.history()["items"] == []
+    assert not (
+        tmp_path / "config" / "library_doctor" / "repair_backups"
+    ).exists()
+
+
+def test_reviewed_options_are_lazy_source_bound_and_outcome_filtered(tmp_path):
+    validation_calls = []
+
+    def validate_arrangement(document, **_context):
+        validation_calls.append(copy.deepcopy(document))
+        findings = []
+        if document["notes"][1].get("tp") is True:
+            findings.append({
+                "code": "chart.tap-needs-review",
+                "severity": "error",
+                "affected_count": 1,
+            })
+        return {"findings": findings}
+
+    document = {
+        "notes": [
+            {"t": 1.0, "s": 0, "f": 3},
+            {"t": 2.0, "s": 0, "f": 5, "ho": True, "po": True},
+        ],
+        "chords": [],
+    }
+    service, arrangement_path = _service_for_document(
+        tmp_path,
+        document,
+        validate_reviewed_arrangement=validate_arrangement,
+    )
+    candidate_id = service.inspect_reviewed(
+        "Song.feedpak", "review.hopo-techniques"
+    )["candidates"][0]["candidate_id"]
+
+    first = service.reviewed_options(
+        "Song.feedpak", "review.hopo-techniques", candidate_id
+    )
+
+    assert first["schema"] == "library_doctor.reviewed_repair_options.v1"
+    assert first["candidate_id"] == candidate_id
+    assert first["review_item_id"].startswith("hopo-item-")
+    assert first["decision_names"] == ["set_hammer_on", "remove_hopo"]
+    assert [item["name"] for item in first["decision_definitions"]] == (
+        first["decision_names"]
+    )
+    omitted = {item["name"]: item["code"] for item in first["omitted_decisions"]}
+    assert omitted == {
+        "set_pull_off": "issue_remains",
+        "convert_to_tap": "introduces_validation",
+    }
+    assert first["available"] is True
+    assert first["blocked"] is False
+    assert first["source"]["sha256"]
+    calls_after_first = len(validation_calls)
+
+    repeated = service.reviewed_options(
+        "Song.feedpak", "review.hopo-techniques", candidate_id
+    )
+    assert repeated == first
+    assert len(validation_calls) == calls_after_first
+
+    changed = copy.deepcopy(document)
+    changed["custom"] = "source hash changes but candidate identity does not"
+    arrangement_path.write_bytes(_raw(changed))
+    refreshed = service.reviewed_options(
+        "Song.feedpak", "review.hopo-techniques", candidate_id
+    )
+    assert refreshed["options_id"] != first["options_id"]
+    assert refreshed["source"]["sha256"] != first["source"]["sha256"]
+    assert len(validation_calls) > calls_after_first
+
+
+def test_reviewed_options_return_no_mutations_for_blocked_candidate(tmp_path):
+    document = {
+        "notes": [
+            {"t": 1.0, "s": 0, "f": 3},
+            {"t": 2.0, "s": 0, "f": 5, "po": True},
+            {"t": 2.0, "s": 0, "f": 7},
+        ],
+        "chords": [],
+    }
+    service, _arrangement_path = _service_for_document(tmp_path, document)
+    candidate_id = service.inspect_reviewed(
+        "Song.feedpak", "review.hopo-techniques"
+    )["candidates"][0]["candidate_id"]
+
+    options = service.reviewed_options(
+        "Song.feedpak", "review.hopo-techniques", candidate_id
+    )
+
+    assert options["available"] is False
+    assert options["blocked"] is True
+    assert options["decision_names"] == []
+    assert "Skip" in options["message"]
+
+
+def test_preview_rejects_an_unoffered_choice_that_retains_the_issue(tmp_path):
+    document = {
+        "notes": [
+            {"t": 1.0, "s": 0, "f": 3},
+            {"t": 2.0, "s": 0, "f": 5, "ho": True, "po": True},
+        ],
+        "chords": [],
+    }
+    service, _arrangement_path = _service_for_document(tmp_path, document)
+    candidate_id = service.inspect_reviewed(
+        "Song.feedpak", "review.hopo-techniques"
+    )["candidates"][0]["candidate_id"]
+
+    options = service.reviewed_options(
+        "Song.feedpak", "review.hopo-techniques", candidate_id
+    )
+    assert "set_pull_off" not in options["decision_names"]
+
+    with pytest.raises(repair.RepairPlanningError) as error:
+        service.preview_reviewed(
+            "Song.feedpak",
+            "review.hopo-techniques",
+            [{"candidate_id": candidate_id, "decision": "set_pull_off"}],
+        )
+
+    assert error.value.code == "decision_outcome_rejected"
+
+
+def test_preview_revalidates_complete_group_and_reports_only_real_changes(tmp_path):
+    document = {
+        "notes": [
+            {"t": 1.0, "s": 0, "f": 3},
+            {"t": 2.0, "s": 0, "f": 5, "po": True},
+        ],
+        "chords": [],
+    }
+    service, _arrangement_path = _service_for_document(tmp_path, document)
+    candidate_id = service.inspect_reviewed(
+        "Song.feedpak", "review.hopo-techniques"
+    )["candidates"][0]["candidate_id"]
+
+    preview = service.preview_reviewed(
+        "Song.feedpak",
+        "review.hopo-techniques",
+        [{"candidate_id": candidate_id, "decision": "set_hammer_on"}],
+    )
+
+    assert preview["candidate_validated"] is True
+    assert preview["change_count"] == 1
+    assert preview["selected_count"] == preview["changing_count"] == 1
+    assert preview["skipped_count"] == 0
+    assert preview["unresolved_count"] == 0
+    assert preview["remaining_review_count"] == 0
+    assert preview["outcome_digest"]
+
+
+def test_preview_rejects_group_that_full_package_validation_worsens(tmp_path):
+    document = {
+        "notes": [{"t": 1.0, "s": 0, "f": 5, "ho": True}],
+        "chords": [],
+    }
+
+    def validate_extra(candidate_document):
+        if candidate_document["notes"][0].get("tp") is True:
+            return [{
+                "code": "chart.tap-needs-review",
+                "severity": "error",
+                "affected_count": 1,
+            }]
+        return []
+
+    service, _arrangement_path = _service_for_document(
+        tmp_path,
+        document,
+        validate_extra=validate_extra,
+    )
+    candidate_id = service.inspect_reviewed(
+        "Song.feedpak", "review.hopo-techniques"
+    )["candidates"][0]["candidate_id"]
+
+    with pytest.raises(repair.RepairPlanningError) as error:
+        service.preview_reviewed(
+            "Song.feedpak",
+            "review.hopo-techniques",
+            [{"candidate_id": candidate_id, "decision": "convert_to_tap"}],
+        )
+
+    assert error.value.code == "verification_failed"
 
 
 def test_reviewed_plan_rejects_stale_candidate_and_duplicate_decision():
@@ -372,25 +662,27 @@ def test_reviewed_service_uses_candidate_validation_backup_history_and_undo(
     assert arrangement_path.read_bytes() == source_raw
 
 
-def test_reviewed_validation_allows_registered_review_outcomes_only():
-    repair.RepairService._verify_reviewed_validation(
-        {
-            "findings": [{
-                "code": "chart.conflicting-techniques",
-                "affected_count": 1,
-            }],
-        },
-        {
-            "findings": [{
-                "code": "review.hopo-direction-mismatch",
-                "affected_count": 1,
-            }],
-        },
-        {
-            "chart.conflicting-techniques",
-            "review.hopo-direction-mismatch",
-        },
-    )
+def test_reviewed_validation_rejects_new_review_and_unrelated_findings():
+    with pytest.raises(repair.RepairPlanningError) as reviewed_error:
+        repair.RepairService._verify_reviewed_validation(
+            {
+                "findings": [{
+                    "code": "chart.conflicting-techniques",
+                    "affected_count": 1,
+                }],
+            },
+            {
+                "findings": [{
+                    "code": "review.hopo-direction-mismatch",
+                    "affected_count": 1,
+                }],
+            },
+            {
+                "chart.conflicting-techniques",
+                "review.hopo-direction-mismatch",
+            },
+        )
+    assert reviewed_error.value.code == "verification_failed"
 
     with pytest.raises(repair.RepairPlanningError) as error:
         repair.RepairService._verify_reviewed_validation(
@@ -410,3 +702,23 @@ def test_reviewed_validation_allows_registered_review_outcomes_only():
         )
 
     assert error.value.code == "verification_failed"
+
+    with pytest.raises(repair.RepairPlanningError) as severity_error:
+        repair.RepairService._verify_reviewed_validation(
+            {
+                "findings": [{
+                    "code": "chart.string-conflict",
+                    "severity": "warning",
+                    "affected_count": 1,
+                }],
+            },
+            {
+                "findings": [{
+                    "code": "chart.string-conflict",
+                    "severity": "error",
+                    "affected_count": 1,
+                }],
+            },
+        )
+
+    assert severity_error.value.code == "verification_failed"

@@ -34,6 +34,7 @@ class StatusContract(_ResponseContract):
     repairing: bool = False
     batch: dict[str, Any] | None = None
     last_scan: dict[str, Any] | None = None
+    review_difficulty_scope: Literal["full_only", "all_authored"] | None = None
 
 
 class FindingContract(_ResponseContract):
@@ -101,6 +102,7 @@ class ReviewedRepairDefinitionContract(_ResponseContract):
     blocker_codes: list[str]
     postconditions: list[str]
     audio_support: bool
+    difficulty_scoped: bool
     test_owner: str
 
 
@@ -199,6 +201,7 @@ ReviewedDecisionName = Annotated[
         pattern=r"^[a-z][a-z0-9_]*$",
     ),
 ]
+ReviewedDifficultyScope = Literal["full_only", "all_authored"]
 
 
 class ReviewedDecisionRequestContract(_RequestContract):
@@ -209,13 +212,39 @@ class ReviewedDecisionRequestContract(_RequestContract):
 class ReviewedInspectRequestContract(_RequestContract):
     package: str
     adapter_id: ReviewedAdapterId
+    difficulty_scope: ReviewedDifficultyScope = "full_only"
     offset: int = Field(default=0, ge=0, le=1_000_000)
     limit: int = Field(default=2_000, ge=1, le=2_000)
+
+
+class ReviewedOptionsRequestContract(_RequestContract):
+    package: str
+    adapter_id: ReviewedAdapterId
+    difficulty_scope: ReviewedDifficultyScope = "full_only"
+    candidate_id: ReviewedCandidateId
+
+
+class ReviewedPlayerContextRequestContract(ReviewedInspectRequestContract):
+    pass
+
+
+class ReviewedPlayerContextContract(_ResponseContract):
+    schema_: Literal["library_doctor.player_review_context.v1"] = Field(
+        alias="schema"
+    )
+    package: str
+    adapter_id: ReviewedAdapterId
+    difficulty_scope: ReviewedDifficultyScope
+    playback_filename: str
+    inspection: dict[str, Any]
+    capabilities: dict[str, Any]
+    pending_recovery: dict[str, Any] | None = None
 
 
 class ReviewedPreviewRequestContract(_RequestContract):
     package: str
     adapter_id: ReviewedAdapterId
+    difficulty_scope: ReviewedDifficultyScope = "full_only"
     decisions: list[ReviewedDecisionRequestContract] = Field(
         min_length=1,
         max_length=2_000,

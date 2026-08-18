@@ -12,6 +12,7 @@ export function createScanController({
   workerLimitKey,
   workerModeKey,
 }) {
+  let statusRequest = 0;
   const el = new Proxy({}, {
     get(_target, key) { return getElements()?.[key]; },
   });
@@ -128,22 +129,28 @@ export function createScanController({
     state.pollTimer = setTimeout(refreshStatus, delay);
   }
 
-  async function refreshStatus() {
+  async function refreshStatus({ refreshCompletedResults = false } = {}) {
     if (!state.active) return;
+    const requestId = ++statusRequest;
     const wasRunning = !!state.status?.running;
     const wasBatchRunning = !!state.status?.batch?.running;
     try {
-      const status = await request('/status');
-      if (!state.active) return;
+      const params = new URLSearchParams({
+        review_difficulty_scope: state.reviewDifficultyScope,
+      });
+      const status = await request(`/status?${params}`);
+      if (!state.active || requestId !== statusRequest) return;
       actionRegistry.renderStatus(status);
-      if ((wasRunning && !status.running) || (wasBatchRunning && !status.batch?.running)) {
+      const completed = (wasRunning && !status.running)
+        || (wasBatchRunning && !status.batch?.running);
+      if (completed || (refreshCompletedResults && !status.running && !status.batch?.running)) {
         await Promise.all([actionRegistry.loadResults(), actionRegistry.loadRules()]);
       }
       if (status.running || status.batch?.running) {
         schedulePoll(status.batch?.running ? 400 : 750);
       }
     } catch (error) {
-      if (isAbortError(error) || !state.active) return;
+      if (isAbortError(error) || !state.active || requestId !== statusRequest) return;
       actionRegistry.showStatusError(el.error, error);
       schedulePoll(3000);
     }
@@ -172,13 +179,19 @@ export function createScanController({
     }
     if (state.targetKind !== 'library') target.path = selectedPath();
     try {
-      const payload = await request(`/scan?force=${force ? 'true' : 'false'}`, {
+      actionRegistry.resetReviewDifficultyScope({ refresh: false });
+      const started = await request(`/scan?force=${force ? 'true' : 'false'}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(target),
       });
-      actionRegistry.renderStatus(payload.status);
-      schedulePoll(250);
+      if (started?.status && typeof started.status === 'object') {
+        actionRegistry.renderStatus(started.status);
+      }
+      // A small synthetic library can finish between POST /scan and the first
+      // status read. In that case there is no observable running -> complete
+      // transition, so explicitly refresh the completed result set once.
+      await refreshStatus({ refreshCompletedResults: true });
     } catch (error) {
       text(el.error, error.message);
       setHidden(el.error, false);
@@ -187,9 +200,8 @@ export function createScanController({
 
   async function cancelScan() {
     try {
-      const payload = await request('/cancel', { method: 'POST' });
-      actionRegistry.renderStatus(payload.status);
-      schedulePoll(250);
+      await request('/cancel', { method: 'POST' });
+      await refreshStatus();
     } catch (error) {
       text(el.error, error.message);
       setHidden(el.error, false);

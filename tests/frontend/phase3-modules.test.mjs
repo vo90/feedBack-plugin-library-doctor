@@ -83,7 +83,13 @@ test('destroy unsubscribes host lifecycle listeners', async () => {
   const app = await launchLibraryDoctor({
     status: { running: false, stage: 'idle', summary: { total: 0 } },
   });
-  assert.deepEqual([...app.subscriptions.keys()].sort(), ['screen:changed', 'song:loading', 'song:stop']);
+  assert.deepEqual(
+    [...app.subscriptions.keys()].sort(),
+    [
+      'screen:changed', 'song:ended', 'song:loaded', 'song:loading', 'song:pause',
+      'song:position-changed', 'song:ready', 'song:resume', 'song:seek', 'song:stop',
+    ],
+  );
   app.controller.destroy();
   assert.equal(app.subscriptions.size, 0);
   app.dom.window.close();
@@ -159,7 +165,9 @@ test('leaving and re-entering aborts the old status request before it can repain
   changed({ detail: { id: 'plugins' } });
   changed({ detail: { id: 'plugin-library_doctor' } });
   await waitFor(() => statusRequests === 2, 'old visit status request');
-  const oldRequest = app.requests.filter(({ key }) => key.endsWith('/status')).at(-1);
+  const oldRequest = app.requests.filter(({ key }) => (
+    key.startsWith('/api/plugins/library_doctor/status')
+  )).at(-1);
 
   changed({ detail: { id: 'plugins' } });
   assert.equal(oldRequest.signal.aborted, true);

@@ -21,6 +21,7 @@ try:
         find_hopo_review_candidates,
         page_hopo_review_candidates,
         select_hopo_review_candidates,
+        select_hopo_review_candidates_at_paths,
     )
 except ModuleNotFoundError:  # Tests and some plugin hosts load files by path.
     _eligibility_name = "_library_doctor_reviewed_repair_eligibility"
@@ -37,9 +38,12 @@ except ModuleNotFoundError:  # Tests and some plugin hosts load files by path.
     find_hopo_review_candidates = _eligibility.find_hopo_review_candidates
     page_hopo_review_candidates = _eligibility.page_hopo_review_candidates
     select_hopo_review_candidates = _eligibility.select_hopo_review_candidates
+    select_hopo_review_candidates_at_paths = (
+        _eligibility.select_hopo_review_candidates_at_paths
+    )
 
 
-REVIEWED_REPAIR_REGISTRY_VERSION = "reviewed-repairs-2"
+REVIEWED_REPAIR_REGISTRY_VERSION = "reviewed-repairs-6"
 
 
 @dataclass(frozen=True)
@@ -81,6 +85,7 @@ class ReviewedRepairDefinition:
     inspect_document: Callable[..., list[HopoReviewCandidate]]
     inspect_page_document: Callable[..., object]
     select_document: Callable[..., object]
+    select_paths_document: Callable[..., object]
     build_mutations: Callable[[HopoReviewCandidate, str], tuple[ReviewedMutationSpec, ...]]
     context_schema: str
     candidate_limit: int
@@ -89,6 +94,7 @@ class ReviewedRepairDefinition:
     blocker_codes: tuple[str, ...]
     postconditions: tuple[str, ...]
     audio_support: bool
+    difficulty_scoped: bool
     test_owner: str
 
     def to_dict(self) -> dict:
@@ -107,6 +113,7 @@ class ReviewedRepairDefinition:
             "blocker_codes": list(self.blocker_codes),
             "postconditions": list(self.postconditions),
             "audio_support": self.audio_support,
+            "difficulty_scoped": self.difficulty_scoped,
             "test_owner": self.test_owner,
         }
 
@@ -156,12 +163,6 @@ _HOPO_DECISIONS = (
             "destination is unambiguous."
         ),
         confirmation="Move this HO/PO instruction to the next note?",
-    ),
-    ReviewedDecisionDefinition(
-        name="leave_unchanged",
-        label="Leave unchanged",
-        description="Record no mutation for this candidate.",
-        confirmation="Leave this authored note unchanged?",
     ),
 )
 
@@ -220,6 +221,7 @@ _REVIEWED_REPAIRS = (
         inspect_document=find_hopo_review_candidates,
         inspect_page_document=page_hopo_review_candidates,
         select_document=select_hopo_review_candidates,
+        select_paths_document=select_hopo_review_candidates_at_paths,
         build_mutations=_hopo_mutations,
         context_schema="library_doctor.reviewed_hopo_context.v1",
         candidate_limit=2_000,
@@ -237,6 +239,7 @@ _REVIEWED_REPAIRS = (
             "unselected_json_values_are_preserved",
         ),
         audio_support=True,
+        difficulty_scoped=True,
         test_owner="review.hopo-techniques",
     ),
 )

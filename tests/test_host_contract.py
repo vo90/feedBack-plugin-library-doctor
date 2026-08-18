@@ -38,7 +38,7 @@ def test_declared_minimum_capability_contract_passes_when_all_markers_exist(tmp_
     assert report["errors"] == []
     assert all(item["passed"] for item in report["capabilities"])
     assert report["minimum_compatible_commit"] == (
-        "950e3483573e458cc2aa7bc255d9590808947faa"
+        "05be9ebdbe5f77310178772089655dab8f415246"
     )
 
 

@@ -42,6 +42,12 @@ except ModuleNotFoundError:  # Tests and some plugin hosts load files by path.
         sys.modules[_eligibility_name] = _eligibility
         _eligibility_spec.loader.exec_module(_eligibility)
 assess_redundant_handshapes = _eligibility.assess_redundant_handshapes
+complete_json_identity = _eligibility.complete_json_identity
+effective_tones_source = _eligibility.effective_tones_source
+repairable_tempo_event = _eligibility.repairable_tempo_event
+repairable_time_signature_event = _eligibility.repairable_time_signature_event
+repairable_tone_change = _eligibility.repairable_tone_change
+timed_event_stream_eligibility = _eligibility.timed_event_stream_eligibility
 _shared_chord_matches_handshape = _eligibility.chord_matches_handshape
 redundant_handshape_is_plain = _eligibility.redundant_handshape_is_plain
 _shared_reported_invalid_handshape_span = (
@@ -70,10 +76,12 @@ except ModuleNotFoundError:  # Tests and some plugin hosts load files by path.
         _reviewed_spec.loader.exec_module(_reviewed)
 
 
-REPAIR_CATALOG_VERSION = "repairs-18"
+REPAIR_CATALOG_VERSION = "repairs-20"
 REPAIR_PLAN_SCHEMA = "library_doctor.repair_plan.v1"
 REVIEWED_PACKAGE_PLAN_SCHEMA = "library_doctor.reviewed_repair_plan.v1"
 REVIEWED_INSPECTION_SCHEMA = "library_doctor.reviewed_repair_inspection.v1"
+PLAYER_REVIEW_CONTEXT_SCHEMA = "library_doctor.player_review_context.v1"
+REVIEWED_OPTIONS_SCHEMA = "library_doctor.reviewed_repair_options.v1"
 REVIEWED_REPAIR_REGISTRY_VERSION = _reviewed.REVIEWED_REPAIR_REGISTRY_VERSION
 MAX_REPAIR_TEXT_BYTES = 64 * 1024 * 1024
 MAX_REPAIR_MEMBER_BYTES = 128 * 1024 * 1024
@@ -90,6 +98,7 @@ TRANSACTION_SCHEMA = "library_doctor.repair_transaction.v1"
 MAX_REPAIR_HISTORY = 50
 MAX_PENDING_TRANSACTIONS = 100
 MAX_REVIEWED_DECISIONS = 2_000
+MAX_REVIEWED_OPTIONS_CACHE = 256
 _BACKUP_ID_RE = re.compile(r"^[0-9]{8}-[0-9]{6}-[0-9a-f]{12}$")
 _REQUEST_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$")
 _REQUEST_FINGERPRINT_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -250,6 +259,26 @@ class DeleteNotesMatchingChords:
 
 
 @dataclass(frozen=True)
+class OmitEmptyRootArray:
+    field: str
+    original_sha256: str
+    result_sha256: str
+
+    @property
+    def remove_indices(self) -> tuple[int, ...]:
+        return ()
+
+    def to_dict(self) -> dict:
+        return {
+            "operation": "omit_empty_root_array",
+            "array_path": [self.field],
+            "field": self.field,
+            "original_sha256": self.original_sha256,
+            "result_sha256": self.result_sha256,
+        }
+
+
+@dataclass(frozen=True)
 class RedundantHandshapeMatch:
     handshape_index: int
     chord_index: int
@@ -402,6 +431,33 @@ class StableSortTimelineMarkers:
         }
 
 
+@dataclass(frozen=True)
+class StableSortTimedEvents:
+    array_path: tuple[str | int, ...]
+    time_key: str
+    expected_length: int
+    original_sha256: str
+    sorted_sha256: str
+    sorted_indices: tuple[int, ...]
+    moved_count: int
+
+    @property
+    def remove_indices(self) -> tuple[int, ...]:
+        return ()
+
+    def to_dict(self) -> dict:
+        return {
+            "operation": "stable_sort_timed_events",
+            "array_path": list(self.array_path),
+            "time_key": self.time_key,
+            "expected_length": self.expected_length,
+            "original_sha256": self.original_sha256,
+            "sorted_sha256": self.sorted_sha256,
+            "sorted_indices": list(self.sorted_indices),
+            "moved_count": self.moved_count,
+        }
+
+
 _REPAIR_DEFINITIONS = (
     RepairDefinition(
         rule_code="chart.negative-muted-fret",
@@ -425,6 +481,172 @@ _REPAIR_DEFINITIONS = (
             "asked to perform."
         ),
         change_kind="normalize",
+    ),
+    RepairDefinition(
+        rule_code="chart.empty-phrases-key",
+        action_kind="omit_empty_phrases_key",
+        source_kind="arrangement",
+        item_name="phrase-ladder key",
+        safety="safe_automatic",
+        title="Omit the empty phrase ladder",
+        description=(
+            "Remove only an arrangement's root `phrases` key when its value is "
+            "exactly an empty array. Every playable event and other property "
+            "is preserved."
+        ),
+        player_result=(
+            "The arrangement still has no difficulty ladder; it now expresses "
+            "that state using the Feedpak-defined omission."
+        ),
+        user_value=(
+            "The arrangement conforms to the Feedpak contract without deleting "
+            "or changing any authored musical event."
+        ),
+        change_kind="omit_empty",
+    ),
+    RepairDefinition(
+        rule_code="timeline.empty-arrangement-tempos-key",
+        action_kind="omit_empty_arrangement_tempos_key",
+        source_kind="arrangement",
+        item_name="arrangement-tempo key",
+        safety="safe_automatic",
+        title="Omit the empty arrangement tempo override",
+        description=(
+            "Remove only an arrangement's root `tempos` key when its value is "
+            "exactly an empty array. The chart continues to follow the song tempo."
+        ),
+        player_result=(
+            "The chart still follows the song-level tempo map; no tempo event is "
+            "invented, removed, retimed, or changed."
+        ),
+        user_value=(
+            "The arrangement uses the Feedpak-defined omission for a chart with "
+            "no per-arrangement tempo override."
+        ),
+        change_kind="omit_empty",
+    ),
+    RepairDefinition(
+        rule_code="timeline.duplicate-tempo",
+        action_kind="remove_exact_duplicate_tempo_events",
+        source_kind="timeline",
+        item_name="tempo event",
+        safety="safe_automatic",
+        title="Remove exact duplicate tempo events",
+        description=(
+            "Keep the first tempo event and remove only later complete JSON-identical "
+            "copies from each active arrangement or song tempo list."
+        ),
+        player_result=(
+            "Every distinct authored tempo and timestamp remains. Conflicting "
+            "same-time tempo values remain for review."
+        ),
+        user_value=(
+            "FeedBack receives one stored copy of each identical tempo instruction "
+            "without changing the rhythm map."
+        ),
+    ),
+    RepairDefinition(
+        rule_code="timeline.tempos-out-of-order",
+        action_kind="reorder_tempo_events",
+        source_kind="timeline",
+        item_name="tempo timeline",
+        safety="safe_automatic",
+        title="Put tempo events in chronological order",
+        description=(
+            "Stable-sort each valid active tempo list by its existing finite "
+            "numeric `time`, preserving every object, property, and equal-time order."
+        ),
+        player_result=(
+            "The same tempo instructions reach FeedBack in playback order, without "
+            "retiming or choosing between conflicts."
+        ),
+        user_value=(
+            "Tempo lookup becomes deterministic across FeedBack and other Feedpak "
+            "tools while the authored tempo data remains unchanged."
+        ),
+        change_kind="reorder",
+    ),
+    RepairDefinition(
+        rule_code="timeline.duplicate-time-signature",
+        action_kind="remove_exact_duplicate_time_signature_events",
+        source_kind="timeline",
+        item_name="time-signature event",
+        safety="safe_automatic",
+        title="Remove exact duplicate time signatures",
+        description=(
+            "Keep the first time-signature event and remove only later complete "
+            "JSON-identical copies from the declared song timeline."
+        ),
+        player_result=(
+            "Every distinct meter and timestamp remains. Conflicting same-time "
+            "meters remain for review."
+        ),
+        user_value=(
+            "The song timeline has one stored copy of each identical meter "
+            "instruction without changing the rhythm map."
+        ),
+    ),
+    RepairDefinition(
+        rule_code="timeline.time-signatures-out-of-order",
+        action_kind="reorder_time_signature_events",
+        source_kind="timeline",
+        item_name="time-signature timeline",
+        safety="safe_automatic",
+        title="Put time signatures in chronological order",
+        description=(
+            "Stable-sort the valid song-level time-signature list by its existing "
+            "finite numeric `time`, preserving every object and equal-time order."
+        ),
+        player_result=(
+            "The same meter instructions reach FeedBack in playback order, without "
+            "retiming or choosing between conflicts."
+        ),
+        user_value=(
+            "Meter lookup becomes deterministic while every authored signature and "
+            "additional property remains intact."
+        ),
+        change_kind="reorder",
+    ),
+    RepairDefinition(
+        rule_code="tones.duplicate-change",
+        action_kind="remove_exact_duplicate_tone_changes",
+        source_kind="arrangement",
+        item_name="tone change",
+        safety="safe_automatic",
+        title="Remove exact duplicate tone changes",
+        description=(
+            "Keep the first tone change and remove only later complete JSON-identical "
+            "copies from an effective inline arrangement tone block."
+        ),
+        player_result=(
+            "Every distinct tone selection, rig binding, and timestamp remains. "
+            "Different same-time changes remain untouched."
+        ),
+        user_value=(
+            "The arrangement carries one stored copy of each identical tone switch "
+            "without changing the selected sound."
+        ),
+    ),
+    RepairDefinition(
+        rule_code="tones.changes-out-of-order",
+        action_kind="reorder_tone_changes",
+        source_kind="arrangement",
+        item_name="tone-change timeline",
+        safety="safe_automatic",
+        title="Put tone changes in chronological order",
+        description=(
+            "Stable-sort a valid effective inline tone-change list by canonical "
+            "finite numeric `t`, preserving every object and equal-time order."
+        ),
+        player_result=(
+            "The same tone switches reach FeedBack in playback order, without "
+            "changing their names, rigs, times, or unknown properties."
+        ),
+        user_value=(
+            "Tone automation becomes portable and predictable without choosing or "
+            "rewriting any authored sound."
+        ),
+        change_kind="reorder",
     ),
     RepairDefinition(
         rule_code="chart.duplicate-note",
@@ -766,6 +988,14 @@ _DEFAULT_REPAIR_BY_SOURCE = {
 # important for relationships that become unambiguous only after exact chord
 # redundancies have been removed.
 _ALL_SAFE_RULE_ORDER = (
+    "chart.empty-phrases-key",
+    "timeline.empty-arrangement-tempos-key",
+    "timeline.duplicate-tempo",
+    "timeline.tempos-out-of-order",
+    "timeline.duplicate-time-signature",
+    "timeline.time-signatures-out-of-order",
+    "tones.duplicate-change",
+    "tones.changes-out-of-order",
     "chart.negative-muted-fret",
     "chart.bend-points-out-of-order",
     "chart.duplicate-chord-note",
@@ -783,6 +1013,17 @@ _ALL_SAFE_RULE_ORDER = (
     "timeline.sections-out-of-order",
     "drums.duplicate-hit",
 )
+
+_CONDITIONAL_STRUCTURAL_RULES = frozenset({
+    "chart.empty-phrases-key",
+    "timeline.empty-arrangement-tempos-key",
+    "timeline.duplicate-tempo",
+    "timeline.tempos-out-of-order",
+    "timeline.duplicate-time-signature",
+    "timeline.time-signatures-out-of-order",
+    "tones.duplicate-change",
+    "tones.changes-out-of-order",
+})
 
 _MEDIA_REPAIR_DEFINITIONS = (
     RepairDefinition(
@@ -946,6 +1187,7 @@ def _apply_plan_actions_to_document(document, plan: dict) -> None:
     removed: set[tuple[tuple[str | int, ...], int]] = set()
     reordered: set[tuple[str | int, ...]] = set()
     normalized: set[tuple[tuple[str | int, ...], int]] = set()
+    omitted: set[tuple[str | int, ...]] = set()
     reviewed_paths: set[tuple[str | int, ...]] = set()
     repair_mode = plan.get("repair_mode", "automatic")
     expected_safety = (
@@ -971,6 +1213,9 @@ def _apply_plan_actions_to_document(document, plan: dict) -> None:
             document,
             member_path=str(source.get("member_path") or ""),
             candidate_ids=operation_ids,
+            difficulty_scope=_reviewed_difficulty_scope(
+                plan.get("difficulty_scope", "full_only")
+            ),
         )
         reviewed_candidates = {
             candidate.candidate_id: candidate
@@ -979,6 +1224,18 @@ def _apply_plan_actions_to_document(document, plan: dict) -> None:
     for action in plan.get("actions", []):
         if not isinstance(action, dict) or action.get("safety") != expected_safety:
             raise RepairPlanningError("invalid_plan", "The repair preview is invalid.")
+        rule_code = None
+        if repair_mode != "reviewed":
+            rule_code = action.get("rule_code")
+            definition = _REPAIR_BY_RULE.get(rule_code)
+            if (
+                definition is None
+                or action.get("action_kind") != definition.action_kind
+                or action.get("change_kind") != definition.change_kind
+            ):
+                raise RepairPlanningError(
+                    "invalid_plan", "The repair preview is invalid."
+                )
         for operation in action.get("operations", []):
             if repair_mode == "reviewed":
                 candidate = reviewed_candidates.get(
@@ -1007,6 +1264,8 @@ def _apply_plan_actions_to_document(document, plan: dict) -> None:
                 reordered,
                 normalized,
                 reviewed_paths,
+                omitted,
+                rule_code=rule_code,
             )
 
 
@@ -1023,6 +1282,7 @@ class RepairService:
         log,
         legacy_schemas: dict | None = None,
         preview_repair=None,
+        validate_reviewed_arrangement=None,
         transaction_barrier=None,
     ) -> None:
         self._config_dir = Path(config_dir)
@@ -1031,6 +1291,12 @@ class RepairService:
         self._validator_version = validator_version
         self._log = log
         self._preview_repair = preview_repair
+        self._validate_reviewed_arrangement = (
+            validate_reviewed_arrangement
+            if callable(validate_reviewed_arrangement)
+            else None
+        )
+        self._reviewed_options_cache: dict[tuple, dict] = {}
         self._transaction_barrier = (
             transaction_barrier if callable(transaction_barrier) else None
         )
@@ -1107,6 +1373,7 @@ class RepairService:
         package: str,
         adapter_id: str,
         *,
+        difficulty_scope: str = "full_only",
         offset: int = 0,
         limit: int | None = None,
     ) -> dict:
@@ -1117,16 +1384,120 @@ class RepairService:
                 package_path,
                 package_name,
                 adapter_id,
+                difficulty_scope=difficulty_scope,
                 offset=offset,
                 limit=limit,
             )
             return self._public_plan(internal)
+
+    def reviewed_options(
+        self,
+        package: str,
+        adapter_id: str,
+        candidate_id: str,
+        *,
+        difficulty_scope: str = "full_only",
+    ) -> dict:
+        """Return only source-bound decisions whose simulated outcomes are safe."""
+        with self._lock:
+            _root, package_path, package_name = self._resolve_package(package)
+            return self._reviewed_options_package(
+                package_path,
+                package_name,
+                adapter_id,
+                candidate_id,
+                difficulty_scope=difficulty_scope,
+            )
+
+    def inspect_reviewed_player(
+        self,
+        package: str,
+        adapter_id: str,
+        playback_filename: str,
+        *,
+        difficulty_scope: str = "full_only",
+        offset: int = 0,
+        limit: int | None = None,
+    ) -> dict:
+        """Return one source-bound review queue for FeedBack's normal Player."""
+        relative_player = PurePosixPath(str(playback_filename))
+        if (
+            relative_player.is_absolute()
+            or "\\" in str(playback_filename)
+            or any(part in {"", ".", ".."} for part in relative_player.parts)
+            or relative_player.suffix.lower() not in PACKAGE_SUFFIXES
+        ):
+            raise RepairPlanningError(
+                "player_review_unavailable",
+                "This package cannot be opened safely in FeedBack's normal Player.",
+            )
+        with self._lock:
+            _root, package_path, package_name = self._resolve_package(package)
+            inspection = self._inspect_reviewed_package(
+                package_path,
+                package_name,
+                adapter_id,
+                difficulty_scope=difficulty_scope,
+                offset=offset,
+                limit=limit,
+            )
+            manifest = self._read_repair_manifest(package_path)
+            bindings = self._reviewed_arrangement_bindings(manifest)
+            candidates = []
+            for candidate in inspection.get("candidates", []):
+                if not isinstance(candidate, dict):
+                    continue
+                options = copy.deepcopy(bindings.get(candidate.get("member_path"), []))
+                enriched = copy.deepcopy(candidate)
+                enriched["player"] = {
+                    "available": bool(options),
+                    "arrangements": options,
+                    "default_arrangement_index": (
+                        options[0]["index"] if options else None
+                    ),
+                    "mastery_fraction": (
+                        candidate.get("stream_context", {}).get("mastery_fraction", 1.0)
+                        if isinstance(candidate.get("stream_context"), dict)
+                        else 1.0
+                    ),
+                }
+                if not options:
+                    blockers = list(enriched.get("blockers") or [])
+                    if "player_arrangement_unavailable" not in blockers:
+                        blockers.append("player_arrangement_unavailable")
+                    enriched["blockers"] = blockers
+                candidates.append(enriched)
+            public_inspection = self._public_plan({
+                **inspection,
+                "candidates": candidates,
+                "candidate_count": len(candidates),
+                "available": bool(candidates),
+            })
+            pending = self._pending_recovery_for_package(package_name)
+            return {
+                "schema": PLAYER_REVIEW_CONTEXT_SCHEMA,
+                "package": package_name,
+                "adapter_id": adapter_id,
+                "difficulty_scope": difficulty_scope,
+                "playback_filename": relative_player.as_posix(),
+                "inspection": public_inspection,
+                "capabilities": {
+                    "normal_player": True,
+                    "live_highway_preview": True,
+                    "full_tab_live_preview": False,
+                    "partial_apply": True,
+                    "single_undo_checkpoint": True,
+                },
+                "pending_recovery": pending,
+            }
 
     def preview_reviewed(
         self,
         package: str,
         adapter_id: str,
         decisions: list[dict],
+        *,
+        difficulty_scope: str = "full_only",
     ) -> dict:
         """Preview explicit author decisions against current candidate IDs."""
         with self._lock:
@@ -1136,7 +1507,14 @@ class RepairService:
                 package_name,
                 adapter_id,
                 decisions,
+                difficulty_scope=difficulty_scope,
             )
+            self._validate_reviewed_preview_candidate(
+                package_path,
+                package_name,
+                internal,
+            )
+            internal["candidate_validated"] = True
             return self._public_plan(internal)
 
     def apply_reviewed(
@@ -1146,6 +1524,7 @@ class RepairService:
         decisions: list[dict],
         plan_id: str,
         *,
+        difficulty_scope: str = "full_only",
         deep_audio: bool = False,
         verified_before_report: dict | None = None,
         source_guard=None,
@@ -1161,11 +1540,18 @@ class RepairService:
         transaction_started = time.monotonic()
         with self._lock:
             _root, package_path, package_name = self._resolve_package(package)
+            pending = self._pending_recovery_for_package(package_name)
+            if pending is not None:
+                raise RepairPlanningError(
+                    "reviewed_recovery_pending",
+                    "Undo or finalize the current repair for this song before applying another reviewed group.",
+                )
             internal = self._plan_reviewed_package(
                 package_path,
                 package_name,
                 adapter_id,
                 decisions,
+                difficulty_scope=difficulty_scope,
             )
             if internal["plan_id"] != plan_id:
                 raise RepairPlanningError(
@@ -1189,6 +1575,78 @@ class RepairService:
                 request_operation="reviewed-repair.apply",
                 request_fingerprint=request_fingerprint,
             )
+
+    @staticmethod
+    def _reviewed_arrangement_bindings(manifest: dict) -> dict[str, list[dict]]:
+        """Map arrangement members to the compacted indices used by Player."""
+        result: dict[str, list[dict]] = {}
+        compact_index = 0
+        entries = manifest.get("arrangements")
+        if not isinstance(entries, list):
+            return result
+        for manifest_index, entry in enumerate(entries):
+            if not isinstance(entry, dict):
+                continue
+            arrangement_type = str(entry.get("type") or "").strip().lower()
+            if arrangement_type in {"drum", "drums"}:
+                continue
+            raw_member = entry.get("file")
+            has_notation = isinstance(entry.get("notation"), str) and bool(
+                entry["notation"].strip()
+            )
+            if not isinstance(raw_member, str) or not raw_member.strip():
+                if has_notation:
+                    compact_index += 1
+                continue
+            try:
+                member_path = _validate_member_path(raw_member)
+            except RepairPlanningError:
+                continue
+            result.setdefault(member_path, []).append({
+                "index": compact_index,
+                "manifest_index": manifest_index,
+                "id": str(entry.get("id") or "").strip(),
+                "name": str(entry.get("name") or entry.get("id") or f"Arrangement {compact_index + 1}").strip(),
+                "type": arrangement_type or "unknown",
+            })
+            compact_index += 1
+        return result
+
+    def _pending_recovery_for_package(self, package_name: str) -> dict | None:
+        """Return the newest unresolved recovery checkpoint for one package."""
+        history = self._read_history()
+        known_backup_ids = {
+            item.get("backup_id")
+            for item in history
+            if isinstance(item, dict) and isinstance(item.get("backup_id"), str)
+        }
+        history.extend(
+            item
+            for item in self._recover_legacy_receipts()
+            if item.get("backup_id") not in known_backup_ids
+        )
+        history.sort(key=lambda item: float(item.get("completed_at") or 0))
+        for item in reversed(history):
+            if item.get("package") != package_name:
+                continue
+            if item.get("action") != "repair" or item.get("outcome") != "success":
+                continue
+            backup_id = item.get("backup_id")
+            if (
+                not isinstance(backup_id, str)
+                or not _BACKUP_ID_RE.fullmatch(backup_id)
+                or self._backup_size(backup_id) is None
+            ):
+                continue
+            return {
+                "backup_id": backup_id,
+                "undo_available": True,
+                "change_count": int(item.get("change_count") or 0),
+                "change_kind": str(item.get("change_kind") or "repair"),
+                "title": str(item.get("title") or package_name),
+                "artist": str(item.get("artist") or ""),
+            }
+        return None
 
     def apply(
         self,
@@ -1543,6 +2001,37 @@ class RepairService:
                 source_guard=source_guard,
                 transaction_started=transaction_started,
             )
+
+    def _validate_reviewed_preview_candidate(
+        self,
+        package_path: Path,
+        package_name: str,
+        internal: dict,
+    ) -> None:
+        """Build and fully validate the selected group without committing it."""
+        originals = {
+            item["member_path"]: item["raw"] for item in internal["_members"]
+        }
+        replacements = {
+            item["member_path"]: apply_json_member(item["raw"], item["plan"])
+            for item in internal["_members"]
+        }
+        if not originals or not replacements:
+            raise RepairPlanningError(
+                "nothing_to_repair",
+                "No selected reviewed decision changes this package.",
+            )
+        before = self._validate_feedpak(
+            package_path, package_name, deep_audio=False
+        )
+        candidate, cleanup = self._candidate(package_path, replacements)
+        try:
+            after = self._validate_feedpak(
+                candidate, package_name, deep_audio=False
+            )
+            self._verify_reviewed_validation(before, after)
+        finally:
+            cleanup()
 
     def _apply_internal(
         self,
@@ -2597,7 +3086,7 @@ class RepairService:
         except (OSError, ValueError) as exc:
             raise RepairPlanningError(
                 "package_unavailable",
-                "The selected package is unavailable or outside the configured song library.",
+                "The selected package is unavailable or outside the current scan target.",
             ) from exc
         if not root.is_dir() or not (candidate.is_dir() or candidate.is_file()):
             raise RepairPlanningError("package_unavailable", "The selected package is unavailable.")
@@ -2699,16 +3188,12 @@ class RepairService:
     ) -> list[str]:
         """Resolve the active files for one repair role.
 
-        Timeline selection mirrors FeedBack and the validator: a complete
-        song-wide sidecar overrides legacy arrangement-embedded data.  Without
-        one, only the first usable legacy grid for the requested timeline type
-        is active. Beat and section fallbacks are selected independently. This
-        prevents a repair from changing dormant copies that the game does not
-        consume.
+        Tempo and meter selection mirrors FeedBack's independent 1.2 timeline
+        streams, while beat/section selection retains the complete-sidecar and
+        first-legacy-grid behavior. Tone rules select only effective inline
+        arrangement JSON; effective manifest tone issues fail closed because
+        this repair engine cannot rewrite YAML losslessly.
         """
-        if source_kind != "timeline":
-            return self._repair_member_paths(manifest, source_kind)
-
         def load_json(
             member_path: str,
         ) -> tuple[str, object | None, str | None]:
@@ -2732,6 +3217,93 @@ class RepairService:
             if parsed_json_cache is not None:
                 parsed_json_cache[member_path] = result
             return result
+
+        if rule_code in {"tones.duplicate-change", "tones.changes-out-of-order"}:
+            top_level_tones = manifest.get("drum_tones")
+            if _manifest_tone_rule_present(top_level_tones, rule_code):
+                raise RepairPlanningError(
+                    "manifest_tones_require_manual_edit",
+                    "This tone issue is stored in manifest.yaml, which cannot be rewritten losslessly yet.",
+                )
+            member_paths = []
+            seen = set()
+            for entry in manifest["arrangements"]:
+                if not isinstance(entry, dict):
+                    continue
+                tone_source, manifest_tones = effective_tones_source(
+                    entry.get("tones"), None
+                )
+                if tone_source == "manifest":
+                    if _manifest_tone_rule_present(manifest_tones, rule_code):
+                        raise RepairPlanningError(
+                            "manifest_tones_require_manual_edit",
+                            "This tone issue is stored in manifest.yaml, which cannot be rewritten losslessly yet.",
+                        )
+                    continue
+                member = entry.get("file")
+                if not isinstance(member, str) or not member:
+                    continue
+                try:
+                    member_path = _validate_member_path(member)
+                except RepairPlanningError:
+                    continue
+                if member_path not in seen:
+                    seen.add(member_path)
+                    member_paths.append(member_path)
+            return member_paths
+
+        if source_kind != "timeline":
+            return self._repair_member_paths(manifest, source_kind)
+
+        if rule_code in {
+            "timeline.duplicate-tempo",
+            "timeline.tempos-out-of-order",
+            "timeline.duplicate-time-signature",
+            "timeline.time-signatures-out-of-order",
+        }:
+            field = (
+                "tempos"
+                if rule_code in {
+                    "timeline.duplicate-tempo",
+                    "timeline.tempos-out-of-order",
+                }
+                else "time_signatures"
+            )
+            member_paths = []
+            seen = set()
+
+            def include_if_relevant(member: str) -> None:
+                try:
+                    member_path = _validate_member_path(member)
+                except RepairPlanningError:
+                    return
+                if member_path in seen:
+                    return
+                if member_path.lower().endswith(".jsonc"):
+                    seen.add(member_path)
+                    member_paths.append(member_path)
+                    return
+                status, data, _source_sha256 = load_json(member_path)
+                if status == "unavailable":
+                    return
+                if status == "invalid":
+                    seen.add(member_path)
+                    member_paths.append(member_path)
+                    return
+                values = data.get(field) if isinstance(data, dict) else None
+                if isinstance(values, list) and values:
+                    seen.add(member_path)
+                    member_paths.append(member_path)
+
+            if field == "tempos":
+                for entry in manifest["arrangements"]:
+                    member = entry.get("file") if isinstance(entry, dict) else None
+                    if isinstance(member, str) and member:
+                        include_if_relevant(member)
+            declared = manifest.get("song_timeline")
+            if isinstance(declared, str) and declared:
+                include_if_relevant(declared)
+            return member_paths
 
         timeline_field = {
             "timeline.duplicate-beat": "beats",
@@ -2812,12 +3384,19 @@ class RepairService:
                 "unsupported_repair", "This finding does not have a safe automatic repair."
             )
         manifest = self._read_repair_manifest(package_path)
-        member_paths = self._resolved_repair_member_paths(
-            package_path, manifest, definition["source_kind"], rule_code
-        )
-
         planned = []
         blockers = []
+        try:
+            member_paths = self._resolved_repair_member_paths(
+                package_path, manifest, definition["source_kind"], rule_code
+            )
+        except RepairPlanningError as exc:
+            member_paths = []
+            blockers.append({
+                "member_path": "manifest.yaml",
+                "code": exc.code,
+                "message": str(exc),
+            })
         for member_path in member_paths:
             try:
                 raw = self._read_member(package_path, member_path, MAX_REPAIR_TEXT_BYTES)
@@ -2936,6 +3515,7 @@ class RepairService:
         package_name: str,
         adapter_id: str,
         *,
+        difficulty_scope: str,
         offset: int,
         limit: int | None,
     ) -> dict:
@@ -2946,6 +3526,7 @@ class RepairService:
                 "unsupported_reviewed_repair",
                 "This Reviewed repair adapter is not supported.",
             ) from exc
+        difficulty_scope = _reviewed_difficulty_scope(difficulty_scope)
         if not _integer(offset) or offset < 0:
             raise RepairPlanningError(
                 "invalid_review_page", "The reviewed-repair page offset is invalid."
@@ -2964,6 +3545,8 @@ class RepairService:
         member_sources = []
         total_candidate_count = 0
         blocked_count = 0
+        full_candidate_count = 0
+        lower_candidate_count = 0
         remaining_offset = offset
         remaining_limit = page_limit
         for member_path, raw, document in self._reviewed_member_documents(
@@ -2974,6 +3557,7 @@ class RepairService:
                 member_path=member_path,
                 offset=remaining_offset,
                 limit=max(remaining_limit, 1),
+                difficulty_scope=difficulty_scope,
             )
             if remaining_limit:
                 page_items = member_page.candidates[:remaining_limit]
@@ -2982,11 +3566,15 @@ class RepairService:
             remaining_offset = max(0, remaining_offset - member_page.total_count)
             total_candidate_count += member_page.total_count
             blocked_count += member_page.blocked_count
+            full_candidate_count += member_page.full_candidate_count
+            lower_candidate_count += member_page.lower_candidate_count
             member_sources.append({
                 "member_path": member_path,
                 "sha256": hashlib.sha256(raw).hexdigest(),
                 "byte_count": len(raw),
                 "candidate_count": member_page.total_count,
+                "full_candidate_count": member_page.full_candidate_count,
+                "lower_candidate_count": member_page.lower_candidate_count,
             })
         page_count = len(candidates)
         omitted_candidate_count = max(0, total_candidate_count - page_count)
@@ -2999,6 +3587,7 @@ class RepairService:
             "validator_version": self._validator_version,
             "package": package_name,
             "adapter_id": adapter_id,
+            "difficulty_scope": difficulty_scope,
             "offset": offset,
             "limit": page_limit,
             "member_sources": member_sources,
@@ -3012,6 +3601,11 @@ class RepairService:
             "safety": "review_required",
             "candidate_count": len(candidates),
             "total_candidate_count": total_candidate_count,
+            "full_candidate_count": full_candidate_count,
+            "lower_candidate_count": lower_candidate_count,
+            "hidden_lower_candidate_count": (
+                lower_candidate_count if difficulty_scope == "full_only" else 0
+            ),
             "omitted_candidate_count": omitted_candidate_count,
             "offset": offset,
             "limit": page_limit,
@@ -3033,12 +3627,256 @@ class RepairService:
             "available": bool(candidates),
         }
 
-    def _plan_reviewed_package(
+    @staticmethod
+    def _reviewed_validation_contexts(
+        manifest: dict,
+        member_path: str,
+    ) -> list[dict]:
+        """Return deterministic manifest context for one arrangement member."""
+        raw_duration = manifest.get("duration") if isinstance(manifest, dict) else None
+        duration = float(raw_duration) if _finite_number(raw_duration) else None
+        contexts = []
+        entries = manifest.get("arrangements") if isinstance(manifest, dict) else None
+        if isinstance(entries, list):
+            for index, entry in enumerate(entries):
+                if not isinstance(entry, dict):
+                    continue
+                raw_member = entry.get("file")
+                if not isinstance(raw_member, str):
+                    continue
+                try:
+                    declared = _validate_member_path(raw_member)
+                except RepairPlanningError:
+                    continue
+                if declared != member_path:
+                    continue
+                entry_context = {
+                    key: entry[key]
+                    for key in ("id", "name", "type")
+                    if isinstance(entry.get(key), str)
+                }
+                if isinstance(entry.get("tuning"), list):
+                    entry_context["tuning"] = copy.deepcopy(entry["tuning"])
+                if _integer(entry.get("capo")):
+                    entry_context["capo"] = entry["capo"]
+                contexts.append({
+                    "arrangement_id": str(entry.get("id") or f"#{index + 1}"),
+                    "duration": duration,
+                    "entry": entry_context,
+                })
+        if not contexts:
+            contexts.append({
+                "arrangement_id": "",
+                "duration": duration,
+                "entry": None,
+            })
+        return contexts
+
+    def _reviewed_validation_reports(
+        self,
+        document: dict,
+        manifest: dict,
+        member_path: str,
+    ) -> list[dict]:
+        if self._validate_reviewed_arrangement is None:
+            return []
+        reports = []
+        try:
+            for context in self._reviewed_validation_contexts(
+                manifest, member_path
+            ):
+                report = self._validate_reviewed_arrangement(
+                    document,
+                    relpath=member_path,
+                    arrangement_id=context["arrangement_id"],
+                    duration=context["duration"],
+                    entry=context["entry"],
+                )
+                if not isinstance(report, dict):
+                    raise TypeError("invalid reviewed validation report")
+                reports.append(report)
+        except RepairPlanningError:
+            raise
+        except Exception as exc:
+            raise RepairPlanningError(
+                "reviewed_validation_failed",
+                "Library Doctor could not validate this proposed reviewed choice, so it was not offered.",
+            ) from exc
+        return reports
+
+    @staticmethod
+    def _reviewed_finding_counts(reports: list[dict]) -> dict[tuple[str, str], int]:
+        counts: dict[tuple[str, str], int] = {}
+        for report in reports:
+            findings = report.get("findings") if isinstance(report, dict) else None
+            if not isinstance(findings, list):
+                continue
+            for finding in findings:
+                if not isinstance(finding, dict):
+                    continue
+                severity = finding.get("severity")
+                code = finding.get("code")
+                if not isinstance(code, str):
+                    continue
+                if not isinstance(severity, str):
+                    severity = ""
+                affected = finding.get("affected_count", 1)
+                if not _integer(affected) or affected < 1:
+                    affected = 1
+                key = (severity, code)
+                counts[key] = counts.get(key, 0) + affected
+        return counts
+
+    @staticmethod
+    def _reviewed_path_state(
+        definition,
+        document: dict,
+        member_path: str,
+        paths: set[tuple[str | int, ...]],
+    ) -> dict[str, frozenset[str]]:
+        selection = definition.select_paths_document(
+            document,
+            member_path=member_path,
+            target_paths=frozenset(paths),
+            difficulty_scope="all_authored",
+        )
+        state: dict[str, set[str]] = {}
+        for item in selection.candidates:
+            state.setdefault(item.review_item_id, set()).update(
+                item.trigger_codes
+            )
+        return {
+            review_item_id: frozenset(codes)
+            for review_item_id, codes in state.items()
+        }
+
+    def _evaluate_reviewed_decision(
+        self,
+        document: dict,
+        manifest: dict,
+        member_path: str,
+        definition,
+        candidate,
+        decision: str,
+        *,
+        before_reports: list[dict] | None = None,
+    ) -> dict:
+        """Simulate one decision and return a bounded, user-safe outcome."""
+        try:
+            operation = _reviewed_operation(
+                document, definition, candidate, decision
+            )
+        except RepairPlanningError as exc:
+            return {
+                "allowed": False,
+                "code": exc.code,
+                "message": str(exc),
+            }
+        if operation is None or not operation.get("changes"):
+            return {
+                "allowed": False,
+                "code": "no_effect",
+                "message": "This choice would not change the stored note.",
+            }
+
+        touched_paths = {
+            tuple(change["target_path"])
+            for change in operation["changes"]
+        }
+        before_state = self._reviewed_path_state(
+            definition, document, member_path, touched_paths
+        )
+        mutated = copy.deepcopy(document)
+        try:
+            _apply_reviewed_operation(
+                mutated,
+                operation,
+                set(),
+                allowed_fields=frozenset(definition.mutable_fields),
+            )
+        except RepairPlanningError as exc:
+            return {
+                "allowed": False,
+                "code": exc.code,
+                "message": str(exc),
+            }
+        if _canonical_json(mutated) == _canonical_json(document):
+            return {
+                "allowed": False,
+                "code": "no_effect",
+                "message": "This choice would not change the stored note.",
+            }
+
+        after_state = self._reviewed_path_state(
+            definition, mutated, member_path, touched_paths
+        )
+        selected_item_id = candidate.review_item_id
+        if selected_item_id in after_state:
+            return {
+                "allowed": False,
+                "code": "issue_remains",
+                "message": "This choice would leave or recreate the current review issue.",
+            }
+        introduced = sorted(set(after_state) - set(before_state))
+        if introduced:
+            return {
+                "allowed": False,
+                "code": "introduces_review",
+                "message": "This choice would create another HO/PO issue for review.",
+            }
+        expanded = sorted(
+            review_item_id
+            for review_item_id in set(after_state).intersection(before_state)
+            if not after_state[review_item_id].issubset(
+                before_state[review_item_id]
+            )
+        )
+        if expanded:
+            return {
+                "allowed": False,
+                "code": "introduces_review",
+                "message": "This choice would add another reason for manual review.",
+            }
+
+        if before_reports is None:
+            before_reports = self._reviewed_validation_reports(
+                document, manifest, member_path
+            )
+        after_reports = self._reviewed_validation_reports(
+            mutated, manifest, member_path
+        )
+        before_counts = self._reviewed_finding_counts(before_reports)
+        after_counts = self._reviewed_finding_counts(after_reports)
+        increases = sorted(
+            code
+            for (severity, code), count in after_counts.items()
+            if count > before_counts.get((severity, code), 0)
+        )
+        if increases:
+            return {
+                "allowed": False,
+                "code": "introduces_validation",
+                "message": "This choice would introduce another validation or review finding.",
+            }
+        return {
+            "allowed": True,
+            "code": "validated_outcome",
+            "message": "This choice resolves the issue without introducing another finding.",
+            "operation": operation,
+            "touched_paths": touched_paths,
+            "document": mutated,
+            "before_state": before_state,
+            "after_state": after_state,
+        }
+
+    def _reviewed_options_package(
         self,
         package_path: Path,
         package_name: str,
         adapter_id: str,
-        decisions: list[dict],
+        candidate_id: str,
+        *,
+        difficulty_scope: str,
     ) -> dict:
         try:
             definition = _reviewed.reviewed_repair_definition(adapter_id)
@@ -3047,12 +3885,180 @@ class RepairService:
                 "unsupported_reviewed_repair",
                 "This Reviewed repair adapter is not supported.",
             ) from exc
+        difficulty_scope = _reviewed_difficulty_scope(difficulty_scope)
+        if (
+            not isinstance(candidate_id, str)
+            or not candidate_id.startswith(f"{definition.candidate_id_prefix}-")
+            or len(candidate_id) != len(definition.candidate_id_prefix) + 25
+        ):
+            raise RepairPlanningError(
+                "invalid_candidate", "The reviewed note identifier is invalid."
+            )
+
+        manifest = self._read_repair_manifest(package_path)
+        selected = []
+        for member_path, raw, document in self._reviewed_member_documents(
+            package_path, manifest
+        ):
+            selection = definition.select_document(
+                document,
+                member_path=member_path,
+                candidate_ids=frozenset({candidate_id}),
+                difficulty_scope=difficulty_scope,
+            )
+            for candidate in selection.candidates:
+                selected.append((member_path, raw, document, candidate))
+        if len(selected) != 1:
+            raise RepairPlanningError(
+                "candidate_changed",
+                "This reviewed note changed or is no longer questionable. Refresh the review queue.",
+            )
+        member_path, raw, document, candidate = selected[0]
+        source_sha256 = hashlib.sha256(raw).hexdigest()
+        contexts = self._reviewed_validation_contexts(manifest, member_path)
+        context_sha256 = hashlib.sha256(
+            _canonical_json(contexts)
+        ).hexdigest()
+        try:
+            package_stat = package_path.stat()
+            package_cache_token = (
+                "directory" if package_path.is_dir() else "archive",
+                int(package_stat.st_dev),
+                int(package_stat.st_ino),
+                int(package_stat.st_size),
+                int(package_stat.st_mtime_ns),
+            )
+        except OSError as exc:
+            raise RepairPlanningError(
+                "source_changed",
+                "This package changed while its reviewed choices were being checked.",
+            ) from exc
+        cache_key = (
+            package_name,
+            package_cache_token,
+            adapter_id,
+            difficulty_scope,
+            candidate_id,
+            member_path,
+            source_sha256,
+            context_sha256,
+            self._validator_version,
+            _reviewed.REVIEWED_REPAIR_REGISTRY_VERSION,
+        )
+        cached = self._reviewed_options_cache.get(cache_key)
+        if cached is not None:
+            return copy.deepcopy(cached)
+
+        definitions = {
+            item.name: item for item in definition.decisions
+        }
+        offered = []
+        omitted = []
+        blocked = bool(candidate.blockers)
+        before_reports = (
+            []
+            if blocked
+            else self._reviewed_validation_reports(
+                document, manifest, member_path
+            )
+        )
+        for name in candidate.decision_names:
+            decision_definition = definitions.get(name)
+            if decision_definition is None:
+                continue
+            if blocked:
+                outcome = {
+                    "allowed": False,
+                    "code": "candidate_blocked",
+                    "message": "Conflicting or malformed source data prevents a safe Library Doctor change.",
+                }
+            else:
+                outcome = self._evaluate_reviewed_decision(
+                    document,
+                    manifest,
+                    member_path,
+                    definition,
+                    candidate,
+                    name,
+                    before_reports=before_reports,
+                )
+            if outcome["allowed"]:
+                offered.append(decision_definition.to_dict())
+            else:
+                omitted.append({
+                    "name": name,
+                    "code": str(outcome.get("code") or "outcome_rejected"),
+                    "message": str(outcome.get("message") or (
+                        "This choice did not pass Library Doctor's outcome checks."
+                    )),
+                })
+
+        if offered:
+            message = (
+                "Only choices that resolve this issue without creating another finding are shown."
+            )
+        elif blocked:
+            message = (
+                "This issue cannot be changed safely here because its source evidence is conflicting or malformed. Skip it for now."
+            )
+        else:
+            message = (
+                "None of Library Doctor's bounded choices resolves this issue safely. Skip it for now and edit the source manually if needed."
+            )
+        unsigned = {
+            "schema": REVIEWED_OPTIONS_SCHEMA,
+            "package": package_name,
+            "adapter_id": adapter_id,
+            "difficulty_scope": difficulty_scope,
+            "candidate_id": candidate.candidate_id,
+            "review_item_id": candidate.review_item_id,
+            "source": {
+                "member_path": member_path,
+                "sha256": source_sha256,
+                "context_sha256": context_sha256,
+                "byte_count": len(raw),
+            },
+            "validator_version": self._validator_version,
+            "reviewed_registry_version": _reviewed.REVIEWED_REPAIR_REGISTRY_VERSION,
+            "decision_names": [item["name"] for item in offered],
+            "decision_definitions": offered,
+            "omitted_decisions": omitted,
+            "available": bool(offered),
+            "blocked": blocked,
+            "message": message,
+        }
+        result = {**unsigned, "options_id": _digest_json(unsigned)}
+        if len(self._reviewed_options_cache) >= MAX_REVIEWED_OPTIONS_CACHE:
+            self._reviewed_options_cache.pop(
+                next(iter(self._reviewed_options_cache)), None
+            )
+        self._reviewed_options_cache[cache_key] = copy.deepcopy(result)
+        return result
+
+    def _plan_reviewed_package(
+        self,
+        package_path: Path,
+        package_name: str,
+        adapter_id: str,
+        decisions: list[dict],
+        *,
+        difficulty_scope: str,
+    ) -> dict:
+        try:
+            definition = _reviewed.reviewed_repair_definition(adapter_id)
+        except ValueError as exc:
+            raise RepairPlanningError(
+                "unsupported_reviewed_repair",
+                "This Reviewed repair adapter is not supported.",
+            ) from exc
+        difficulty_scope = _reviewed_difficulty_scope(difficulty_scope)
         requested = _reviewed_decision_items(decisions, definition)
         requested_by_id = dict(requested)
         manifest = self._read_repair_manifest(package_path)
         planned = []
         seen_candidates = set()
         decision_summaries = []
+        outcome_members = []
         total_candidate_count = 0
         blocked_candidate_count = 0
         remaining_review_count = 0
@@ -3063,6 +4069,7 @@ class RepairService:
                 document,
                 member_path=member_path,
                 candidate_ids=frozenset(requested_by_id),
+                difficulty_scope=difficulty_scope,
             )
             member_candidates = member_selection.candidates
             member_ids = {
@@ -3079,12 +4086,38 @@ class RepairService:
             if not member_decisions:
                 remaining_review_count += member_selection.total_count
                 continue
+            candidates_by_id = {
+                candidate.candidate_id: candidate
+                for candidate in member_candidates
+            }
+            before_reports = self._reviewed_validation_reports(
+                document, manifest, member_path
+            )
+            for item in member_decisions:
+                candidate = candidates_by_id[item["candidate_id"]]
+                outcome = self._evaluate_reviewed_decision(
+                    document,
+                    manifest,
+                    member_path,
+                    definition,
+                    candidate,
+                    item["decision"],
+                    before_reports=before_reports,
+                )
+                if not outcome["allowed"]:
+                    raise RepairPlanningError(
+                        "decision_outcome_rejected",
+                        str(outcome.get("message") or (
+                            "This reviewed choice no longer produces a safe outcome. Inspect the issue again."
+                        )),
+                    )
             plan = plan_reviewed_json_member(
                 raw,
                 member_path=member_path,
                 adapter_id=adapter_id,
                 validator_version=self._validator_version,
                 decisions=member_decisions,
+                difficulty_scope=difficulty_scope,
             )
             changed = bool(plan["actions"])
             decision_summaries.extend(member_decisions)
@@ -3092,11 +4125,60 @@ class RepairService:
                 replacement = apply_json_member(raw, plan)
                 repaired_document = _parse_json(replacement)
                 _inspect_structure(repaired_document)
+                touched_paths = {
+                    tuple(change["target_path"])
+                    for action in plan["actions"]
+                    for operation in action["operations"]
+                    for change in operation["changes"]
+                }
+                before_state = self._reviewed_path_state(
+                    definition, document, member_path, touched_paths
+                )
+                after_state = self._reviewed_path_state(
+                    definition, repaired_document, member_path, touched_paths
+                )
+                selected_item_ids = {
+                    candidates_by_id[item["candidate_id"]].review_item_id
+                    for item in member_decisions
+                }
+                retained = sorted(selected_item_ids.intersection(after_state))
+                introduced = sorted(set(after_state) - set(before_state))
+                expanded = sorted(
+                    review_item_id
+                    for review_item_id in set(after_state).intersection(before_state)
+                    if not after_state[review_item_id].issubset(
+                        before_state[review_item_id]
+                    )
+                )
+                if retained:
+                    raise RepairPlanningError(
+                        "reviewed_issue_remains",
+                        "The complete selected group would leave or recreate a selected review issue.",
+                    )
+                if introduced or expanded:
+                    raise RepairPlanningError(
+                        "reviewed_group_introduces_issue",
+                        "The complete selected group would introduce another issue for review.",
+                    )
+                after_reports = self._reviewed_validation_reports(
+                    repaired_document, manifest, member_path
+                )
+                before_counts = self._reviewed_finding_counts(before_reports)
+                after_counts = self._reviewed_finding_counts(after_reports)
+                if any(
+                    count > before_counts.get(key, 0)
+                    for key, count in after_counts.items()
+                ):
+                    raise RepairPlanningError(
+                        "reviewed_group_introduces_finding",
+                        "The complete selected group would introduce another validation or review finding.",
+                    )
                 remaining_review_count += definition.inspect_page_document(
                     repaired_document,
                     member_path=member_path,
                     offset=0,
                     limit=1,
+                    difficulty_scope=difficulty_scope,
                 ).total_count
                 planned.append({
                     "member_path": member_path,
@@ -3104,8 +4186,18 @@ class RepairService:
                     "plan": plan,
                     "source_kind": "arrangement",
                 })
+                outcome_members.append({
+                    "member_path": member_path,
+                    "source_sha256": hashlib.sha256(raw).hexdigest(),
+                    "selected_review_item_ids": sorted(selected_item_ids),
+                    "before_touched_review_count": len(before_state),
+                    "after_touched_review_count": len(after_state),
+                })
             else:
-                remaining_review_count += member_selection.total_count
+                raise RepairPlanningError(
+                    "decision_no_effect",
+                    "No selected reviewed choice changes this arrangement.",
+                )
         missing = [
             candidate_id
             for candidate_id, _decision in requested
@@ -3137,6 +4229,7 @@ class RepairService:
             "rule_code": adapter_id,
             "rule_codes": list(definition.trigger_rule_codes),
             "adapter_id": adapter_id,
+            "difficulty_scope": difficulty_scope,
             "decisions": decision_summaries,
             "member_plans": [
                 {
@@ -3145,6 +4238,10 @@ class RepairService:
                 }
                 for item in planned
             ],
+            "outcome_digest": _digest_json({
+                "members": outcome_members,
+                "remaining_review_count": remaining_review_count,
+            }),
             "blockers": [],
         }
         return {
@@ -3166,16 +4263,13 @@ class RepairService:
             "change_count": change_count,
             "candidate_count": total_candidate_count,
             "selected_count": len(requested),
-            "changing_count": sum(
-                decision != "leave_unchanged"
-                for _candidate_id, decision in requested
-            ),
-            "skipped_count": sum(
-                decision == "leave_unchanged"
-                for _candidate_id, decision in requested
-            ),
+            "changing_count": len(requested),
+            "skipped_count": 0,
             "blocked_count": blocked_candidate_count,
-            "unresolved_count": max(0, total_candidate_count - len(requested)),
+            # Report the authoritative post-plan inspection result. A reviewed
+            # choice can resolve another candidate at the same musical onset,
+            # so subtracting the submitted decision count is only an estimate.
+            "unresolved_count": remaining_review_count,
             "remaining_review_count": remaining_review_count,
             "decision_counts": decision_counts,
             "member_count": len(planned),
@@ -3243,6 +4337,7 @@ class RepairService:
         rule_codes: Iterable[str] | None = None,
     ) -> dict:
         """Build one dependency-ordered plan for the requested safe repairs."""
+        implicit_all = rule_codes is None
         requested_rule_codes = self._ordered_safe_rule_codes(rule_codes)
         manifest = self._read_repair_manifest(package_path)
         member_sources: dict[str, set[str]] = {}
@@ -3250,22 +4345,90 @@ class RepairService:
         parsed_json_cache: dict[
             str, tuple[str, object | None, str | None]
         ] = {}
+        source_blockers = []
         for rule_code in requested_rule_codes:
             definition = _REPAIR_BY_RULE[rule_code]
-            for member_path in self._resolved_repair_member_paths(
-                package_path,
-                manifest,
-                definition.source_kind,
-                rule_code,
-                parsed_json_cache,
-            ):
+            try:
+                resolved_paths = self._resolved_repair_member_paths(
+                    package_path,
+                    manifest,
+                    definition.source_kind,
+                    rule_code,
+                    parsed_json_cache,
+                )
+            except RepairPlanningError as exc:
+                if implicit_all and rule_code in _CONDITIONAL_STRUCTURAL_RULES:
+                    continue
+                source_blockers.append({
+                    "member_path": "manifest.yaml",
+                    "code": exc.code,
+                    "message": str(exc),
+                })
+                continue
+            if implicit_all and rule_code in _CONDITIONAL_STRUCTURAL_RULES:
+                preflight_blocked = False
+                for member_path in resolved_paths:
+                    try:
+                        raw = self._read_member(
+                            package_path, member_path, MAX_REPAIR_TEXT_BYTES
+                        )
+                        safe_member_path = _validate_member_path(member_path)
+                        if safe_member_path.lower().endswith(".jsonc"):
+                            raise RepairPlanningError(
+                                "jsonc_requires_lossless_writer",
+                                "Commented JSON cannot be repaired until comments can be preserved.",
+                            )
+                        if not safe_member_path.lower().endswith(".json"):
+                            raise RepairPlanningError(
+                                "unsupported_text_format",
+                                "Automatic song-data repairs currently require an ordinary JSON file.",
+                            )
+                        source_sha256 = hashlib.sha256(raw).hexdigest()
+                        cached_status, cached_document, cached_sha256 = (
+                            parsed_json_cache.get(
+                                member_path, ("unavailable", None, None)
+                            )
+                        )
+                        if (
+                            cached_status == "valid"
+                            and cached_sha256 == source_sha256
+                        ):
+                            document = cached_document
+                        else:
+                            document = _parse_json(raw)
+                            _inspect_structure(document)
+                            parsed_json_cache[member_path] = (
+                                "valid", document, source_sha256
+                            )
+                        expected_shape = (
+                            list if definition.source_kind == "lyrics" else dict
+                        )
+                        if not isinstance(document, expected_shape):
+                            raise RepairPlanningError(
+                                "invalid_document_shape",
+                                "The song file does not have the expected JSON structure for this repair.",
+                            )
+                        _plan_json_document(
+                            copy.deepcopy(document),
+                            raw=raw,
+                            safe_member_path=safe_member_path,
+                            source_kind=definition.source_kind,
+                            validator_version=self._validator_version,
+                            definition=definition,
+                        )
+                    except RepairPlanningError:
+                        preflight_blocked = True
+                        break
+                if preflight_blocked:
+                    continue
+            for member_path in resolved_paths:
                 member_sources.setdefault(member_path, set()).add(
                     definition.source_kind
                 )
                 member_rules.setdefault(member_path, set()).add(rule_code)
 
         planned = []
-        blockers = []
+        blockers = list(source_blockers)
         totals = {
             rule_code: {
                 "change_count": 0,
@@ -3912,15 +5075,15 @@ class RepairService:
     def _verify_reviewed_validation(
         before: dict,
         after: dict,
-        reviewed_codes: set[str],
+        reviewed_codes: set[str] | None = None,
     ) -> None:
-        """Allow explicit review outcomes but no increase in unrelated findings."""
-        before_counts = _report_code_counts(before)
-        after_counts = _report_code_counts(after)
+        """Require a reviewed group to introduce no validation finding increase."""
+        before_counts = RepairService._reviewed_finding_counts([before])
+        after_counts = RepairService._reviewed_finding_counts([after])
         introduced = sorted(
-            code
-            for code, count in after_counts.items()
-            if code not in reviewed_codes and count > before_counts.get(code, 0)
+            key
+            for key, count in after_counts.items()
+            if count > before_counts.get(key, 0)
         )
         if introduced:
             raise RepairPlanningError(
@@ -4881,6 +6044,15 @@ def plan_json_member(
     )
 
 
+def _reviewed_difficulty_scope(value: str) -> str:
+    if value not in {"full_only", "all_authored"}:
+        raise RepairPlanningError(
+            "invalid_review_difficulty_scope",
+            "Choose full difficulty only or all authored difficulties.",
+        )
+    return value
+
+
 def _reviewed_decision_items(decisions, definition) -> list[tuple[str, str]]:
     if (
         not isinstance(decisions, list)
@@ -4925,7 +6097,7 @@ def _reviewed_change(
     set_fields: dict,
     remove_fields: tuple[str, ...],
     allowed_fields: frozenset[str],
-) -> dict:
+) -> dict | None:
     note = _value_at_path(document, path)
     if not isinstance(note, dict):
         raise RepairPlanningError(
@@ -4945,21 +6117,27 @@ def _reviewed_change(
     for field in remove_fields:
         updated.pop(field, None)
     updated.update(set_fields)
+    before_bytes = _canonical_json(note)
+    after_bytes = _canonical_json(updated)
+    if before_bytes == after_bytes:
+        return None
     return {
         "target_path": list(path),
         "expected_before_sha256": hashlib.sha256(
-            _canonical_json(note)
+            before_bytes
         ).hexdigest(),
         "expected_after_sha256": hashlib.sha256(
-            _canonical_json(updated)
+            after_bytes
         ).hexdigest(),
         "set_fields": dict(set_fields),
         "remove_fields": list(remove_fields),
     }
 
 
-def _reviewed_operation(document: dict, definition, candidate, decision: str) -> dict:
-    if decision not in candidate.decision_names or decision == "leave_unchanged":
+def _reviewed_operation(
+    document: dict, definition, candidate, decision: str
+) -> dict | None:
+    if decision not in candidate.decision_names:
         raise RepairPlanningError(
             "invalid_decision",
             "Choose one of the decisions currently offered for this reviewed note.",
@@ -4991,13 +6169,17 @@ def _reviewed_operation(document: dict, definition, candidate, decision: str) ->
                 "invalid_decision",
                 "A reviewed repair target is no longer explicit and writable.",
             )
-        changes.append(_reviewed_change(
+        change = _reviewed_change(
             document,
             target_path,
             set_fields=mutation.set_dict(),
             remove_fields=mutation.remove_fields,
             allowed_fields=allowed_fields,
-        ))
+        )
+        if change is not None:
+            changes.append(change)
+    if not changes:
+        return None
     return {
         "operation": definition.operation_name,
         "candidate_id": candidate.candidate_id,
@@ -5014,6 +6196,7 @@ def plan_reviewed_json_member(
     adapter_id: str,
     validator_version: str,
     decisions: list[dict],
+    difficulty_scope: str = "full_only",
 ) -> dict:
     """Build a source-bound closed plan from explicit candidate decisions."""
     safe_member_path = _validate_member_path(member_path)
@@ -5040,6 +6223,7 @@ def plan_reviewed_json_member(
         )
     if not isinstance(validator_version, str) or not validator_version.strip():
         raise ValueError("validator_version must be a non-empty string")
+    difficulty_scope = _reviewed_difficulty_scope(difficulty_scope)
     requested = _reviewed_decision_items(decisions, definition)
     document = _parse_json(raw)
     _inspect_structure(document)
@@ -5052,6 +6236,7 @@ def plan_reviewed_json_member(
         document,
         member_path=safe_member_path,
         candidate_ids={candidate_id for candidate_id, _decision in requested},
+        difficulty_scope=difficulty_scope,
     )
     candidates = {
         candidate.candidate_id: candidate
@@ -5072,10 +6257,15 @@ def plan_reviewed_json_member(
                 "Choose one of the decisions currently offered for this reviewed note.",
             )
         accepted.append({"candidate_id": candidate_id, "decision": decision})
-        if decision != "leave_unchanged":
-            operations.append(_reviewed_operation(
-                document, definition, candidate, decision
-            ))
+        operation = _reviewed_operation(
+            document, definition, candidate, decision
+        )
+        if operation is None:
+            raise RepairPlanningError(
+                "decision_no_effect",
+                "This reviewed choice would not change the stored note.",
+            )
+        operations.append(operation)
 
     source_sha256 = hashlib.sha256(raw).hexdigest()
     actions = []
@@ -5102,6 +6292,7 @@ def plan_reviewed_json_member(
         "schema": REPAIR_PLAN_SCHEMA,
         "repair_mode": "reviewed",
         "adapter_id": adapter_id,
+        "difficulty_scope": difficulty_scope,
         "catalog_version": REPAIR_CATALOG_VERSION,
         "reviewed_registry_version": _reviewed.REVIEWED_REPAIR_REGISTRY_VERSION,
         "validator_version": validator_version,
@@ -5130,6 +6321,79 @@ def _plan_json_document(
 
     if definition.rule_code == "chart.negative-muted-fret":
         operations = _plan_muted_negative_frets(document)
+    elif definition.rule_code == "chart.empty-phrases-key":
+        operations = _plan_empty_root_array(document, "phrases")
+    elif definition.rule_code == "timeline.empty-arrangement-tempos-key":
+        operations = _plan_empty_root_array(document, "tempos")
+    elif definition.rule_code == "timeline.duplicate-tempo":
+        operations = _plan_exact_timed_duplicates(
+            document,
+            ("tempos",),
+            repairable_tempo_event,
+            blocker_code="malformed_timed_events",
+            blocker_message=(
+                "A tempo timeline with exact duplicates also contains an invalid "
+                "event, so Library Doctor will not partially repair it."
+            ),
+        )
+    elif definition.rule_code == "timeline.tempos-out-of-order":
+        operations = _plan_timed_event_order(
+            document,
+            ("tempos",),
+            "time",
+            repairable_tempo_event,
+            blocker_code="malformed_timed_events",
+            blocker_message=(
+                "The out-of-order tempo timeline also contains an invalid event, "
+                "so Library Doctor will not guess how to reorder it."
+            ),
+        )
+    elif definition.rule_code == "timeline.duplicate-time-signature":
+        operations = _plan_exact_timed_duplicates(
+            document,
+            ("time_signatures",),
+            repairable_time_signature_event,
+            blocker_code="malformed_timed_events",
+            blocker_message=(
+                "A time-signature timeline with exact duplicates also contains "
+                "an invalid event, so Library Doctor will not partially repair it."
+            ),
+        )
+    elif definition.rule_code == "timeline.time-signatures-out-of-order":
+        operations = _plan_timed_event_order(
+            document,
+            ("time_signatures",),
+            "time",
+            repairable_time_signature_event,
+            blocker_code="malformed_timed_events",
+            blocker_message=(
+                "The out-of-order time-signature timeline also contains an invalid "
+                "event, so Library Doctor will not guess how to reorder it."
+            ),
+        )
+    elif definition.rule_code == "tones.duplicate-change":
+        operations = _plan_exact_timed_duplicates(
+            document,
+            ("tones", "changes"),
+            repairable_tone_change,
+            blocker_code="malformed_timed_events",
+            blocker_message=(
+                "A tone-change timeline with exact duplicates also contains an "
+                "invalid event, so Library Doctor will not partially repair it."
+            ),
+        )
+    elif definition.rule_code == "tones.changes-out-of-order":
+        operations = _plan_timed_event_order(
+            document,
+            ("tones", "changes"),
+            "t",
+            repairable_tone_change,
+            blocker_code="malformed_timed_events",
+            blocker_message=(
+                "The out-of-order tone-change timeline also contains an invalid "
+                "event, so Library Doctor will not guess how to reorder it."
+            ),
+        )
     elif definition.rule_code == "chart.duplicate-note":
         operations = _plan_exact_note_duplicates(document)
     elif definition.rule_code == "chart.duplicate-chord-note":
@@ -5176,7 +6440,7 @@ def _plan_json_document(
     actions = []
     if operations:
         removed_count = sum(len(operation.remove_indices) for operation in operations)
-        if definition.change_kind == "reorder":
+        if definition.change_kind in {"reorder", "omit_empty"}:
             change_count = len(operations)
         elif definition.change_kind == "normalize":
             change_count = sum(
@@ -5299,6 +6563,114 @@ def _inspect_structure(document) -> None:
             continue
         seen_containers.add(identity)
         stack.extend(value.values() if isinstance(value, dict) else value)
+
+
+def _optional_array_at_path(
+    document,
+    path: tuple[str | int, ...],
+) -> list | None:
+    value = document
+    for part in path:
+        if isinstance(part, str) and isinstance(value, dict) and part in value:
+            value = value[part]
+        elif _integer(part) and isinstance(value, list) and 0 <= part < len(value):
+            value = value[part]
+        else:
+            return None
+    return value if isinstance(value, list) else None
+
+
+def _plan_empty_root_array(
+    document: dict,
+    field: str,
+) -> list[OmitEmptyRootArray]:
+    if field not in {"phrases", "tempos"}:
+        raise ValueError("unsupported optional arrangement field")
+    if not isinstance(document, dict) or document.get(field) != []:
+        return []
+    updated = copy.deepcopy(document)
+    del updated[field]
+    return [OmitEmptyRootArray(
+        field=field,
+        original_sha256=hashlib.sha256(_canonical_json(document)).hexdigest(),
+        result_sha256=hashlib.sha256(_canonical_json(updated)).hexdigest(),
+    )]
+
+
+def _plan_exact_timed_duplicates(
+    document: dict,
+    path: tuple[str | int, ...],
+    predicate,
+    *,
+    blocker_code: str,
+    blocker_message: str,
+) -> list[DeleteArrayItems]:
+    values = _optional_array_at_path(document, path)
+    if values is None:
+        return []
+    operation = _duplicate_operation(
+        path,
+        values,
+        lambda value: (
+            complete_json_identity(value) if predicate(value) else None
+        ),
+    )
+    if operation is None:
+        return []
+    if not timed_event_stream_eligibility(values, predicate):
+        raise RepairPlanningError(blocker_code, blocker_message)
+    return [operation]
+
+
+def _plan_timed_event_order(
+    document: dict,
+    path: tuple[str | int, ...],
+    time_key: str,
+    predicate,
+    *,
+    blocker_code: str,
+    blocker_message: str,
+) -> list[StableSortTimedEvents]:
+    values = _optional_array_at_path(document, path)
+    if values is None:
+        return []
+    parsed_times = []
+    for value in values:
+        if not isinstance(value, dict):
+            continue
+        event_time = value.get(time_key)
+        if time_key == "t" and not _finite_number(event_time):
+            event_time = value.get("time")
+        if _finite_number(event_time):
+            parsed_times.append(event_time)
+    if not any(
+        current < previous
+        for previous, current in zip(parsed_times, parsed_times[1:])
+    ):
+        return []
+    if not timed_event_stream_eligibility(values, predicate):
+        raise RepairPlanningError(blocker_code, blocker_message)
+    sorted_indices = tuple(sorted(
+        range(len(values)), key=lambda index: values[index][time_key]
+    ))
+    moved_count = sum(
+        index != original_index
+        for index, original_index in enumerate(sorted_indices)
+    )
+    if not moved_count:
+        return []
+    sorted_values = [values[index] for index in sorted_indices]
+    return [StableSortTimedEvents(
+        array_path=path,
+        time_key=time_key,
+        expected_length=len(values),
+        original_sha256=hashlib.sha256(_canonical_json(values)).hexdigest(),
+        sorted_sha256=hashlib.sha256(
+            _canonical_json(sorted_values)
+        ).hexdigest(),
+        sorted_indices=sorted_indices,
+        moved_count=moved_count,
+    )]
 
 
 def _plan_muted_negative_frets(
@@ -5939,6 +7311,9 @@ def _apply_operation(
     reordered: set[tuple[str | int, ...]],
     normalized: set[tuple[tuple[str | int, ...], int]],
     reviewed_paths: set[tuple[str | int, ...]],
+    omitted: set[tuple[str | int, ...]],
+    *,
+    rule_code: str | None,
 ) -> None:
     if not isinstance(operation, dict):
         raise RepairPlanningError("invalid_plan", "The repair preview is invalid.")
@@ -5956,6 +7331,16 @@ def _apply_operation(
     if operation.get("operation") == "normalize_muted_negative_frets":
         _apply_muted_fret_normalization_operation(
             document, operation, normalized
+        )
+        return
+    if operation.get("operation") == "omit_empty_root_array":
+        _apply_empty_root_array_omission(
+            document, operation, omitted, rule_code=rule_code
+        )
+        return
+    if operation.get("operation") == "stable_sort_timed_events":
+        _apply_timed_event_sort_operation(
+            document, operation, reordered, rule_code=rule_code
         )
         return
     if operation.get("operation") == "stable_sort_lyric_cues":
@@ -5986,6 +7371,36 @@ def _apply_operation(
             "source_changed",
             "The song changed after this preview. Review the safe fix again before applying it.",
         )
+
+    timed_spec = _timed_duplicate_spec(rule_code)
+    if timed_spec is not None:
+        expected_path, predicate = timed_spec
+        if path != expected_path or set(operation) != {
+            "operation",
+            "array_path",
+            "expected_length",
+            "remove_indices",
+            "duplicate_groups",
+        }:
+            raise RepairPlanningError(
+                "invalid_plan", "The repair preview is invalid."
+            )
+        if not timed_event_stream_eligibility(values, predicate):
+            raise RepairPlanningError(
+                "source_changed",
+                "The timed event list changed after this preview. Review the safe fix again before applying it.",
+            )
+        expected_operation = _duplicate_operation(
+            path,
+            values,
+            lambda value: (
+                complete_json_identity(value) if predicate(value) else None
+            ),
+        )
+        if expected_operation is None or expected_operation.to_dict() != operation:
+            raise RepairPlanningError(
+                "invalid_plan", "The repair preview is invalid."
+            )
 
     indexes = []
     for group in operation.get("duplicate_groups", []):
@@ -6023,6 +7438,184 @@ def _apply_operation(
         raise RepairPlanningError("invalid_plan", "The repair preview is invalid.")
     for index in declared_indexes:
         del values[index]
+
+
+def _manifest_tone_rule_present(tones, rule_code: str) -> bool:
+    if not isinstance(tones, dict) or not isinstance(tones.get("changes"), list):
+        return False
+    changes = tones["changes"]
+    if rule_code == "tones.duplicate-change":
+        seen = set()
+        for change in changes:
+            if not repairable_tone_change(change):
+                continue
+            identity = complete_json_identity(change)
+            if identity is None:
+                continue
+            if identity in seen:
+                return True
+            seen.add(identity)
+        return False
+    if rule_code == "tones.changes-out-of-order":
+        times = []
+        for change in changes:
+            if not isinstance(change, dict):
+                continue
+            event_time = change.get("t")
+            if not _finite_number(event_time):
+                event_time = change.get("time")
+            if _finite_number(event_time):
+                times.append(event_time)
+        return any(
+            current < previous
+            for previous, current in zip(times, times[1:])
+        )
+    return False
+
+
+def _timed_duplicate_spec(rule_code: str | None):
+    return {
+        "timeline.duplicate-tempo": (("tempos",), repairable_tempo_event),
+        "timeline.duplicate-time-signature": (
+            ("time_signatures",), repairable_time_signature_event
+        ),
+        "tones.duplicate-change": (
+            ("tones", "changes"), repairable_tone_change
+        ),
+    }.get(rule_code)
+
+
+def _apply_empty_root_array_omission(
+    document: dict,
+    operation: dict,
+    omitted: set[tuple[str | int, ...]],
+    *,
+    rule_code: str | None,
+) -> None:
+    allowed = {
+        "chart.empty-phrases-key": "phrases",
+        "timeline.empty-arrangement-tempos-key": "tempos",
+    }
+    field = allowed.get(rule_code)
+    if (
+        field is None
+        or set(operation) != {
+            "operation",
+            "array_path",
+            "field",
+            "original_sha256",
+            "result_sha256",
+        }
+        or operation.get("field") != field
+        or operation.get("array_path") != [field]
+    ):
+        raise RepairPlanningError("invalid_plan", "The repair preview is invalid.")
+    path = (field,)
+    if path in omitted:
+        raise RepairPlanningError("invalid_plan", "The repair preview is invalid.")
+    if (
+        not isinstance(document, dict)
+        or field not in document
+        or document[field] != []
+        or hashlib.sha256(_canonical_json(document)).hexdigest()
+        != operation.get("original_sha256")
+    ):
+        raise RepairPlanningError(
+            "source_changed",
+            "The arrangement changed after this preview. Review the safe fix again before applying it.",
+        )
+    del document[field]
+    omitted.add(path)
+    if (
+        hashlib.sha256(_canonical_json(document)).hexdigest()
+        != operation.get("result_sha256")
+    ):
+        raise RepairPlanningError("invalid_plan", "The repair preview is invalid.")
+
+
+def _apply_timed_event_sort_operation(
+    document: dict,
+    operation: dict,
+    reordered: set[tuple[str | int, ...]],
+    *,
+    rule_code: str | None,
+) -> None:
+    allowed = {
+        "timeline.tempos-out-of-order": (
+            ("tempos",), "time", repairable_tempo_event
+        ),
+        "timeline.time-signatures-out-of-order": (
+            ("time_signatures",), "time", repairable_time_signature_event
+        ),
+        "tones.changes-out-of-order": (
+            ("tones", "changes"), "t", repairable_tone_change
+        ),
+    }
+    spec = allowed.get(rule_code)
+    if spec is None or set(operation) != {
+        "operation",
+        "array_path",
+        "time_key",
+        "expected_length",
+        "original_sha256",
+        "sorted_sha256",
+        "sorted_indices",
+        "moved_count",
+    }:
+        raise RepairPlanningError("invalid_plan", "The repair preview is invalid.")
+    path, time_key, predicate = spec
+    if (
+        operation.get("array_path") != list(path)
+        or operation.get("time_key") != time_key
+        or path in reordered
+    ):
+        raise RepairPlanningError("invalid_plan", "The repair preview is invalid.")
+    values = _value_at_path(document, path)
+    if (
+        not isinstance(values, list)
+        or len(values) < 2
+        or operation.get("expected_length") != len(values)
+        or not timed_event_stream_eligibility(values, predicate)
+    ):
+        raise RepairPlanningError(
+            "source_changed",
+            "The timed event list changed after this preview. Review the safe fix again before applying it.",
+        )
+    if (
+        hashlib.sha256(_canonical_json(values)).hexdigest()
+        != operation.get("original_sha256")
+    ):
+        raise RepairPlanningError(
+            "source_changed",
+            "The timed event list changed after this preview. Review the safe fix again before applying it.",
+        )
+    sorted_indices = list(sorted(
+        range(len(values)), key=lambda index: values[index][time_key]
+    ))
+    declared_indices = operation.get("sorted_indices")
+    moved_count = sum(
+        index != original_index
+        for index, original_index in enumerate(sorted_indices)
+    )
+    if (
+        not moved_count
+        or not isinstance(declared_indices, list)
+        or len(declared_indices) != len(values)
+        or any(not _integer(index) for index in declared_indices)
+        or sorted(declared_indices) != list(range(len(values)))
+        or declared_indices != sorted_indices
+        or not _integer(operation.get("moved_count"))
+        or operation["moved_count"] != moved_count
+    ):
+        raise RepairPlanningError("invalid_plan", "The repair preview is invalid.")
+    sorted_values = [values[index] for index in sorted_indices]
+    if (
+        hashlib.sha256(_canonical_json(sorted_values)).hexdigest()
+        != operation.get("sorted_sha256")
+    ):
+        raise RepairPlanningError("invalid_plan", "The repair preview is invalid.")
+    values[:] = sorted_values
+    reordered.add(path)
 
 
 def _apply_reviewed_operation(
@@ -6553,8 +8146,9 @@ def _apply_redundant_handshape_delete_operation(
 def _musical_position_count(
     document,
     operations: list[
-        DeleteArrayItems | DeleteNotesMatchingChords | StableSortBendPoints
-        | StableSortLyricCues | StableSortTimelineMarkers
+        DeleteArrayItems | DeleteNotesMatchingChords | OmitEmptyRootArray
+        | StableSortBendPoints | StableSortLyricCues
+        | StableSortTimelineMarkers | StableSortTimedEvents
         | DeleteRedundantHandshapes | NormalizeMutedNegativeFrets
     ],
     rule_code: str,
@@ -6601,6 +8195,19 @@ def _musical_position_count(
                     "timeline": operation.field,
                     "time": markers[source_index]["time"],
                 }))
+        elif isinstance(operation, StableSortTimedEvents):
+            values = _value_at_path(document, operation.array_path)
+            for destination_index, source_index in enumerate(
+                operation.sorted_indices
+            ):
+                if destination_index == source_index:
+                    continue
+                positions.add(_canonical_json({
+                    "path": list(operation.array_path),
+                    "time": values[source_index][operation.time_key],
+                }))
+        elif isinstance(operation, OmitEmptyRootArray):
+            continue
         elif isinstance(operation, DeleteArrayItems):
             values = _value_at_path(document, operation.array_path)
             for group in operation.duplicate_groups:
@@ -6630,6 +8237,13 @@ def _musical_position_count(
                         "name": value["name"],
                         "number": value.get("number"),
                     }
+                elif rule_code in {
+                    "timeline.duplicate-tempo",
+                    "timeline.duplicate-time-signature",
+                }:
+                    position = {"time": value["time"]}
+                elif rule_code == "tones.duplicate-change":
+                    position = {"t": value["t"], "name": value["name"]}
                 else:
                     position = {"t": value["t"], "s": value["s"]}
                 positions.add(_canonical_json(position))
@@ -6722,11 +8336,12 @@ def _report_code_counts(report: dict) -> dict[str, int]:
 
 
 def _finite_number(value) -> bool:
-    return (
-        isinstance(value, (int, float))
-        and not isinstance(value, bool)
-        and math.isfinite(value)
-    )
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(float(value))
+    except (OverflowError, ValueError):
+        return False
 
 
 def _integer(value) -> bool:
@@ -6761,6 +8376,12 @@ def _summary(
 ) -> str:
     item_label = noun if change_count == 1 else f"{noun}s"
     list_label = "list" if arrays_affected == 1 else "lists"
+    if change_kind == "omit_empty":
+        return (
+            f"Omit {change_count} empty optional {item_label} across "
+            f"{arrays_affected} {list_label}; preserve every musical event and "
+            "other stored property."
+        )
     if change_kind == "reorder":
         return (
             f"Put {change_count} {item_label} into chronological order across "

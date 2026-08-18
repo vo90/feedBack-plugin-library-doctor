@@ -22,6 +22,24 @@ export function createFindingView({ actions, document, make, number, state }) {
     return { ...current, ...saved };
   }
 
+  function repairEligibility(report, ruleCode) {
+    const eligibility = report?.features?.repair_eligibility?.[ruleCode];
+    return eligibility && typeof eligibility === 'object' ? eligibility : null;
+  }
+
+  function repairBlockerCopy(report, finding, rule) {
+    const eligibility = repairEligibility(report, finding.code);
+    if (!eligibility || eligibility.status === 'automatic') return '';
+    if (eligibility.message) return eligibility.message;
+    if (eligibility.reason_code === 'manifest_tones_require_manual_edit') {
+      return 'These effective tone changes are stored in the manifest and require a manual edit.';
+    }
+    if (eligibility.reason_code === 'jsonc_requires_lossless_writer') {
+      return 'This source uses JSONC comments and requires a comment-preserving writer before Library Doctor can change it safely.';
+    }
+    return rule.guidance || 'Library Doctor cannot safely change this stored data automatically.';
+  }
+
   function appendFindingExplanation(item, problem, playerImpact, fixBenefit, guidance) {
     const explanation = make('div', 'lh-finding-explanation');
     [
@@ -80,27 +98,33 @@ export function createFindingView({ actions, document, make, number, state }) {
     const sourceFiles = new Set(
       findings.map((finding) => String(finding.location || '').split(':')[0]).filter(Boolean),
     );
+    const displayItem = affected === 1 ? itemName : pluralItem;
     const scope = arrangements.size
       ? `${number(arrangements.size)} arrangement${arrangements.size === 1 ? '' : 's'}`
       : `${number(sourceFiles.size || findings.length)} source ${sourceFiles.size === 1 ? 'file' : 'files'}`;
+    const blockerCopy = repairBlockerCopy(report, representative, rule);
 
     const item = make('li', 'lh-finding lh-finding-repair-group');
     item.dataset.severity = representative.severity || 'warning';
     item.dataset.category = representative.category || 'validation';
     item.appendChild(make('strong', 'lh-finding-title', rule.title || definition.title || 'Safe repair available'));
-    const technicalSummary = definition.change_kind === 'normalize'
+    const technicalSummary = definition.change_kind === 'omit_empty'
+      ? `${number(affected)} optional ${displayItem} ${affected === 1 ? 'stores' : 'store'} an explicit empty array across ${scope}. Omitting these empty root properties does not delete a musical event or position.`
+      : definition.change_kind === 'normalize'
       ? `${number(affected)} pitchless string-mute ${affected === 1 ? 'position uses' : 'positions use'} a negative fret across ${scope}. Library Doctor can change only those fret values to 0 while preserving every other stored property.`
       : definition.change_kind === 'reorder'
-      ? `${number(affected)} ${itemName}${affected === 1 ? ' has' : 's have'} entries stored outside chronological order across ${scope}. Every stored entry and property can be preserved by one package-wide repair.`
+      ? `${number(affected)} ${displayItem} ${affected === 1 ? 'is' : 'are'} stored outside chronological order across ${scope}.${blockerCopy ? ' Library Doctor leaves the source unchanged automatically.' : ' Every stored entry and property can be preserved by one package-wide repair.'}`
       : definition.change_kind === 'remove_redundant'
         ? `${number(affected)} musical ${affected === 1 ? 'position has' : 'positions have'} a zero-duration shape guide across ${scope}. Library Doctor removes only records whose exact matching chord already preserves the complete playable instruction.`
+        : definition.change_kind === 'remove_duplicates'
+          ? `${number(affected)} later ${itemName} ${affected === 1 ? 'copy is' : 'copies are'} complete JSON-identical duplicates across ${scope}.${blockerCopy ? ' Library Doctor leaves the source unchanged automatically.' : ' Library Doctor keeps the first complete stored event and never chooses between different same-time data.'}`
         : `${number(affected)} musical ${affected === 1 ? 'position contains' : 'positions contain'} redundant ${pluralItem} with identical stored values across ${scope}. These arrangement-level findings share one package-wide repair.`;
     appendFindingExplanation(
       item,
       technicalSummary,
       rule.player_impact,
       rule.fix_benefit,
-      'Review the single package-wide fix below. Its preview recalculates every declared source file and shows the complete change before anything is saved.',
+      blockerCopy || 'Review the single package-wide fix below. Its preview recalculates every declared source file and shows the complete change before anything is saved.',
     );
     const repair = actions.repairControls(report, representative);
     if (repair) item.appendChild(repair);
@@ -153,7 +177,9 @@ export function createFindingView({ actions, document, make, number, state }) {
       `${number(affected)} stored HO/PO occurrence${affected === 1 ? '' : 's'} need an author decision. They may include both flags, a lone flag opposite to incoming fret movement, a same-fret transition, or no single usable predecessor.`,
       'The highway may show the wrong HO/PO symbol, hide one of two competing symbols, or present a technique that does not describe the authored transition.',
       'Reviewed repair compares stream-local previous/current/next evidence and changes nothing until you explicitly choose what each note should store.',
-      'Open the package-wide Reviewed repair below. There is no default choice, unusual notes can be left unchanged, and every selected mutation receives full package validation, recovery backup, and Undo.',
+      report.features?.player_review?.available === false
+        ? 'This song is outside the configured song library, so manual Player Review is unavailable. Automatic and standard repairs remain available, and Library Doctor will not make a manual choice for you.'
+        : 'Open Player Review below to use the normal Highway and song playback, or use the text-only fallback. There is no default choice; Library Doctor shows only outcome-checked changes that resolve the current issue, while Skip for now leaves it unresolved. Every selected mutation receives full package validation, recovery backup, and Undo.',
     );
     const controls = actions.reviewedRepairControls(report, adapterId);
     if (controls) item.appendChild(controls);
@@ -165,7 +191,8 @@ export function createFindingView({ actions, document, make, number, state }) {
     const findings = Array.isArray(report.findings) ? [...report.findings] : [];
     if (!report.features?.preview_declared) {
       const previewEligibility = report.features?.repair_eligibility?.['media.preview-missing'];
-      const canCreatePreview = previewEligibility?.status === 'automatic';
+      const repairScopeUnavailable = state.status?.target?.repairs_available === false;
+      const canCreatePreview = !repairScopeUnavailable && previewEligibility?.status === 'automatic';
       findings.unshift({
         severity: 'info',
         category: 'library_optimization',
@@ -180,7 +207,9 @@ export function createFindingView({ actions, document, make, number, state }) {
           repairability: canCreatePreview ? 'review_required' : 'manual',
           guidance: canCreatePreview
             ? 'Library Doctor can create a representative preview automatically, or you can listen and choose another start before applying it.'
-            : previewEligibility?.message || 'This Feedpak does not provide an unambiguous Ogg full mix that Library Doctor can use to create a preview automatically.',
+            : repairScopeUnavailable
+              ? 'Scan this folder or package again before creating its preview.'
+              : previewEligibility?.message || 'This Feedpak does not provide an unambiguous Ogg full mix that Library Doctor can use to create a preview automatically.',
           player_impact: 'Library browsing has no quick audio excerpt for this Feedpak.',
           fix_benefit: 'A compact preview makes the song easier to recognize without changing gameplay audio.',
         },
@@ -261,7 +290,15 @@ export function createFindingView({ actions, document, make, number, state }) {
         nodes.push(findingNode(finding, report));
       }
     });
-    return nodes;
+    const severityPriority = { error: 0, warning: 1, info: 2 };
+    return nodes
+      .map((node, index) => ({ node, index }))
+      .sort((left, right) => (
+        (severityPriority[left.node.dataset.severity] ?? 3)
+        - (severityPriority[right.node.dataset.severity] ?? 3)
+        || left.index - right.index
+      ))
+      .map(({ node }) => node);
   }
 
   function findingNode(finding, report) {
@@ -269,13 +306,14 @@ export function createFindingView({ actions, document, make, number, state }) {
     item.dataset.severity = finding.severity || 'info';
     item.dataset.category = finding.category || 'validation';
     const rule = currentRule(finding);
+    const blockerCopy = repairBlockerCopy(report, finding, rule);
     item.appendChild(make('strong', 'lh-finding-title', rule.title || 'Validation issue'));
     appendFindingExplanation(
       item,
       finding.message || 'No additional description is available.',
       rule.player_impact,
       rule.fix_benefit,
-      rule.guidance,
+      blockerCopy || rule.guidance,
     );
     const technical = make('details', 'lh-finding-technical');
     technical.appendChild(make('summary', '', 'Technical details'));

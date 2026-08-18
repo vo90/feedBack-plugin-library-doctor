@@ -59,6 +59,14 @@ def test_catalog_is_an_explicit_allowlist(repair):
 
     assert [item["rule_code"] for item in catalog] == [
         "chart.negative-muted-fret",
+        "chart.empty-phrases-key",
+        "timeline.empty-arrangement-tempos-key",
+        "timeline.duplicate-tempo",
+        "timeline.tempos-out-of-order",
+        "timeline.duplicate-time-signature",
+        "timeline.time-signatures-out-of-order",
+        "tones.duplicate-change",
+        "tones.changes-out-of-order",
         "chart.duplicate-note",
         "chart.duplicate-chord-note",
         "chart.duplicate-chord",
@@ -82,6 +90,61 @@ def test_catalog_is_an_explicit_allowlist(repair):
     assert {item["safety"] for item in catalog} == {
         "safe_automatic", "review_required",
     }
+    assert sum(item["safety"] == "safe_automatic" for item in catalog) == 24
+    structural_repairs = {
+        item["rule_code"]: (
+            item["action_kind"], item["source_kind"], item["change_kind"]
+        )
+        for item in catalog
+        if item["rule_code"] in {
+            "chart.empty-phrases-key",
+            "timeline.empty-arrangement-tempos-key",
+            "timeline.duplicate-tempo",
+            "timeline.tempos-out-of-order",
+            "timeline.duplicate-time-signature",
+            "timeline.time-signatures-out-of-order",
+            "tones.duplicate-change",
+            "tones.changes-out-of-order",
+        }
+    }
+    assert structural_repairs == {
+        "chart.empty-phrases-key": (
+            "omit_empty_phrases_key", "arrangement", "omit_empty"
+        ),
+        "timeline.empty-arrangement-tempos-key": (
+            "omit_empty_arrangement_tempos_key", "arrangement", "omit_empty"
+        ),
+        "timeline.duplicate-tempo": (
+            "remove_exact_duplicate_tempo_events", "timeline", "remove_duplicates"
+        ),
+        "timeline.tempos-out-of-order": (
+            "reorder_tempo_events", "timeline", "reorder"
+        ),
+        "timeline.duplicate-time-signature": (
+            "remove_exact_duplicate_time_signature_events",
+            "timeline",
+            "remove_duplicates",
+        ),
+        "timeline.time-signatures-out-of-order": (
+            "reorder_time_signature_events", "timeline", "reorder"
+        ),
+        "tones.duplicate-change": (
+            "remove_exact_duplicate_tone_changes", "arrangement", "remove_duplicates"
+        ),
+        "tones.changes-out-of-order": (
+            "reorder_tone_changes", "arrangement", "reorder"
+        ),
+    }
+    assert repair._ALL_SAFE_RULE_ORDER[:8] == (
+        "chart.empty-phrases-key",
+        "timeline.empty-arrangement-tempos-key",
+        "timeline.duplicate-tempo",
+        "timeline.tempos-out-of-order",
+        "timeline.duplicate-time-signature",
+        "timeline.time-signatures-out-of-order",
+        "tones.duplicate-change",
+        "tones.changes-out-of-order",
+    )
     mute_repair = repair.repair_for_rule("chart.negative-muted-fret")
     assert mute_repair["source_kind"] == "arrangement"
     assert mute_repair["item_name"] == "muted note fret"
@@ -994,6 +1057,292 @@ def test_lyric_repair_rejects_tampered_ordering_instructions(repair):
     assert caught.value.code == "invalid_plan"
 
 
+def test_omits_only_empty_optional_arrangement_keys(repair):
+    original = {
+        "version": 1,
+        "phrases": [],
+        "tempos": [],
+        "notes": [{"t": 1.0, "s": 0, "f": 3}],
+        "future": {"preserved": True},
+    }
+    phrase_plan = _plan(
+        repair, original, rule_code="chart.empty-phrases-key"
+    )
+    phrase_action = phrase_plan["actions"][0]
+    assert phrase_action["change_kind"] == "omit_empty"
+    assert phrase_action["change_count"] == 1
+    assert phrase_action["removed_count"] == 0
+    assert phrase_action["musical_positions"] == 0
+    assert phrase_action["operations"][0]["array_path"] == ["phrases"]
+
+    after_phrase_raw = repair.apply_json_member(_raw(original), phrase_plan)
+    after_phrase = json.loads(after_phrase_raw.decode("utf-8"))
+    assert "phrases" not in after_phrase
+    assert after_phrase["tempos"] == []
+    assert after_phrase["notes"] == original["notes"]
+    assert after_phrase["future"] == original["future"]
+
+    tempo_plan = repair.plan_json_member(
+        after_phrase_raw,
+        member_path="arrangements/lead.json",
+        source_kind="arrangement",
+        validator_version="rules-test",
+        rule_code="timeline.empty-arrangement-tempos-key",
+    )
+    tempo_action = tempo_plan["actions"][0]
+    assert tempo_action["change_kind"] == "omit_empty"
+    assert tempo_action["change_count"] == 1
+    assert tempo_action["removed_count"] == 0
+    assert tempo_action["musical_positions"] == 0
+    after_both = json.loads(
+        repair.apply_json_member(after_phrase_raw, tempo_plan).decode("utf-8")
+    )
+    assert "phrases" not in after_both
+    assert "tempos" not in after_both
+    assert after_both == {
+        "version": 1,
+        "notes": original["notes"],
+        "future": original["future"],
+    }
+
+    for value in (None, {}, "", [{"start_time": 0, "end_time": 1, "levels": []}]):
+        assert _plan(
+            repair,
+            {"phrases": value},
+            rule_code="chart.empty-phrases-key",
+        )["actions"] == []
+    for value in (None, {}, "", [{"time": 0, "bpm": 120}]):
+        assert _plan(
+            repair,
+            {"tempos": value},
+            rule_code="timeline.empty-arrangement-tempos-key",
+        )["actions"] == []
+    assert _plan(
+        repair,
+        {"version": 1, "tempos": []},
+        source_kind="timeline",
+        rule_code="timeline.duplicate-tempo",
+    )["actions"] == []
+
+    tampered = copy.deepcopy(phrase_plan)
+    operation = tampered["actions"][0]["operations"][0]
+    operation["field"] = "tempos"
+    operation["array_path"] = ["tempos"]
+    action = tampered["actions"][0]
+    action["action_id"] = repair._digest_json({
+        "source_sha256": tampered["source"]["sha256"],
+        **{key: value for key, value in action.items() if key != "action_id"},
+    })
+    unsigned = {key: value for key, value in tampered.items() if key != "plan_id"}
+    tampered["plan_id"] = repair._digest_json(unsigned)
+    with pytest.raises(repair.RepairPlanningError) as caught:
+        repair.apply_json_member(_raw(original), tampered)
+    assert caught.value.code == "invalid_plan"
+
+
+def test_removes_only_exact_tempo_meter_and_tone_duplicates(repair):
+    cases = [
+        (
+            "timeline.duplicate-tempo",
+            "timeline",
+            {
+                "tempos": [
+                    {"time": 0, "bpm": 120, "future": {"x": 1}},
+                    {"future": {"x": 1}, "bpm": 120, "time": 0},
+                    {"time": 0, "bpm": 121, "future": {"x": 1}},
+                    {"time": 0, "bpm": 120.0, "future": {"x": 1}},
+                ]
+            },
+            "tempos",
+        ),
+        (
+            "timeline.duplicate-time-signature",
+            "timeline",
+            {
+                "time_signatures": [
+                    {"time": 0, "ts": [4, 4], "future": "kept"},
+                    {"future": "kept", "ts": [4, 4], "time": 0},
+                    {"time": 0, "ts": [3, 4], "future": "kept"},
+                ]
+            },
+            "time_signatures",
+        ),
+        (
+            "tones.duplicate-change",
+            "arrangement",
+            {
+                "tones": {
+                    "base": "Clean",
+                    "changes": [
+                        {"t": 1, "name": "Lead", "rig": "lead", "future": 1},
+                        {"future": 1, "rig": "lead", "name": "Lead", "t": 1},
+                        {"t": 1, "name": "Lead 2", "rig": "lead", "future": 1},
+                    ],
+                }
+            },
+            "tones.changes",
+        ),
+    ]
+    for rule_code, source_kind, document, field in cases:
+        plan = _plan(
+            repair,
+            document,
+            source_kind=source_kind,
+            rule_code=rule_code,
+        )
+        action = plan["actions"][0]
+        assert action["removed_count"] == 1
+        assert action["change_count"] == 1
+        repaired = json.loads(
+            repair.apply_json_member(_raw(document), plan).decode("utf-8")
+        )
+        values = (
+            repaired["tones"]["changes"]
+            if field == "tones.changes"
+            else repaired[field]
+        )
+        originals = (
+            document["tones"]["changes"]
+            if field == "tones.changes"
+            else document[field]
+        )
+        assert values == [originals[0], *originals[2:]]
+
+    malformed = {
+        "tempos": [
+            {"time": 0, "bpm": 120},
+            {"time": 0, "bpm": 120},
+            {"time": 1, "bpm": "fast"},
+        ]
+    }
+    with pytest.raises(repair.RepairPlanningError) as blocked:
+        _plan(
+            repair,
+            malformed,
+            source_kind="timeline",
+            rule_code="timeline.duplicate-tempo",
+        )
+    assert blocked.value.code == "malformed_timed_events"
+
+
+def test_stably_orders_valid_tempo_meter_and_tone_streams(repair):
+    cases = [
+        (
+            "timeline.tempos-out-of-order",
+            "timeline",
+            "tempos",
+            {
+                "tempos": [
+                    {"time": 2, "bpm": 120, "id": "equal-first"},
+                    {"time": 1, "bpm": 110, "id": "earlier"},
+                    {"time": 2, "bpm": 130, "id": "equal-second"},
+                ]
+            },
+            ["earlier", "equal-first", "equal-second"],
+        ),
+        (
+            "timeline.time-signatures-out-of-order",
+            "timeline",
+            "time_signatures",
+            {
+                "time_signatures": [
+                    {"time": 3, "ts": [4, 4], "id": "late-first"},
+                    {"time": 1, "ts": [3, 4], "id": "early"},
+                    {"time": 3, "ts": [6, 8], "id": "late-second"},
+                ]
+            },
+            ["early", "late-first", "late-second"],
+        ),
+        (
+            "tones.changes-out-of-order",
+            "arrangement",
+            "tones.changes",
+            {
+                "tones": {
+                    "changes": [
+                        {"t": 4, "name": "A", "id": "late-first"},
+                        {"t": 2, "name": "B", "id": "early"},
+                        {"t": 4, "name": "C", "id": "late-second"},
+                    ]
+                }
+            },
+            ["early", "late-first", "late-second"],
+        ),
+    ]
+    for rule_code, source_kind, field, document, expected_ids in cases:
+        plan = _plan(
+            repair,
+            document,
+            source_kind=source_kind,
+            rule_code=rule_code,
+        )
+        action = plan["actions"][0]
+        assert action["change_count"] == 1
+        assert action["removed_count"] == 0
+        operation = action["operations"][0]
+        assert operation["sorted_indices"] == [1, 0, 2]
+        repaired = json.loads(
+            repair.apply_json_member(_raw(document), plan).decode("utf-8")
+        )
+        values = (
+            repaired["tones"]["changes"]
+            if field == "tones.changes"
+            else repaired[field]
+        )
+        assert [value["id"] for value in values] == expected_ids
+
+    malformed = {
+        "tempos": [
+            {"time": 3, "bpm": 120},
+            {"time": 2, "bpm": "fast"},
+        ]
+    }
+    with pytest.raises(repair.RepairPlanningError) as blocked:
+        _plan(
+            repair,
+            malformed,
+            source_kind="timeline",
+            rule_code="timeline.tempos-out-of-order",
+        )
+    assert blocked.value.code == "malformed_timed_events"
+
+    oversized_number = {
+        "tempos": [
+            {"time": 3, "bpm": 120},
+            {"time": 2, "bpm": 110},
+            {"time": 10**1000, "bpm": 100},
+        ]
+    }
+    with pytest.raises(repair.RepairPlanningError) as blocked:
+        _plan(
+            repair,
+            oversized_number,
+            source_kind="timeline",
+            rule_code="timeline.tempos-out-of-order",
+        )
+    assert blocked.value.code == "malformed_timed_events"
+
+    source = cases[0][3]
+    plan = _plan(
+        repair,
+        source,
+        source_kind="timeline",
+        rule_code="timeline.tempos-out-of-order",
+    )
+    tampered = copy.deepcopy(plan)
+    tampered["actions"][0]["operations"][0]["sorted_indices"] = [True, 0, 2]
+    action = tampered["actions"][0]
+    action["action_id"] = repair._digest_json({
+        "source_sha256": tampered["source"]["sha256"],
+        **{key: value for key, value in action.items() if key != "action_id"},
+    })
+    unsigned = {key: value for key, value in tampered.items() if key != "plan_id"}
+    tampered["plan_id"] = repair._digest_json(unsigned)
+    with pytest.raises(repair.RepairPlanningError) as caught:
+        repair.apply_json_member(_raw(source), tampered)
+    assert caught.value.code == "invalid_plan"
+
+
 @pytest.mark.parametrize(
     ("field", "rule_code", "markers"),
     [
@@ -1504,6 +1853,135 @@ def test_ambiguous_declared_timeline_blocks_instead_of_editing_legacy_grid(
     assert legacy_path.read_bytes() == legacy_original
 
 
+def test_tempo_meter_and_tone_source_resolution_matches_runtime(
+    repair, tmp_path,
+):
+    library = tmp_path / "library"
+    package = library / "Song.feedpak"
+    arrangements = package / "arrangements"
+    arrangements.mkdir(parents=True)
+    manifest_path = package / "manifest.yaml"
+    manifest_path.write_text(
+        "arrangements:\n"
+        "  - id: lead\n"
+        "    file: arrangements/lead.json\n"
+        "  - id: rhythm\n"
+        "    file: arrangements/rhythm.json\n"
+        "  - id: hidden\n"
+        "    file: arrangements/hidden.json\n"
+        "    tones:\n"
+        "      base: Manifest\n"
+        "      changes:\n"
+        "        - {t: 0, name: Clean}\n"
+        "song_timeline: song_timeline.json\n",
+        encoding="utf-8",
+    )
+    tempo = {"time": 0, "bpm": 120, "future": "kept"}
+    (arrangements / "lead.json").write_bytes(_raw({
+        "tempos": [tempo, dict(tempo)],
+    }))
+    tone = {"t": 1, "name": "Lead", "future": "kept"}
+    (arrangements / "rhythm.json").write_bytes(_raw({
+        "tones": {"changes": [tone, dict(tone)]},
+    }))
+    (arrangements / "hidden.json").write_bytes(_raw({
+        "tones": {"changes": [tone, dict(tone)]},
+    }))
+    meter = {"time": 0, "ts": [4, 4], "future": "kept"}
+    (package / "song_timeline.json").write_bytes(_raw({
+        "version": 1,
+        "tempos": [tempo, dict(tempo)],
+        "time_signatures": [meter, dict(meter)],
+    }))
+    service = repair.RepairService(
+        config_dir=tmp_path / "config",
+        get_dlc_dir=lambda: library,
+        validate_feedpak=lambda *_args, **_kwargs: {},
+        validator_version="rules-test",
+        log=logging.getLogger("library-doctor-structural-source-tests"),
+    )
+
+    tempo_preview = service.preview("Song.feedpak", "timeline.duplicate-tempo")
+    assert tempo_preview["available"] is True
+    assert [item["member_path"] for item in tempo_preview["member_plans"]] == [
+        "arrangements/lead.json",
+        "song_timeline.json",
+    ]
+    meter_preview = service.preview(
+        "Song.feedpak", "timeline.duplicate-time-signature"
+    )
+    assert meter_preview["available"] is True
+    assert [item["member_path"] for item in meter_preview["member_plans"]] == [
+        "song_timeline.json"
+    ]
+    tone_preview = service.preview("Song.feedpak", "tones.duplicate-change")
+    assert tone_preview["available"] is True
+    assert [item["member_path"] for item in tone_preview["member_plans"]] == [
+        "arrangements/rhythm.json"
+    ]
+
+    manifest_path.write_text(
+        manifest_path.read_text(encoding="utf-8").replace(
+            "        - {t: 0, name: Clean}\n",
+            "        - {t: 0, name: Clean}\n"
+            "        - {t: 0, name: Clean}\n",
+        ),
+        encoding="utf-8",
+    )
+    blocked = service.preview("Song.feedpak", "tones.duplicate-change")
+    assert blocked["available"] is False
+    assert blocked["member_plans"] == []
+    assert blocked["blockers"] == [{
+        "member_path": "manifest.yaml",
+        "code": "manifest_tones_require_manual_edit",
+        "message": (
+            "This tone issue is stored in manifest.yaml, which cannot be "
+            "rewritten losslessly yet."
+        ),
+    }]
+    assert not (
+        tmp_path / "config" / "library_doctor" / "repair_backups"
+    ).exists()
+
+
+def test_fix_all_skips_an_unavailable_tone_rule_but_keeps_other_safe_repairs(
+    repair, tmp_path,
+):
+    library = tmp_path / "library"
+    package = library / "Song.feedpak"
+    arrangements = package / "arrangements"
+    arrangements.mkdir(parents=True)
+    (package / "manifest.yaml").write_text(
+        "arrangements:\n"
+        "  - id: lead\n"
+        "    file: arrangements/lead.json\n"
+        "    tones:\n"
+        "      changes:\n"
+        "        - {t: 0, name: Clean}\n"
+        "        - {t: 0, name: Clean}\n",
+        encoding="utf-8",
+    )
+    note = {"t": 1.0, "s": 0, "f": 3}
+    (arrangements / "lead.json").write_bytes(_raw({
+        "notes": [note, dict(note)],
+        "chords": [],
+    }))
+    service = repair.RepairService(
+        config_dir=tmp_path / "config",
+        get_dlc_dir=lambda: library,
+        validate_feedpak=lambda *_args, **_kwargs: {},
+        validator_version="rules-test",
+        log=logging.getLogger("library-doctor-conditional-fix-all-tests"),
+    )
+
+    all_safe = service.preview_all("Song.feedpak")
+
+    assert all_safe["available"] is True
+    assert all_safe["blockers"] == []
+    assert all_safe["rule_codes"] == ["chart.duplicate-note"]
+    assert all_safe["removed_count"] == 1
+
+
 def test_batch_planning_recalculates_only_scan_reported_safe_rules(
     repair, tmp_path,
 ):
@@ -1623,6 +2101,67 @@ def test_combined_repair_parses_and_renders_each_member_once(
     ]
     assert internal["_members"][0]["replacement"] == sequential
     assert calls == {"parse": 1, "render": 1}
+
+
+def test_fix_all_orders_omission_duplicates_and_timed_sorts(
+    repair, tmp_path,
+):
+    library = tmp_path / "library"
+    package = library / "Song.feedpak"
+    arrangements = package / "arrangements"
+    arrangements.mkdir(parents=True)
+    (package / "manifest.yaml").write_text(
+        "arrangements:\n"
+        "  - id: lead\n"
+        "    file: arrangements/lead.json\n",
+        encoding="utf-8",
+    )
+    late_tempo = {"time": 2, "bpm": 120, "future": "tempo"}
+    late_tone = {"t": 2, "name": "Lead", "future": "tone"}
+    (arrangements / "lead.json").write_bytes(_raw({
+        "phrases": [],
+        "tempos": [late_tempo, dict(late_tempo), {"time": 1, "bpm": 110}],
+        "tones": {
+            "changes": [
+                late_tone,
+                dict(late_tone),
+                {"t": 1, "name": "Clean"},
+            ]
+        },
+    }))
+    service = repair.RepairService(
+        config_dir=tmp_path / "config",
+        get_dlc_dir=lambda: library,
+        validate_feedpak=lambda *_args, **_kwargs: {},
+        validator_version="rules-test",
+        log=logging.getLogger("library-doctor-structural-order-tests"),
+    )
+
+    internal = service._plan_all_package(package, "Song.feedpak")
+
+    assert internal["available"] is True
+    assert internal["rule_codes"] == [
+        "chart.empty-phrases-key",
+        "timeline.duplicate-tempo",
+        "timeline.tempos-out-of-order",
+        "tones.duplicate-change",
+        "tones.changes-out-of-order",
+    ]
+    assert [
+        step["rule_code"] for step in internal["_members"][0]["steps"]
+    ] == internal["rule_codes"]
+    repaired = json.loads(
+        internal["_members"][0]["replacement"].decode("utf-8")
+    )
+    assert "phrases" not in repaired
+    assert repaired["tempos"] == [
+        {"time": 1, "bpm": 110},
+        late_tempo,
+    ]
+    assert repaired["tones"]["changes"] == [
+        {"t": 1, "name": "Clean"},
+        late_tone,
+    ]
 
 
 @pytest.mark.parametrize("entrypoint", ["selected", "all", "single"])

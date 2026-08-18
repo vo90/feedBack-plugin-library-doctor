@@ -58,8 +58,10 @@ FeedBack URL to reopen the temporary high-density layout for rollback testing.
    to a song you choose.
 2. Select **Scan my library** for the recommended read-only check. Open **Scan
    options** when you need **All songs**, **A folder**, or **One package**. Folder
-   scans include all Feedpaks and Sloppaks in their subfolders. Selected paths
-   must be inside FeedBack's configured song library.
+   scans include all Feedpaks and Sloppaks in their subfolders. A selected folder
+   or package can be anywhere on the computer. The same applicable, explicitly
+   confirmed repairs work in that selected scope; it does not need to be inside
+   FeedBack's configured song library.
 3. Start the scan. You can leave the screen while it works or cancel the scan;
    completed reports are kept and the dashboard clearly marks the result as
    incomplete. Enable **Deep audio checks** after a normal scan when you also
@@ -177,13 +179,17 @@ absent.
 
 ## Safe repairs
 
+The automatic-safe song-data catalog contains 24 rule-specific repair actions.
 The repair allowlist removes exact duplicate standalone notes, members inside
 one chord, complete chord events, anchors, handshapes, beat markers, section
 markers, and drum hits. It can also remove a standalone note that exactly
 repeats one explicit member of a chord, remove strictly redundant zero-length
 or reversed-duration handshapes, and put out-of-order bend points and lyric
 cues, beat markers, and section markers into chronological order without
-removing any stored entry.
+removing any stored entry. It also omits explicitly empty optional arrangement
+`phrases` and `tempos` properties, removes exact duplicate tempo,
+time-signature, and tone-change events, and puts otherwise-valid instances of
+those event streams into chronological order.
 Ordinary duplicates keep the first entry and delete only later copies whose
 complete JSON properties and values match within the same event array or chord.
 For a note that repeats a chord member, the complete chord is preserved and the
@@ -212,6 +218,25 @@ includes name, time, optional number, and any future properties. Markers at the
 same time with different data remain present and are never chosen between or
 deleted by the ordering repair.
 
+An empty root arrangement `phrases: []` property is omitted because absence is
+the format's representation for no phrase ladder. An empty root arrangement
+`tempos: []` override is omitted so that chart continues following the song
+tempo. Song-timeline empty arrays, nested properties, nonempty arrays, and
+wrong-shaped values are never selected by either omission repair. These actions
+remove only empty optional properties; they do not remove musical events or
+positions.
+
+Tempo repairs cover every active per-arrangement override and the declared song
+timeline in the same package-wide action. Time-signature repairs cover only the
+declared song timeline. Tone-change repairs cover only effective inline
+arrangement JSON tone data using the canonical `t` time key. Nonempty
+manifest-stored tone data requires a manual edit because Library Doctor does not
+rewrite manifest YAML. Each duplicate repair keeps the first complete JSON
+object and removes only later identical copies, including unknown properties.
+Each ordering repair requires a fully valid list and stable-sorts existing raw
+numeric times; equal-time entries keep their original order. A malformed list,
+same-time differing event, or ambiguous effective source is left unchanged.
+
 Zero-length handshapes use a narrower safety rule because FeedBack can synthesize
 a chord from an unmatched handshape onset. Library Doctor removes one only when
 it is non-arpeggiated, contains no unknown properties, and exactly one chord with
@@ -233,9 +258,11 @@ author's intended duration cannot be proved from a reversed span.
 
 A preview is bound to the exact current source bytes and validator version. If
 the package changes before confirmation, Library Doctor refuses the stale plan.
-JSONC arrangement files are left unchanged until a comment-preserving writer is
-available. Repairs cannot run during a library scan or while the song player
-has priority.
+JSONC arrangement and song-timeline files are left unchanged until a
+comment-preserving writer is available. Repairs cannot run during a library
+scan or while the song player has priority. Player Review therefore stops and
+releases the active transport immediately before Apply or Undo, completes the
+validated transaction, and reloads the same song and review position.
 
 ### Reviewed tab repairs
 
@@ -243,14 +270,64 @@ Hammer-on and pull-off findings that require musical intent are deliberately
 separate from every automatic-safe allowlist. **Reviewed repair** covers notes
 with both flags, a lone flag opposite to the incoming same-string fret
 movement, same-fret HO/PO, and HO/PO without one usable predecessor. It keeps
-top-level arrangements and phrase difficulties as independent streams and uses
-the next same-string note only as evidence; long gaps do not hide a candidate.
+each runtime-selectable phrase difficulty independent, uses the arrangement
+root only when there is no usable phrase ladder, and treats the next same-string
+note only as evidence; long gaps do not hide a candidate. A strict authored
+`linkNext` from the immediately preceding same-fret event identifies a held
+continuation rather than a new HO/PO attack, so that continuation is not sent
+to manual review. Independent contradictions, such as both HO and PO being
+stored, remain reviewable.
 
-The workflow presents one bounded candidate at a time with previous, current,
-and next fret context. It never preselects a choice. The author can explicitly
+**Default Manual Player Review view** defaults to **Full difficulty only** in
+Scan options. The validator still records every authored phrase level in one
+pass. After the scan, a separate **Manual Player Review** filter above the
+affected-song list can switch between max difficulty and every authored
+difficulty without rescanning or changing that saved default. The list, rule
+totals, dashboard counters, text review, and Player Review follow the current
+list filter. Only difficulty-sensitive manual-review findings are hidden;
+automatic-safe and other findings always remain visible. For arrangements with
+a usable phrase ladder, its last authored level is the full-difficulty stream;
+the arrangement-root arrays are only the Player's fallback when no usable
+ladder exists.
+
+For packages inside FeedBack's configured song library, **Player Review** opens
+the normal Player paused at the exact issue. **Jump to issue** returns there at
+any time, while **Play preview** plays from two seconds before through two
+seconds after in chart time and then returns paused to the issue. A whole-song
+slider with an aligned issue marker and ±1/±0.1-second controls allow precise
+navigation without replacing the normal Player controls. Dragging or holding a
+control is coalesced locally: Library Doctor pauses once, performs one
+authoritative seek on release, and resumes only when it owned that pause. The
+timeline lives in its own overlay so the decision window stays compact. Both overlays
+can be dragged independently, moved with the keyboard, remember their
+positions, remain clamped to the visible screen, and provide **Reset layout**.
+The author keeps their normal visualization and camera settings, can play,
+pause, seek, or scrub the song, and uses the review overlay to move directly
+between issues. The exact current note or chord member receives a temporary
+pulsing highlight through the normal Highway note-state hook in the bundled 2D
+and 3D views. A string/fret/time description remains visible for renderers that
+do not support that hook. The 2D and 3D Highways (and compatible Highway
+renderers) also receive a temporary chart-transform preview when a choice is
+selected; the Feedpak is still unchanged. Full Tab View uses a separate GP5
+rendering path, so it reflects a choice after Apply reloads the song rather
+than during the temporary preview. The text-only evidence workflow remains
+available as a fallback.
+
+Player Review never weakens FeedBack's library boundary. Folder and package
+scans outside the configured song library still receive the complete scan and
+all automatic/standard repairs, but reviewed findings are reported as manual
+and show a clear explanation instead of an actionable reviewed-repair control.
+
+The workflow presents one bounded candidate at a time. It never preselects a
+choice. Before showing an option, Library Doctor applies it to a temporary
+copy, reruns the HO/PO inspection and targeted validator, and omits any no-op,
+any option that leaves or recreates the issue, and any option that introduces
+another finding. The complete selected group is simulated and validated again
+before Apply. Depending on those outcome checks, the author can explicitly
 store hammer-on, store pull-off, convert the current note to a tap, remove its
-HO/PO fields, leave it unchanged, or conditionally move the marker to one
-unambiguous next explicit note that has no HO, PO, or tap flag. Conflicting
+HO/PO fields, or conditionally move the marker to one unambiguous next explicit
+note that has no HO, PO, or tap flag. **Skip for now** is navigation rather
+than a repair: it writes nothing and leaves the issue unresolved. Conflicting
 same-time frets, ambiguous predecessors, malformed technique values, stale
 objects, JSONC, and ambiguous
 move targets remain visible but cannot be mutated. Only `ho`, `po`, and `tp`
@@ -274,6 +351,17 @@ pagination, decisions, blockers, mutable fields, mutation derivation, and exact
 postconditions. Its executable ownership fixture requires candidate, decision,
 blocker, preservation, tamper, validation, Undo, API, and frontend coverage
 before another reviewed repair can be added.
+
+**Accept & Next** records an outcome-checked choice in memory without writing
+the song. **Skip for now** keeps an issue out of the current pass until the
+author chooses **Review skipped issues**; skipped issues are never sent to
+Preview or Apply. The author may preview and apply any partial group without finishing the entire
+queue. One retained Undo checkpoint is allowed per song: reviewing and staging
+may continue after Apply, but another group cannot be applied until the current
+checkpoint is explicitly undone or finalized. Undo restores the exact original
+changed bytes; Finalize keeps the repaired song and removes only that recovery
+copy. The overlay keeps those controls visible and can return to Library Doctor
+at any time.
 
 **Fix all safe issues** recalculates each eligible repair against the result of
 the previous step, using a fixed dependency order. The plugin then builds and
@@ -510,8 +598,11 @@ being played. Audio samples are decoded only on demand while proposing a preview
 repair, never as part of a library scan.
 
 The report cache is local to FeedBack's config directory at
-`library_doctor/library_doctor.db`. It stores package-relative paths and scan
-results. A targeted scan changes the visible dashboard scope without discarding
+`library_doctor/library_doctor.db`. It stores package-relative paths, scan
+results, and the private filesystem root needed to keep later repairs bound to
+the exact selected scope. That root is never included in status responses,
+exports, logs, diagnostics, or support bundles. A targeted scan changes the
+visible dashboard scope without discarding
 cached reports for the rest of the library. Library Doctor does not contribute
 the database or song identities to FeedBack support bundles. Its diagnostic
 callable contributes only bounded aggregate state and recovery counts; the
@@ -572,8 +663,8 @@ normal in-game workflow focused on package outcomes.
   Undo, and Finalize share the same exclusive mutation reservation.
 - `screen.html`, the thin native-module `screen.js` entry, `src/`, and
   `assets/library-doctor.css` provide the in-game interface. The plugin needs
-  FeedBack's module-capable `0.3.0-alpha.1` nightly (commit `950e348` or newer),
-  not the older tag with the same version text. `host-contract.json` and
+  FeedBack's capability-capable `0.3.0-alpha.1` nightly (commit `05be9eb` or newer),
+  not the older builds with the same version text. `host-contract.json` and
   `tools/verify_host_contract.py` make that capability floor executable.
 
 The vendored schemas in `schemas/` come from the authoritative
@@ -628,7 +719,7 @@ adversarial-corpus limits are defined in
 cache in ignored repository-local `.test-artifacts/` and `.test-cache/`
 directories, so a clean checkout does not depend on the system temp directory.
 The versioned release-candidate ledger and remaining human procedures are in
-`release-signoff.json` and `docs/release-signoff-0.44.0.md`.
+`release-signoff.json` and `docs/release-signoff-0.45.0.md`.
 
 `library_doctor` is the plugin ID and API namespace from version 0.15 onward.
 Upgrading from an earlier release moves the previous local cache and recovery

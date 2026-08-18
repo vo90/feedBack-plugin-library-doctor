@@ -651,6 +651,113 @@ def test_results_support_problem_and_coverage_filters(scanner_module, tmp_path):
     assert instance.results(query="_")["total"] == 0
 
 
+def test_review_difficulty_filter_reuses_cached_scan_results(scanner_module, tmp_path):
+    calls = []
+    code = "review.hopo-direction-mismatch"
+
+    def validate(_path, package):
+        calls.append(package)
+        full_count = 1 if package.startswith("mixed") else 0
+        lower_count = 0 if package.startswith("flat-copy") else 2
+        report = _report(package, status="review")
+        report["findings"] = [{
+            "severity": "info",
+            "code": code,
+            "message": f"{full_count + lower_count} HO/PO markers need review.",
+            "category": "authoring_review",
+            "affected_count": full_count + lower_count,
+        }]
+        if package.startswith("safe-plus-lower"):
+            report["findings"].append({
+                "severity": "warning",
+                "code": "chart.negative-fret",
+                "message": "One deterministic safe repair is available.",
+                "category": "chart",
+                "affected_count": 1,
+            })
+            report["counts"] = {"error": 0, "warning": 1, "info": 1}
+            report["status"] = "warning"
+        report["features"]["review_difficulty_counts"] = {
+            code: {"full": full_count, "lower": lower_count},
+        }
+        return report
+
+    instance, library = _make_scanner(scanner_module, tmp_path, validate)
+    (library / "lower-only.feedpak").write_bytes(b"lower")
+    (library / "mixed.feedpak").write_bytes(b"mixed")
+    (library / "flat-copy.feedpak").write_bytes(b"flat")
+    (library / "safe-plus-lower.feedpak").write_bytes(b"safe")
+    _run(instance)
+
+    assert instance.results(
+        result_filter="review", review_difficulty_scope="all_authored"
+    )["total"] == 3
+    assert instance.results(
+        result_filter="review", review_difficulty_scope="full_only"
+    )["total"] == 1
+    assert instance.results(
+        result_filter="healthy", review_difficulty_scope="full_only"
+    )["total"] == 2
+    assert instance.results(
+        result_filter="warnings", review_difficulty_scope="full_only"
+    )["total"] == 1
+
+    filtered = instance.results(
+        result_filter="all", review_difficulty_scope="full_only", limit=10
+    )
+    by_package = {item["package"]: item for item in filtered["items"]}
+    assert by_package["lower-only.feedpak"]["status"] == "healthy"
+    assert by_package["lower-only.feedpak"]["findings"] == []
+    assert by_package["lower-only.feedpak"]["features"][
+        "review_difficulty_filter"
+    ]["hidden_lower_count"] == 2
+    assert by_package["mixed.feedpak"]["status"] == "review"
+    assert by_package["mixed.feedpak"]["findings"][0]["affected_count"] == 1
+    assert by_package["mixed.feedpak"]["findings"][0]["message"].startswith("1 ")
+    assert by_package["flat-copy.feedpak"]["status"] == "healthy"
+    assert by_package["flat-copy.feedpak"]["findings"] == []
+    assert by_package["safe-plus-lower.feedpak"]["status"] == "warning"
+    assert [
+        finding["code"] for finding in by_package["safe-plus-lower.feedpak"]["findings"]
+    ] == ["chart.negative-fret"]
+
+    filtered_summary = instance.status("full_only")["summary"]
+    assert filtered_summary["total"] == 4
+    assert filtered_summary["healthy"] == 2
+    assert filtered_summary["errors"] == 0
+    assert filtered_summary["warnings"] == 1
+    assert filtered_summary["reviews"] == 1
+
+    all_rules = {item["code"]: item for item in instance.rules("all_authored")["items"]}
+    assert all_rules[code] == {
+        "code": code,
+        "severity": "info",
+        "category": "authoring_review",
+        "package_count": 3,
+        "finding_count": 7,
+    }
+    assert all_rules["chart.negative-fret"]["package_count"] == 1
+    full_rules = {item["code"]: item for item in instance.rules("full_only")["items"]}
+    assert full_rules[code] == {
+        "code": code,
+        "severity": "info",
+        "category": "authoring_review",
+        "package_count": 1,
+        "finding_count": 1,
+    }
+    assert full_rules["chart.negative-fret"]["package_count"] == 1
+    exported = json.loads(instance.export(
+        export_format="json",
+        result_filter="review",
+        review_difficulty_scope="full_only",
+    )[2])
+    assert [item["package"] for item in exported["packages"]] == [
+        "mixed.feedpak"
+    ]
+    assert exported["filters"]["review_difficulty_scope"] == "full_only"
+    assert len(calls) == 4  # changing the display scope never rescans a package
+
+
 def test_completed_scan_removes_reports_for_deleted_packages(scanner_module, tmp_path):
     instance, library = _make_scanner(
         scanner_module, tmp_path, lambda _path, package: _report(package)
@@ -815,15 +922,100 @@ def test_report_cache_waits_for_a_short_database_lock(scanner_module, tmp_path):
     locker.close()
 
 
-def test_selected_targets_must_stay_inside_the_library(scanner_module, tmp_path):
+def test_external_folder_scan_uses_a_private_repair_scope(scanner_module, tmp_path):
     instance, _library = _make_scanner(
         scanner_module, tmp_path, lambda _path, package: _report(package)
     )
     outside = tmp_path / "outside"
-    outside.mkdir()
+    nested = outside / "nested"
+    nested.mkdir(parents=True)
+    (outside / "one.feedpak").write_bytes(b"one")
+    (nested / "two.sloppak").write_bytes(b"two")
 
-    with pytest.raises(ValueError, match="inside the configured song library"):
-        instance.start(target_kind="folder", selected_path=str(outside))
+    status = _run(
+        instance,
+        target_kind="folder",
+        selected_path=str(outside),
+    )
+
+    assert status["target"] == {"kind": "folder", "label": "outside"}
+    assert {item["package"] for item in instance.results()["items"]} == {
+        "one.feedpak",
+        "nested/two.sloppak",
+    }
+    assert str(outside) not in json.dumps(status)
+    assert instance.repairs_available() is True
+    assert instance.current_repair_root() == outside.resolve()
+    assert instance.player_review_availability("one.feedpak") == {
+        "schema": "library_doctor.player_review_availability.v1",
+        "available": False,
+        "reason": "outside_configured_library",
+        "message": (
+            "Library Doctor found repairs that require manual review, but "
+            "Player Review is unavailable because this song is outside the "
+            "configured song library. Automatic and standard repairs remain "
+            "available, and no manual change was made."
+        ),
+    }
+    assert instance.repair_scope_snapshot(("test.warning",))["target"] == {
+        "kind": "folder",
+        "label": "outside",
+    }
+
+    reopened = scanner_module.LibraryScanner(
+        config_dir=tmp_path / "config",
+        get_dlc_dir=lambda: _library,
+        validate_feedpak=lambda _path, package: _report(package),
+        validator_version="test-v1",
+        log=logging.getLogger("library-doctor-tests"),
+    )
+    assert reopened.status()["target"] == status["target"]
+    assert reopened.repairs_available() is True
+    assert reopened.current_repair_root() == outside.resolve()
+
+
+def test_external_file_scan_works_without_a_configured_library(scanner_module, tmp_path):
+    outside = tmp_path / "outside.feedpak"
+    outside.write_bytes(b"package")
+    instance = scanner_module.LibraryScanner(
+        config_dir=tmp_path / "config",
+        get_dlc_dir=lambda: None,
+        validate_feedpak=lambda _path, package: _report(package),
+        validator_version="test-v1",
+        log=logging.getLogger("library-doctor-tests"),
+    )
+
+    status = _run(
+        instance,
+        target_kind="file",
+        selected_path=str(outside),
+    )
+
+    assert status["target"] == {"kind": "file", "label": "outside.feedpak"}
+    assert instance.results()["items"][0]["package"] == "outside.feedpak"
+    assert str(tmp_path) not in json.dumps(status)
+    assert instance.repairs_available() is True
+    assert instance.current_repair_root() == tmp_path.resolve()
+
+
+def test_in_library_package_gets_only_a_relative_normal_player_binding(
+    scanner_module, tmp_path,
+):
+    instance, library = _make_scanner(
+        scanner_module, tmp_path, lambda _path, package: _report(package)
+    )
+    package = library / "Artist" / "Song.feedpak"
+    package.mkdir(parents=True)
+    _run(instance)
+
+    assert instance.player_review_availability("Artist/Song.feedpak") == {
+        "schema": "library_doctor.player_review_availability.v1",
+        "available": True,
+        "reason": "",
+        "message": "Player Review can open this song in FeedBack's normal Player.",
+        "playback_filename": "Artist/Song.feedpak",
+        "package": "Artist/Song.feedpak",
+    }
 
 
 def test_single_file_target_requires_a_supported_package(scanner_module, tmp_path):
