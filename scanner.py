@@ -34,6 +34,9 @@ MAX_SOURCE_CHANGE_RETRIES = 2
 WINDOWS_PROCESS_POOL_LIMIT = 61
 STANDARD_WORKER_MEMORY_BYTES = 384 * 1024 * 1024
 DEEP_AUDIO_WORKER_MEMORY_BYTES = 768 * 1024 * 1024
+STANDARD_PACKAGE_TIMEOUT_SECONDS = 5 * 60
+DEEP_AUDIO_PACKAGE_TIMEOUT_SECONDS = 15 * 60
+WORKER_SHUTDOWN_TIMEOUT_SECONDS = 5.0
 MIN_SYSTEM_MEMORY_RESERVE_BYTES = 1024 * 1024 * 1024
 MAX_SYSTEM_MEMORY_RESERVE_BYTES = 4 * 1024 * 1024 * 1024
 _BATCH_PREVIEW_RULE_PRIORITY = (
@@ -737,6 +740,7 @@ class LibraryScanner:
         log,
         rule_metadata=None,
         worker_pool_factory=None,
+        package_timeout_seconds: float | None = None,
     ) -> None:
         self._get_dlc_dir = get_dlc_dir
         self._validate_feedpak = validate_feedpak
@@ -750,6 +754,13 @@ class LibraryScanner:
         self._rule_metadata = rule_metadata if callable(rule_metadata) else None
         self._worker_pool_factory = (
             worker_pool_factory if callable(worker_pool_factory) else None
+        )
+        self._package_timeout_seconds = (
+            float(package_timeout_seconds)
+            if isinstance(package_timeout_seconds, (int, float))
+            and not isinstance(package_timeout_seconds, bool)
+            and package_timeout_seconds > 0
+            else None
         )
         self._log = log
         self._cache = _ReportCache(Path(config_dir) / "library_doctor" / "library_doctor.db")
@@ -1918,6 +1929,43 @@ class LibraryScanner:
             "findings": [finding],
         }
 
+    def _timeout_report(
+        self,
+        package: str,
+        *,
+        deep_audio: bool,
+        timeout_seconds: float,
+    ) -> dict:
+        report = self._failure_report(
+            package,
+            TimeoutError("package validation deadline exceeded"),
+            deep_audio=deep_audio,
+        )
+        finding = report["findings"][0]
+        finding["code"] = "package.validation-timeout"
+        finding["message"] = (
+            "Validation exceeded Library Doctor's bounded package deadline and "
+            "the isolated worker was stopped. The package was not changed."
+        )
+        finding["evidence"] = {
+            "timeout_seconds": round(max(0.0, timeout_seconds), 3),
+        }
+        if self._rule_metadata is not None:
+            finding["rule"] = self._rule_metadata(
+                finding["code"], finding["severity"], finding["category"]
+            )
+        return report
+
+    def _close_worker_pool(self, pool, *, force: bool) -> None:
+        """Use the bounded pool API while retaining test/host compatibility."""
+        try:
+            pool.shutdown(
+                force=force,
+                timeout_seconds=WORKER_SHUTDOWN_TIMEOUT_SECONDS,
+            )
+        except TypeError:
+            pool.shutdown()
+
     def _run(
         self,
         *,
@@ -1940,6 +1988,8 @@ class LibraryScanner:
             "source_recheck_seconds": 0.0,
             "source_change_retries": 0,
             "parallel_fallbacks": 0,
+            "worker_timeouts": 0,
+            "worker_restarts": 0,
             "cache_write_seconds": 0.0,
             "scope_update_seconds": 0.0,
         }
@@ -2173,140 +2223,202 @@ class LibraryScanner:
                         queue.append(item)
 
             selected_workers = int(worker_policy["selected_workers"])
-            if selected_workers <= 1 or not pending:
+            if not pending:
+                pass
+            elif self._worker_pool_factory is None:
                 validate_sequential(pending)
             else:
                 parallel_remaining = deque(pending)
-                pool = None
-                futures: dict = {}
                 fallback_items: list[dict] = []
                 parallel_started = time.perf_counter()
-                try:
-                    pool = self._worker_pool_factory(
-                        selected_workers, self._validator_version
-                    )
-                    with self._lock:
-                        # Publish the pool and copy the current playback state
-                        # atomically.  ``set_playback_active`` takes these locks
-                        # in the same order, so it cannot miss a newly-created
-                        # pool or immediately overwrite this initial signal.
-                        with self._playback_condition:
-                            self._worker_pool = pool
-                            pool.set_paused(self._playback_active)
-
-                    def fill_workers() -> None:
-                        capacity = max(1, selected_workers * 2)
-                        while (
-                            parallel_remaining
-                            and len(futures) < capacity
-                            and not self._cancel.is_set()
-                        ):
-                            item = parallel_remaining.popleft()
-                            future = pool.submit(
-                                item["path"], item["package"], deep_audio
-                            )
-                            futures[future] = (item, time.perf_counter())
-
-                    fill_workers()
-                    while futures and not self._cancel.is_set():
-                        finished, _ = concurrent.futures.wait(
-                            tuple(futures),
-                            timeout=0.25,
-                            return_when=concurrent.futures.FIRST_COMPLETED,
+                package_timeout = self._package_timeout_seconds or (
+                    DEEP_AUDIO_PACKAGE_TIMEOUT_SECONDS
+                    if deep_audio else STANDARD_PACKAGE_TIMEOUT_SECONDS
+                )
+                while (
+                    parallel_remaining
+                    and not fallback_items
+                    and not self._cancel.is_set()
+                ):
+                    pool = None
+                    futures: dict = {}
+                    restart_after_timeout = False
+                    force_close = False
+                    try:
+                        pool = self._worker_pool_factory(
+                            selected_workers, self._validator_version
                         )
-                        if not finished:
-                            continue
-                        for future in finished:
-                            item, submitted_at = futures.pop(future)
-                            try:
-                                result = future.result()
-                            except Exception as exc:
-                                fallback_items = [
+                        with self._lock:
+                            # Publish the pool and copy the current playback state
+                            # atomically. ``set_playback_active`` takes these locks
+                            # in the same order and cannot miss a replacement pool.
+                            with self._playback_condition:
+                                self._worker_pool = pool
+                                pool.set_paused(self._playback_active)
+
+                        def fill_workers() -> None:
+                            # Do not queue behind active work: each submitted
+                            # deadline is then a real package execution deadline.
+                            capacity = max(1, selected_workers)
+                            while (
+                                parallel_remaining
+                                and len(futures) < capacity
+                                and not self._cancel.is_set()
+                            ):
+                                item = parallel_remaining.popleft()
+                                future = pool.submit(
+                                    item["path"], item["package"], deep_audio
+                                )
+                                futures[future] = (
                                     item,
-                                    *(value[0] for value in futures.values()),
-                                    *parallel_remaining,
+                                    self._active_elapsed(),
+                                    time.perf_counter(),
+                                )
+
+                        fill_workers()
+                        while futures and not self._cancel.is_set():
+                            finished, _ = concurrent.futures.wait(
+                                tuple(futures),
+                                timeout=min(0.25, package_timeout),
+                                return_when=concurrent.futures.FIRST_COMPLETED,
+                            )
+                            if not finished:
+                                active_now = self._active_elapsed()
+                                timed_out = [
+                                    future
+                                    for future, value in futures.items()
+                                    if active_now - value[1] >= package_timeout
                                 ]
-                                raise RuntimeError(
-                                    "The validation process pool stopped unexpectedly."
-                                ) from exc
-                            worker_elapsed = max(
-                                0.0, float(result.get("elapsed_seconds") or 0.0)
-                            )
-                            performance["worker_validation_seconds"] += worker_elapsed
-                            performance["worker_queue_seconds"] += max(
-                                0.0,
-                                time.perf_counter() - submitted_at - worker_elapsed,
-                            )
-                            outcome = result.get("outcome")
-                            if outcome == "cancelled":
-                                if not self._cancel.is_set():
+                                if not timed_out:
+                                    continue
+                                force_close = True
+                                performance["worker_timeouts"] += len(timed_out)
+                                for future in timed_out:
+                                    item, _active_started, _submitted_at = futures.pop(
+                                        future
+                                    )
+                                    self._log.warning(
+                                        "Library Doctor stopped validation for %s after %.3f seconds.",
+                                        item["package"],
+                                        package_timeout,
+                                    )
+                                    report = self._timeout_report(
+                                        item["package"],
+                                        deep_audio=deep_audio,
+                                        timeout_seconds=package_timeout,
+                                    )
+                                    if not accept_report(item, report):
+                                        parallel_remaining.append(item)
+                                unfinished = [
+                                    value[0] for value in futures.values()
+                                ]
+                                futures.clear()
+                                parallel_remaining.extendleft(reversed(unfinished))
+                                restart_after_timeout = bool(parallel_remaining)
+                                if restart_after_timeout:
+                                    performance["worker_restarts"] += 1
+                                break
+
+                            for future in finished:
+                                item, _active_started, submitted_at = futures.pop(
+                                    future
+                                )
+                                try:
+                                    result = future.result()
+                                except Exception as exc:
                                     fallback_items = [
                                         item,
                                         *(value[0] for value in futures.values()),
                                         *parallel_remaining,
                                     ]
                                     raise RuntimeError(
-                                        "A validation worker stopped before cancellation."
+                                        "The validation process pool stopped unexpectedly."
+                                    ) from exc
+                                worker_elapsed = max(
+                                    0.0, float(result.get("elapsed_seconds") or 0.0)
+                                )
+                                performance["worker_validation_seconds"] += worker_elapsed
+                                performance["worker_queue_seconds"] += max(
+                                    0.0,
+                                    time.perf_counter() - submitted_at - worker_elapsed,
+                                )
+                                outcome = result.get("outcome")
+                                if outcome == "cancelled":
+                                    if not self._cancel.is_set():
+                                        fallback_items = [
+                                            item,
+                                            *(value[0] for value in futures.values()),
+                                            *parallel_remaining,
+                                        ]
+                                        raise RuntimeError(
+                                            "A validation worker stopped before cancellation."
+                                        )
+                                    break
+                                if outcome == "complete" and isinstance(
+                                    result.get("report"), dict
+                                ):
+                                    report = result["report"]
+                                else:
+                                    error_type = str(
+                                        result.get("error_type") or "WorkerError"
                                     )
-                                break
-                            if outcome == "complete" and isinstance(
-                                result.get("report"), dict
-                            ):
-                                report = result["report"]
-                            else:
-                                error_type = str(result.get("error_type") or "WorkerError")
-                                detail = str(result.get("error") or "Unknown worker error")
-                                self._log.warning(
-                                    "Library Doctor validation failed for %s in %s: %s",
-                                    item["package"],
-                                    error_type,
-                                    detail,
-                                )
-                                report = self._failure_report(
-                                    item["package"],
-                                    RuntimeError(f"{error_type}: {detail}"),
-                                    deep_audio=deep_audio,
-                                )
-                            if not accept_report(item, report):
-                                parallel_remaining.append(item)
-                        fill_workers()
-                except Exception as exc:
-                    if not self._cancel.is_set():
-                        performance["parallel_fallbacks"] += 1
-                        self._log.warning(
-                            "Library Doctor parallel validation is unavailable; "
-                            "continuing safely with one worker: %s",
-                            exc,
-                        )
-                        if not fallback_items:
-                            fallback_items = [
-                                *(value[0] for value in futures.values()),
-                                *parallel_remaining,
-                            ]
-                finally:
-                    performance["parallel_validation_wall_seconds"] += max(
-                        0.0, time.perf_counter() - parallel_started
-                    )
-                    if pool is not None:
-                        if self._cancel.is_set() or fallback_items:
+                                    detail = str(
+                                        result.get("error") or "Unknown worker error"
+                                    )
+                                    self._log.warning(
+                                        "Library Doctor validation failed for %s in %s: %s",
+                                        item["package"],
+                                        error_type,
+                                        detail,
+                                    )
+                                    report = self._failure_report(
+                                        item["package"],
+                                        RuntimeError(f"{error_type}: {detail}"),
+                                        deep_audio=deep_audio,
+                                    )
+                                if not accept_report(item, report):
+                                    parallel_remaining.append(item)
+                            fill_workers()
+                    except Exception as exc:
+                        force_close = True
+                        if not self._cancel.is_set():
+                            performance["parallel_fallbacks"] += 1
+                            self._log.warning(
+                                "Library Doctor parallel validation is unavailable; "
+                                "continuing safely with one worker: %s",
+                                exc,
+                            )
+                            if not fallback_items:
+                                fallback_items = [
+                                    *(value[0] for value in futures.values()),
+                                    *parallel_remaining,
+                                ]
+                    finally:
+                        if pool is not None:
+                            if self._cancel.is_set() or force_close:
+                                try:
+                                    pool.cancel()
+                                except Exception as exc:
+                                    self._log.warning(
+                                        "Library Doctor could not stop its validation workers: %s",
+                                        exc,
+                                    )
+                            with self._lock:
+                                if self._worker_pool is pool:
+                                    self._worker_pool = None
                             try:
-                                pool.cancel()
+                                self._close_worker_pool(pool, force=force_close)
                             except Exception as exc:
-                                self._log.warning(
-                                    "Library Doctor could not stop its validation workers: %s",
-                                    exc,
-                                )
-                        with self._lock:
-                            if self._worker_pool is pool:
-                                self._worker_pool = None
-                        try:
-                            pool.shutdown()
-                        except Exception as exc:
-                            if not fallback_items and not self._cancel.is_set():
-                                self._log.warning(
-                                    "Library Doctor validation workers did not close cleanly: %s",
-                                    exc,
-                                )
+                                if not fallback_items and not self._cancel.is_set():
+                                    self._log.warning(
+                                        "Library Doctor validation workers did not close cleanly: %s",
+                                        exc,
+                                    )
+                    if restart_after_timeout:
+                        continue
+                performance["parallel_validation_wall_seconds"] += max(
+                    0.0, time.perf_counter() - parallel_started
+                )
                 if fallback_items and not self._cancel.is_set():
                     # A broken pool can leave the same item in more than one
                     # bookkeeping collection.  Revalidate each unfinished

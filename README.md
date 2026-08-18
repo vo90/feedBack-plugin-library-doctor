@@ -19,6 +19,10 @@ Small and fully cached scans stay single-worker. An advanced custom maximum is
 available, but remains a ceiling rather than forcing unsafe parallelism. Both
 scan modes automatically pause all workers while a song session is open and
 resume after the player is closed, so gameplay always has priority.
+Every uncached package is validated in an isolated worker with a bounded
+active-time deadline. A worker that stops responding is terminated and
+replaced; Library Doctor records a `package.validation-timeout` finding for the
+affected package and continues the scan without changing the package.
 
 ## Install
 
@@ -74,7 +78,12 @@ directory), then restart FeedBack. Do not copy its files into FeedBack core.
    **Fix all safe issues** previews and applies them as one validated package
    transaction with one recovery backup and one Undo. The individual repair
    controls remain available. Findings without a deterministic repair remain
-   report-only. Preview recommendations instead offer **Review preview manually**
+   report-only. Directory-package writes also keep a durable private transaction
+   journal. If FeedBack or the computer stops between member writes, the next
+   Library Doctor startup verifies the journal and recovery backup, then either
+   accepts the fully committed package or restores the exact original members.
+   Unknown external edits are never overwritten and are surfaced for manual
+   recovery. Preview recommendations instead offer **Review preview manually**
    and **Create automatically and finish**. Both generate from the full song mix
    using the same selection standard; manual review lets you listen and choose
    another starting point. A validated preview repair removes its temporary

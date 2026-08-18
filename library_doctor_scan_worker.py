@@ -133,10 +133,43 @@ class ValidationProcessPool:
         self._cancel_event.set()
         self._pause_event.clear()
 
-    def shutdown(self) -> None:
+    def shutdown(
+        self,
+        *,
+        force: bool = False,
+        timeout_seconds: float = 5.0,
+    ) -> None:
+        """Stop workers within a bounded interval, terminating stragglers."""
         self._pause_event.clear()
         self._cancel_event.set()
-        self._executor.shutdown(wait=True, cancel_futures=True)
+        processes = list((getattr(self._executor, "_processes", None) or {}).values())
+        self._executor.shutdown(wait=False, cancel_futures=True)
+        deadline = time.monotonic() + max(0.0, float(timeout_seconds))
+
+        if not force:
+            for process in processes:
+                remaining = max(0.0, deadline - time.monotonic())
+                process.join(remaining)
+
+        alive = [process for process in processes if process.is_alive()]
+        for process in alive:
+            process.terminate()
+        terminate_deadline = time.monotonic() + 1.0
+        for process in alive:
+            process.join(max(0.0, terminate_deadline - time.monotonic()))
+
+        alive = [process for process in alive if process.is_alive()]
+        for process in alive:
+            kill = getattr(process, "kill", None)
+            if callable(kill):
+                kill()
+            else:  # pragma: no cover - current supported Python exposes kill.
+                process.terminate()
+        for process in alive:
+            process.join(0.25)
+
+    def terminate(self, *, timeout_seconds: float = 1.0) -> None:
+        self.shutdown(force=True, timeout_seconds=timeout_seconds)
 
 
 # ``load_sibling`` executes this file as ``plugin_<id>.<name>``.  Pickle uses a
