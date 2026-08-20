@@ -71,11 +71,19 @@ test('the complete source graph is resolvable, acyclic, and points away from app
 
 test('the composition root stays small and every source module respects the size boundary', async () => {
   const modules = await sourceModules();
+  const focusedBoundaries = new Map([
+    ['batch-controller.js', 700],
+    ['batch-results-view.js', 500],
+  ]);
   for (const filename of modules) {
     const source = await fs.readFile(path.join(ROOT, 'src', filename), 'utf8');
     const lines = source.split(/\r?\n/).length;
     assert.ok(lines <= 1500, `${filename} has ${lines} lines (maximum 1500)`);
     if (filename === 'app.js') assert.ok(lines <= 500, `app.js has ${lines} lines (maximum 500)`);
+    if (focusedBoundaries.has(filename)) {
+      const maximum = focusedBoundaries.get(filename);
+      assert.ok(lines <= maximum, `${filename} has ${lines} lines (maximum ${maximum})`);
+    }
   }
 });
 

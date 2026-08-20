@@ -99,6 +99,7 @@ export function createScanController({
     el.scan.disabled = running || (state.targetKind !== 'library' && !path);
     el.scanAll.disabled = el.scan.disabled;
     el.deepAudio.disabled = running;
+    setHidden(el.playerReviewScopeNote, state.targetKind === 'library');
     updateWorkerControls();
     actionRegistry.updateDashboardShell(state.status || {});
   }

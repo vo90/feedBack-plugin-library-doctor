@@ -223,7 +223,9 @@ export function bootLibraryDoctor(hostWindow = window) {
       moreFilters: root.querySelector('#lh-more-filters'),
       scanDetails: root.querySelector('#lh-scan-details'),
       activitySection: root.querySelector('#lh-activity-section'),
+      activitySummaryLabel: root.querySelector('#lh-activity-summary-label'),
       activityStatus: root.querySelector('#lh-activity-status'),
+      recoveryList: root.querySelector('#lh-recovery-list'),
       songToolsWorkspace: root.querySelector('#lh-song-tools-workspace'),
       songToolSearch: root.querySelector('#lh-song-tool-search'),
       songToolCount: root.querySelector('#lh-song-tool-count'),
@@ -241,8 +243,8 @@ export function bootLibraryDoctor(hostWindow = window) {
       workerLimit: root.querySelector('#lh-worker-limit'),
       workerLimitWrap: root.querySelector('#lh-worker-limit-wrap'),
       workerSummary: root.querySelector('#lh-worker-summary'),
-      reviewDifficultyDefaultScope: root.querySelector('#lh-review-difficulty-scope'),
       reviewDifficultyScope: root.querySelector('#lh-review-list-difficulty-scope'),
+      playerReviewScopeNote: root.querySelector('#lh-player-review-scope-note'),
       targetPath: root.querySelector('#lh-target-path'),
       pickerNote: root.querySelector('#lh-picker-note'),
       chooseTarget: root.querySelector('#lh-choose-target'),
@@ -294,7 +296,6 @@ export function bootLibraryDoctor(hostWindow = window) {
     if (el.root.dataset.libraryDoctorBound === '1') return;
     el.root.dataset.libraryDoctorBound = '1';
     scanController.loadWorkerSettings();
-    el.reviewDifficultyDefaultScope.value = state.reviewDifficultyDefaultScope;
     el.reviewDifficultyScope.value = getReviewDifficultyScope();
     el.workspaceTabs.addEventListener('click', (event) => {
       const button = event.target.closest('button[data-workspace]');
@@ -338,10 +339,8 @@ export function bootLibraryDoctor(hostWindow = window) {
       scanController.saveWorkerSettings();
       scanController.updateWorkerControls();
     });
-    el.reviewDifficultyDefaultScope.addEventListener('change', () => {
-      setReviewDifficultyDefaultScope(el.reviewDifficultyDefaultScope.value);
-    });
     el.reviewDifficultyScope.addEventListener('change', () => {
+      setReviewDifficultyDefaultScope(el.reviewDifficultyScope.value);
       setReviewDifficultyScope(el.reviewDifficultyScope.value);
     });
     el.scan.addEventListener('click', () => scanController.startScan(false));
@@ -353,9 +352,11 @@ export function bootLibraryDoctor(hostWindow = window) {
     });
     el.batchReview.addEventListener('click', batchController.startBatchPreview);
     el.batchCancel.addEventListener('click', batchController.cancelBatchOperation);
-    el.resultsSection.addEventListener('click', (event) => {
+    el.healthWorkspace.addEventListener('click', (event) => {
       const button = event.target.closest('button[data-filter]');
-      if (button) resultsController.setFilter(button.dataset.filter);
+      if (!button) return;
+      resultsController.setFilter(button.dataset.filter);
+      if (button.closest('#lh-overview')) el.resultsSection.scrollIntoView({ behavior: 'smooth' });
     });
     el.ruleSummary.addEventListener('click', (event) => {
       const button = event.target.closest('button[data-rule]');
@@ -380,7 +381,6 @@ export function bootLibraryDoctor(hostWindow = window) {
       resultsController.loadResults();
     });
   }
-
   async function enter() {
     if (!elements() || state.active) return;
     const visit = activation.activate();
@@ -400,7 +400,6 @@ export function bootLibraryDoctor(hostWindow = window) {
       if (activation.isCurrent(visit)) await resultsController.loadResults();
     }
   }
-
   function leave() {
     activation.deactivate();
     clearTimeout(state.pollTimer);

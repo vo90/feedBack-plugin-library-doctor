@@ -28,9 +28,10 @@ jobs:
       - run: python -m pip install -r requirements-test.txt
       - run: python -m pip check
       - run: npm ci
-      - run: python -m ruff check validator.py scanner.py library_doctor_scan_worker.py repair.py repair_eligibility.py reviewed_repair.py preview_repair.py batch_repair.py migration.py privacy.py diagnostics.py api_contracts.py mutation_receipts.py routes.py tools tests
+      - run: python -m ruff check validator.py scanner.py library_doctor_report_cache.py library_doctor_scan_policy.py library_doctor_scan_worker.py repair.py repair_actions.py repair_catalog.py repair_eligibility.py repair_recovery.py repair_transaction.py repair_workspace.py repair_yaml.py reviewed_repair.py preview_repair.py batch_repair.py migration.py privacy.py diagnostics.py api_contracts.py mutation_receipts.py routes.py route_support.py tools tests
       - run: python -m pytest --cov --cov-report=term
-      - run: python -m py_compile validator.py scanner.py library_doctor_scan_worker.py repair.py repair_eligibility.py reviewed_repair.py preview_repair.py batch_repair.py migration.py privacy.py diagnostics.py api_contracts.py mutation_receipts.py routes.py tools/verify_host_contract.py
+      - run: python tools/build_release.py --output .test-release/library-doctor.zip
+      - run: python -m py_compile validator.py scanner.py library_doctor_report_cache.py library_doctor_scan_policy.py library_doctor_scan_worker.py repair.py repair_actions.py repair_catalog.py repair_eligibility.py repair_recovery.py repair_transaction.py repair_workspace.py repair_yaml.py reviewed_repair.py preview_repair.py batch_repair.py migration.py privacy.py diagnostics.py api_contracts.py mutation_receipts.py routes.py route_support.py tools/verify_host_contract.py
       - run: npm run check:frontend
       - run: npm run lint:frontend
       - run: npm run test:frontend
@@ -60,8 +61,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: minimum-module-capable
-            ref: 950e3483573e458cc2aa7bc255d9590808947faa
+          - name: minimum-compatible
+            ref: 05be9ebdbe5f77310178772089655dab8f415246
           - name: latest-main
             ref: main
     name: Host contract (${{ matrix.name }})
@@ -77,6 +78,89 @@ jobs:
         with:
           python-version: "3.12"
       - run: python tools/verify_host_contract.py feedback-host
+
+  latest-host-browser:
+    name: Latest host Playwright
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: got-feedBack/feedBack
+          ref: main
+          path: feedback-host
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r feedback-host/requirements.txt -r requirements.txt
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - name: Build and install the exact release ZIP
+        shell: bash
+        run: |
+          python tools/build_release.py --output "${{ runner.temp }}/library-doctor.zip"
+          mkdir -p "${{ runner.temp }}/feedback-plugins"
+          unzip -q "${{ runner.temp }}/library-doctor.zip" -d "${{ runner.temp }}/feedback-plugins"
+      - name: Start disposable latest host
+        shell: bash
+        env:
+          HOST: 127.0.0.1
+          PORT: "18000"
+          CONFIG_DIR: ${{ runner.temp }}/feedback-config
+          DLC_DIR: ${{ runner.temp }}/feedback-dlc
+          FEEDBACK_PLUGINS_DIR: ${{ runner.temp }}/feedback-plugins
+          FEEDBACK_SYNC_STARTUP: "1"
+          PYTHONPATH: ${{ github.workspace }}/feedback-host/lib
+        run: |
+          mkdir -p "$CONFIG_DIR" "$DLC_DIR"
+          cd feedback-host
+          nohup python main.py > "${{ runner.temp }}/feedback-host.log" 2>&1 &
+          host_pid="$!"
+          echo "$host_pid" > "${{ runner.temp }}/feedback-host.pid"
+          for attempt in {1..90}; do
+            if curl --silent --fail "http://127.0.0.1:18000/api/plugins" | grep -q 'library_doctor'; then
+              exit 0
+            fi
+            if ! kill -0 "$host_pid" 2>/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          echo "Latest host did not load Library Doctor."
+          sed -n '1,240p' "${{ runner.temp }}/feedback-host.log"
+          exit 1
+      - run: npm run test:browser
+        env:
+          FEEDBACK_NIGHTLY_URL: http://127.0.0.1:18000
+      - name: Stop disposable host
+        if: always()
+        shell: bash
+        run: |
+          pid_file="${{ runner.temp }}/feedback-host.pid"
+          if [[ -f "$pid_file" ]]; then
+            host_pid="$(<"$pid_file")"
+            if kill -0 "$host_pid" 2>/dev/null; then
+              kill "$host_pid"
+            fi
+          fi
+      - name: Upload browser diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: latest-host-playwright-diagnostics
+          path: |
+            ${{ runner.temp }}/feedback-host.log
+            test-results
+          if-no-files-found: ignore
 
   dependency-audit:
     runs-on: ubuntu-latest

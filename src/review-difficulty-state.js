@@ -20,10 +20,6 @@ export function createReviewDifficultyState({
   function setReviewDifficultyDefaultScope(value) {
     state.reviewDifficultyDefaultScope = normalized(value);
     try { localStorage.setItem(storageKey, state.reviewDifficultyDefaultScope); } catch (_) { /* best effort */ }
-    const control = document.getElementById('lh-review-difficulty-scope');
-    if (control && control.value !== state.reviewDifficultyDefaultScope) {
-      control.value = state.reviewDifficultyDefaultScope;
-    }
     return state.reviewDifficultyDefaultScope;
   }
 

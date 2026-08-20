@@ -2,112 +2,8 @@
 
 from pathlib import Path
 
-from fastapi import APIRouter, Body, Header, HTTPException, Query, Request
-from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, Response, StreamingResponse
-from fastapi.routing import APIRoute
-
-
-class _LibraryDoctorRoute(APIRoute):
-    """Keep FastAPI body/query validation inside the plugin error contract."""
-
-    def get_route_handler(self):
-        route_handler = super().get_route_handler()
-
-        async def uniform_route_handler(request: Request):
-            try:
-                return await route_handler(request)
-            except RequestValidationError as exc:
-                fields = sorted({
-                    str(item)
-                    for error in exc.errors()
-                    for item in error.get("loc", ())
-                    if item not in {"body", "query", "header"}
-                })
-                field_copy = f" Check: {', '.join(fields[:5])}." if fields else ""
-                return JSONResponse(
-                    status_code=422,
-                    content={
-                        "detail": {
-                            "code": "invalid_request",
-                            "message": f"The request did not match the Library Doctor contract.{field_copy}",
-                            "file_state": "unchanged",
-                            "retryable": False,
-                            "next_action": "correct_request",
-                        }
-                    },
-                )
-            except HTTPException:
-                raise
-            except Exception:
-                # Do not leak package paths, parser details, or database text.
-                # Mutation endpoints provide more precise state where known;
-                # this is the final contract boundary for read/startup faults.
-                return JSONResponse(
-                    status_code=500,
-                    content={
-                        "detail": {
-                            "code": "internal_plugin_error",
-                            "message": "Library Doctor could not complete the request safely.",
-                            "file_state": "unchanged",
-                            "retryable": True,
-                            "next_action": "retry_later",
-                        }
-                    },
-                )
-
-        return uniform_route_handler
-
-
-def _audio_response(content: bytes, range_header: str | None = None) -> Response:
-    """Return in-memory Ogg audio with the single byte ranges browsers require."""
-    total = len(content)
-    headers = {
-        "Accept-Ranges": "bytes",
-        "Cache-Control": "no-store",
-    }
-    if not range_header:
-        return Response(content=content, media_type="audio/ogg", headers=headers)
-
-    def unsatisfied() -> Response:
-        return Response(
-            content=b"",
-            status_code=416,
-            media_type="audio/ogg",
-            headers={**headers, "Content-Range": f"bytes */{total}"},
-        )
-
-    if total == 0 or not range_header.startswith("bytes="):
-        return unsatisfied()
-    requested = range_header[6:].strip()
-    if not requested or "," in requested:
-        return unsatisfied()
-    first, separator, last = requested.partition("-")
-    if not separator or (not first and not last):
-        return unsatisfied()
-    try:
-        if first:
-            start = int(first)
-            end = int(last) if last else total - 1
-            if start < 0 or end < start or start >= total:
-                return unsatisfied()
-            end = min(end, total - 1)
-        else:
-            suffix_length = int(last)
-            if suffix_length <= 0:
-                return unsatisfied()
-            start = max(0, total - suffix_length)
-            end = total - 1
-    except ValueError:
-        return unsatisfied()
-
-    headers["Content-Range"] = f"bytes {start}-{end}/{total}"
-    return Response(
-        content=content[start : end + 1],
-        status_code=206,
-        media_type="audio/ogg",
-        headers=headers,
-    )
+from fastapi import APIRouter, Body, Header, HTTPException, Query
+from fastapi.responses import StreamingResponse
 
 
 def setup(app, context):
@@ -133,6 +29,7 @@ def setup(app, context):
     batch_module = load_sibling("batch_repair")
     contracts = load_sibling("api_contracts")
     receipt_module = load_sibling("mutation_receipts")
+    route_support = load_sibling("route_support")
     scanner = scanner_module.LibraryScanner(
         config_dir=Path(context["config_dir"]),
         get_dlc_dir=get_dlc_dir,
@@ -194,45 +91,14 @@ def setup(app, context):
     router = APIRouter(
         prefix="/api/plugins/library_doctor",
         tags=["library_doctor"],
-        route_class=_LibraryDoctorRoute,
+        route_class=route_support.LibraryDoctorRoute,
         responses=error_responses,
     )
-
-    def detail(
-        code: str,
-        message: str,
-        *,
-        file_state: str | None = None,
-        retryable: bool = False,
-        next_action: str | None = None,
-    ) -> dict:
-        return contracts.error_detail(
-            code,
-            message,
-            file_state=file_state,
-            retryable=retryable,
-            next_action=next_action,
-        )
-
-    def http_error(
-        status_code: int,
-        code: str,
-        message: str,
-        *,
-        file_state: str | None = None,
-        retryable: bool = False,
-        next_action: str | None = None,
-    ) -> HTTPException:
-        return HTTPException(
-            status_code=status_code,
-            detail=detail(
-                code,
-                message,
-                file_state=file_state,
-                retryable=retryable,
-                next_action=next_action,
-            ),
-        )
+    errors = route_support.RouteErrors(contracts.error_detail)
+    http_error = errors.http_error
+    repair_error = errors.repair_detail
+    receipt_error = errors.receipt_detail
+    _audio_response = route_support.audio_response
 
     @router.get("/status", response_model=contracts.StatusContract)
     def get_status(
@@ -241,7 +107,13 @@ def setup(app, context):
         try:
             status = scanner.status(review_difficulty_scope)
         except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
+            raise http_error(
+                400,
+                "invalid_review_difficulty_scope",
+                str(exc),
+                file_state="unchanged",
+                next_action="correct_request",
+            ) from exc
         status["batch"] = batch_manager.status()
         return status
 
@@ -299,7 +171,7 @@ def setup(app, context):
         offset: int = Query(default=0, ge=0),
     ):
         try:
-            return scanner.results(
+            payload = scanner.results(
                 result_filter=result_filter,
                 query=query,
                 rule_code=rule,
@@ -307,6 +179,25 @@ def setup(app, context):
                 limit=limit,
                 offset=offset,
             )
+            items = payload.get("items") if isinstance(payload, dict) else None
+            if isinstance(items, list):
+                recovery_states = repair_service.recovery_states(
+                    item.get("package")
+                    for item in items
+                    if isinstance(item, dict)
+                )
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    recovery = recovery_states.get(item.get("package"))
+                    if recovery is None:
+                        continue
+                    features = item.get("features")
+                    if not isinstance(features, dict):
+                        features = {}
+                        item["features"] = features
+                    features["recovery"] = recovery
+            return payload
         except ValueError as exc:
             raise http_error(
                 400,
@@ -356,19 +247,6 @@ def setup(app, context):
     def get_repair_history(limit: int = Query(default=5, ge=1, le=20)):
         return repair_service.history(limit)
 
-    def batch_error(exc):
-        return detail(
-            exc.code,
-            str(exc),
-            file_state="unchanged",
-            retryable=exc.code in {"batch_busy", "scan_incomplete"},
-            next_action=(
-                "retry_later"
-                if exc.code == "batch_busy"
-                else "review_batch"
-            ),
-        )
-
     @router.get("/repair/batch/status")
     def get_batch_status():
         return batch_manager.status()
@@ -392,7 +270,10 @@ def setup(app, context):
             )
             return batch_manager.start_preview(snapshot)
         except batch_module.BatchRepairError as exc:
-            raise HTTPException(status_code=409, detail=batch_error(exc)) from exc
+            raise HTTPException(
+                status_code=409,
+                detail=errors.batch_detail(exc),
+            ) from exc
         except ValueError as exc:
             raise http_error(
                 409,
@@ -408,7 +289,10 @@ def setup(app, context):
         try:
             return batch_manager.start_apply(payload.batch_plan_id)
         except batch_module.BatchRepairError as exc:
-            raise HTTPException(status_code=409, detail=batch_error(exc)) from exc
+            raise HTTPException(
+                status_code=409,
+                detail=errors.batch_detail(exc),
+            ) from exc
 
     @router.post("/repair/batch/cancel", status_code=202)
     def cancel_batch_repairs():
@@ -422,21 +306,30 @@ def setup(app, context):
         try:
             return batch_manager.start_undo_preview()
         except batch_module.BatchRepairError as exc:
-            raise HTTPException(status_code=409, detail=batch_error(exc)) from exc
+            raise HTTPException(
+                status_code=409,
+                detail=errors.batch_detail(exc),
+            ) from exc
 
     @router.post("/repair/batch/undo/apply", status_code=202)
     def apply_batch_undo(payload: contracts.BatchUndoApplyRequestContract):
         try:
             return batch_manager.start_undo_apply(payload.undo_plan_id)
         except batch_module.BatchRepairError as exc:
-            raise HTTPException(status_code=409, detail=batch_error(exc)) from exc
+            raise HTTPException(
+                status_code=409,
+                detail=errors.batch_detail(exc),
+            ) from exc
 
     @router.post("/repair/batch/finalize/preview", status_code=202)
     def preview_batch_finalization():
         try:
             return batch_manager.start_finalize_preview()
         except batch_module.BatchRepairError as exc:
-            raise HTTPException(status_code=409, detail=batch_error(exc)) from exc
+            raise HTTPException(
+                status_code=409,
+                detail=errors.batch_detail(exc),
+            ) from exc
 
     @router.post("/repair/batch/finalize/apply", status_code=202)
     def apply_batch_finalization(
@@ -445,44 +338,10 @@ def setup(app, context):
         try:
             return batch_manager.start_finalize_apply(payload.finalize_plan_id)
         except batch_module.BatchRepairError as exc:
-            raise HTTPException(status_code=409, detail=batch_error(exc)) from exc
-
-    def repair_error(exc):
-        retryable_codes = {
-            "source_changed",
-            "package_changed",
-            "backup_cleanup_failed",
-            "package_unreadable",
-        }
-        review_codes = {
-            "invalid_plan",
-            "source_changed",
-            "nothing_to_repair",
-        }
-        return detail(
-            exc.code,
-            str(exc),
-            file_state=exc.file_state,
-            retryable=exc.code in retryable_codes,
-            next_action=(
-                "scan_again"
-                if exc.code in {"source_changed", "package_changed"}
-                else "review_repair"
-                if exc.code in review_codes
-                else "retry_later"
-                if exc.code in retryable_codes
-                else "inspect_package"
-            ),
-        )
-
-    def receipt_error(exc):
-        return detail(
-            exc.code,
-            str(exc),
-            file_state=exc.file_state,
-            retryable=exc.retryable,
-            next_action=exc.next_action,
-        )
+            raise HTTPException(
+                status_code=409,
+                detail=errors.batch_detail(exc),
+            ) from exc
 
     def verified_deep_audio_options(package: str) -> dict:
         """Build service arguments that remain guarded through commit."""
@@ -534,10 +393,10 @@ def setup(app, context):
         except repair_module.RepairPlanningError as exc:
             raise HTTPException(status_code=409, detail=repair_error(exc)) from exc
         except receipt_module.MutationReceiptError as exc:
-            status_code = 404 if exc.code == "receipt_not_found" else 409
-            if exc.code in {"idempotency_store_unavailable", "idempotency_store_full"}:
-                status_code = 503
-            raise HTTPException(status_code=status_code, detail=receipt_error(exc)) from exc
+            raise HTTPException(
+                status_code=errors.receipt_status_code(exc.code),
+                detail=receipt_error(exc),
+            ) from exc
         return {
             "request_id": request_id,
             "operation": operation,
@@ -594,10 +453,13 @@ def setup(app, context):
         try:
             return mutation_receipts.lookup(request_id)
         except receipt_module.MutationReceiptError as exc:
-            status_code = 404 if exc.code == "receipt_not_found" else 409
-            if exc.code == "idempotency_store_unavailable":
-                status_code = 503
-            raise HTTPException(status_code=status_code, detail=receipt_error(exc)) from exc
+            raise HTTPException(
+                status_code=errors.receipt_status_code(
+                    exc.code,
+                    store_full_is_unavailable=False,
+                ),
+                detail=receipt_error(exc),
+            ) from exc
 
     @router.post("/repair/preview")
     def preview_repair(payload: contracts.RepairPreviewRequestContract):

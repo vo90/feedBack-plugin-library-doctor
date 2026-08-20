@@ -962,6 +962,24 @@ class BatchRepairManager:
                 with self._lock:
                     self._state["current"] = package
                 package_blockers = []
+                recovery_reader = getattr(
+                    self._repair_service, "recovery_state", None
+                )
+                if callable(recovery_reader):
+                    try:
+                        recovery = recovery_reader(package)
+                    except self._repair_error_type as exc:
+                        recovery = {
+                            "required": True,
+                            "message": str(exc),
+                        }
+                    if recovery.get("required"):
+                        package_blockers.append({
+                            "code": "recovery_required",
+                            "message": recovery.get("message") or (
+                                "This song has an interrupted repair. Resolve its recovery before including it in a multi-song repair."
+                            ),
+                        })
                 expected_signature = candidate.get("scan_signature")
                 signature_checker = getattr(
                     self._scanner, "package_matches_signature", None

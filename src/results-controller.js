@@ -59,9 +59,9 @@ export function createResultsController({
     summary.appendChild(heading);
 
     const badges = make('div', 'lh-package-badges');
-    if (counts.error) badges.appendChild(badge(`${number(counts.error)} error${counts.error === 1 ? '' : 's'}`, 'error'));
-    if (counts.warning) badges.appendChild(badge(`${number(counts.warning)} warning${counts.warning === 1 ? '' : 's'}`, 'warning'));
-    if (counts.info) badges.appendChild(badge(`${number(counts.info)} review suggestion${counts.info === 1 ? '' : 's'}`, 'review'));
+    if (counts.error) badges.appendChild(badge(`Needs fixing · ${number(counts.error)}`, 'error'));
+    if (counts.warning) badges.appendChild(badge(`May affect FeedBack · ${number(counts.warning)}`, 'warning'));
+    if (counts.info) badges.appendChild(badge(`Optional improvements · ${number(counts.info)}`, 'review'));
     if (!counts.error && !counts.warning && !counts.info) badges.appendChild(badge('No issues found by current checks', 'good'));
     const features = report.features || {};
     if (!features.lyrics_declared) badges.appendChild(badge('No lyrics'));
@@ -78,7 +78,31 @@ export function createResultsController({
     details.appendChild(summary);
 
     const body = make('div', 'lh-package-body');
-    body.appendChild(make('p', 'lh-package-path', report.package || ''));
+    const technical = make('details', 'lh-package-technical');
+    technical.appendChild(make('summary', '', 'Technical details'));
+    technical.appendChild(make('p', 'lh-package-path', report.package || 'Package path unavailable'));
+    body.appendChild(technical);
+    const recovery = report.features?.recovery;
+    if (recovery?.required) {
+      const warning = make('section', 'lh-package-recovery-warning');
+      warning.setAttribute('role', 'alert');
+      warning.appendChild(make('strong', '', 'Recovery must be resolved first'));
+      warning.appendChild(make(
+        'p',
+        '',
+        recovery.message || 'This song is locked against further changes. Open Activity and recovery for the safe next step.',
+      ));
+      const openActivity = make('button', 'lh-button', 'Open Activity and recovery');
+      openActivity.type = 'button';
+      openActivity.addEventListener('click', () => {
+        if (!el.activitySection) return;
+        el.activitySection.open = true;
+        el.activitySection.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        el.activitySection.querySelector('summary')?.focus();
+      });
+      warning.appendChild(openActivity);
+      body.appendChild(warning);
+    }
     const hiddenLower = Number(
       report.features?.review_difficulty_filter?.hidden_lower_count || 0,
     );

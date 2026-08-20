@@ -72,6 +72,9 @@ def collect(ctx: dict) -> dict:
             "pending_transaction_count": 0,
             "transaction_directory_readable": True,
             "transaction_count_capped": False,
+            "candidate_workspace_count": 0,
+            "workspace_directory_readable": True,
+            "workspace_count_capped": False,
         },
         "batch": {
             "result_state": "missing",
@@ -92,6 +95,9 @@ def collect(ctx: dict) -> dict:
         transaction_count, transaction_readable, transaction_capped = _count_files(
             data_dir / "repair_transactions", ".json"
         )
+        workspace_count, workspace_readable, workspace_capped = _count_files(
+            data_dir / "repair_workspaces", ".json"
+        )
         result["recovery"] = {
             "backup_count": backup_count,
             "backup_directory_readable": backup_readable,
@@ -99,6 +105,9 @@ def collect(ctx: dict) -> dict:
             "pending_transaction_count": transaction_count,
             "transaction_directory_readable": transaction_readable,
             "transaction_count_capped": transaction_capped,
+            "candidate_workspace_count": workspace_count,
+            "workspace_directory_readable": workspace_readable,
+            "workspace_count_capped": workspace_capped,
         }
         _batch_result, batch_result_state = _bounded_json(data_dir / "batch_result.json")
         _batch_checkpoint, checkpoint_state = _bounded_json(

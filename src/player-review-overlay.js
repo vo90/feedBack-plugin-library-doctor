@@ -9,6 +9,7 @@ export function createPlayerReviewOverlay({
 }) {
   let overlay = null;
   let body = null;
+  let fileState = null;
   let status = null;
 
   function ensure() {
@@ -25,7 +26,7 @@ export function createPlayerReviewOverlay({
     title.appendChild(make('strong', '', 'Player Review'));
     layout.installHandle(title, 'review', overlay);
     const actions = make('div', 'lh-player-review-overlay-actions');
-    const reset = make('button', 'lh-button lh-player-review-reset-layout', 'Reset layout');
+    const reset = make('button', 'lh-button lh-player-review-reset-layout', 'Reset panel position');
     reset.type = 'button';
     reset.addEventListener('click', layout.reset);
     const returnButton = make('button', 'lh-button', 'Return to Library Doctor');
@@ -35,11 +36,17 @@ export function createPlayerReviewOverlay({
     actions.appendChild(returnButton);
     header.appendChild(title);
     header.appendChild(actions);
+    fileState = make(
+      'p',
+      'lh-player-review-file-state',
+      'Preview only — song files have not changed',
+    );
     status = make('p', 'lh-player-review-status');
     status.setAttribute('role', 'status');
     status.setAttribute('aria-live', 'polite');
     body = make('div', 'lh-player-review-body');
     overlay.appendChild(header);
+    overlay.appendChild(fileState);
     overlay.appendChild(status);
     overlay.appendChild(body);
     document.body.appendChild(overlay);
@@ -50,15 +57,15 @@ export function createPlayerReviewOverlay({
   function appendRecovery(container, session, onResolve) {
     if (!session?.pendingRecovery) return;
     const panel = make('section', 'lh-player-review-recovery');
-    panel.appendChild(make('strong', '', 'One repair checkpoint is waiting'));
+    panel.appendChild(make('strong', '', 'Applied changes are waiting for your decision'));
     panel.appendChild(make(
       'p',
       '',
-      'You may keep reviewing and accepting choices. Undo or finalize this checkpoint before applying another group.',
+      'You can keep reviewing. Before applying another group, either undo these changes or keep them and remove the Undo copy.',
     ));
     const controls = make('div', 'lh-player-review-buttons');
-    const undo = make('button', 'lh-button', 'Undo applied group');
-    const finalize = make('button', 'lh-button', 'Finalize applied group');
+    const undo = make('button', 'lh-button', 'Undo applied changes');
+    const finalize = make('button', 'lh-button', 'Keep changes (remove Undo)');
     undo.type = finalize.type = 'button';
     undo.disabled = finalize.disabled = session.busy;
     undo.addEventListener('click', () => onResolve('restore'));
@@ -75,6 +82,7 @@ export function createPlayerReviewOverlay({
       overlay?.remove();
       overlay = null;
       body = null;
+      fileState = null;
       status = null;
     },
     ensure,
@@ -89,6 +97,11 @@ export function createPlayerReviewOverlay({
     },
     prepare() {
       ensure().hidden = false;
+    },
+    setFileState(value, tone = 'preview') {
+      ensure();
+      text(fileState, value);
+      fileState.dataset.tone = tone;
     },
     setStatus(value, tone = '') {
       ensure();

@@ -35,6 +35,9 @@ test('first run presents one safe primary action without showing empty result ch
 
   assert.equal(app.document.querySelector('#lh-guidance-title').textContent, 'Check your library');
   assert.equal(app.document.querySelector('#lh-scan').textContent, 'Scan my library');
+  assert.equal(app.document.querySelector('#lh-scan-options').open, false);
+  assert.equal(app.document.querySelector('#lh-player-review-scope-note').hidden, true);
+  assert.equal(app.document.querySelector('#lh-review-difficulty-scope'), null);
   assert.equal(app.document.querySelector('#lh-results-section').hidden, true);
   assert.match(app.document.querySelector('#lh-status').textContent, /has not scanned/i);
 });
@@ -93,15 +96,19 @@ test('external scan results expose the same repair controls', async (t) => {
 
   assert.notEqual(app.document.querySelector('#lh-results .lh-repair-action'), null);
   assert.equal(app.document.querySelector('#lh-scan-warning').hidden, true);
-  assert.match(app.document.querySelector('#lh-batch-copy').textContent, /review every deterministic safe repair/i);
+  assert.match(app.document.querySelector('#lh-batch-copy').textContent, /safe fixes are available/i);
   assert.equal(app.document.querySelector('#lh-batch-review').disabled, false);
   assert.equal(app.document.querySelector('#lh-batch-panel').open, false);
-  assert.notEqual(
+  assert.equal(
     app.document.querySelector('#lh-batch-section').compareDocumentPosition(
       app.document.querySelector('#lh-results-section'),
     ) & app.window.Node.DOCUMENT_POSITION_FOLLOWING,
     0,
   );
+  const folderTarget = app.document.querySelector('input[name="lh-target"][value="folder"]');
+  folderTarget.checked = true;
+  folderTarget.dispatchEvent(new app.window.Event('change', { bubbles: true }));
+  assert.equal(app.document.querySelector('#lh-player-review-scope-note').hidden, false);
 });
 
 test('per-song details keep the combined safe action first and sort findings by severity', async (t) => {
@@ -613,6 +620,10 @@ test('a new batch preview cannot hide unresolved Undo and Finalize choices', asy
   assert.equal(app.document.querySelector('#lh-batch-review').textContent, 'Resolve previous repairs first');
   assert.notEqual(buttonWithText(app.document, 'Review Undo all remaining repairs'), undefined);
   assert.notEqual(buttonWithText(app.document, 'Review Finalize all remaining repairs'), undefined);
+  const finalizeRepair = buttonWithText(app.document, 'Finalize repair');
+  assert.notEqual(finalizeRepair, undefined);
+  finalizeRepair.click();
+  assert.notEqual(buttonWithText(app.document, 'Remove recovery copy'), undefined);
 });
 
 test('scan live region announces milestones without repeating package-name polling', async (t) => {
@@ -679,7 +690,7 @@ test('a complete result filter updates pressed state and sends the semantic API 
   });
   t.after(() => app.close());
 
-  const warningFilter = app.document.querySelector('button[data-filter="warnings"]');
+  const warningFilter = app.document.querySelector('#lh-overview button[data-filter="warnings"]');
   warningFilter.click();
   await waitFor(
     () => app.requests.some(({ key }) => key.includes('/results?') && key.includes('filter=warnings')),
@@ -687,6 +698,7 @@ test('a complete result filter updates pressed state and sends the semantic API 
   );
 
   assert.equal(warningFilter.getAttribute('aria-pressed'), 'true');
+  assert.equal(app.document.querySelector('#lh-filters button[data-filter="warnings"]').getAttribute('aria-pressed'), 'true');
   assert.equal(app.document.querySelector('button[data-filter="problems"]').getAttribute('aria-pressed'), 'false');
 });
 
@@ -929,4 +941,83 @@ test('historical repair activity stays collapsed until the user chooses to inspe
   assert.equal(app.document.querySelector('#lh-health-workspace').dataset.viewState, 'complete');
   assert.equal(app.document.querySelector('#lh-activity-section').open, false);
   assert.equal(app.document.querySelector('#lh-activity-status').textContent, '');
+});
+
+test('retained Undo entries remain discoverable and details collapse without dismissal', async (t) => {
+  const history = {
+    items: [
+      {
+        id: 'repair-two',
+        backup_id: '20260820-120000-222222222222',
+        outcome: 'success',
+        action: 'repair',
+        title: 'Second Song',
+        package: 'second.feedpak',
+        change_count: 1,
+        item_name: 'note',
+        undo_available: true,
+      },
+      {
+        id: 'repair-one',
+        backup_id: '20260820-120000-111111111111',
+        outcome: 'success',
+        action: 'repair',
+        title: 'First Song',
+        package: 'first.feedpak',
+        change_count: 1,
+        item_name: 'note',
+        undo_available: true,
+      },
+    ],
+  };
+  const app = await launchLibraryDoctor({
+    status: auditedStates.repair_receipt.status,
+    history,
+  });
+  t.after(() => app.close());
+  await waitFor(() => app.document.querySelectorAll('.lh-recovery-item').length === 1, 'retained Undo list');
+
+  const activity = app.document.querySelector('#lh-activity-section');
+  assert.match(app.document.querySelector('#lh-activity-summary-label').textContent, /2 actions/);
+  assert.equal(buttonWithText(app.document, 'Dismiss'), undefined);
+  assert.match(app.document.querySelector('#lh-repair-result').textContent, /Second Song/);
+  assert.equal(app.document.querySelectorAll('.lh-recovery-item button').length, 2);
+  assert.equal(activity.querySelectorAll('button').length >= 4, true);
+  activity.open = true;
+  buttonWithText(app.document.querySelector('#lh-repair-result'), 'Collapse details').click();
+  assert.equal(activity.open, false);
+  assert.equal(app.document.querySelectorAll('.lh-recovery-item').length, 1);
+});
+
+test('manual recovery remains visible and never suggests retrying the repair', async (t) => {
+  const receipt = {
+    id: 'recovery-required-one',
+    backup_id: '20260820-120000-333333333333',
+    action: 'recovery',
+    outcome: 'failure',
+    file_state: 'recovery_required',
+    recovery_required: true,
+    resolution_actions: [],
+    manual_review_required: true,
+    title: 'Interrupted Song',
+    package: 'interrupted.feedpak',
+    message: 'An external edit prevented automatic recovery.',
+    file_state_copy: 'The current song and recovery copy were preserved. Further changes are locked.',
+  };
+  const app = await launchLibraryDoctor({
+    status: auditedStates.repair_receipt.status,
+    history: { items: [receipt] },
+  });
+  t.after(() => app.close());
+  await waitFor(
+    () => app.document.querySelector('#lh-repair-result').textContent.includes('Interrupted Song'),
+    'required recovery result',
+  );
+
+  const activity = app.document.querySelector('#lh-activity-section');
+  assert.equal(activity.hidden, false);
+  assert.match(activity.textContent, /Recovery needed/);
+  assert.match(activity.textContent, /will not overwrite either version automatically/);
+  assert.doesNotMatch(activity.textContent, /try again/i);
+  assert.equal(buttonWithText(activity, 'Dismiss'), undefined);
 });

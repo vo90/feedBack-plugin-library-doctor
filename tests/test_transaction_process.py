@@ -132,6 +132,14 @@ def _anchor_counts(package):
     )
 
 
+def _discoverable_package_paths(library):
+    return {
+        path.relative_to(library).as_posix()
+        for path in library.rglob("*")
+        if path.name.lower().endswith((".feedpak", ".sloppak"))
+    }
+
+
 @pytest.mark.parametrize(
     ("barrier", "member_index"),
     [
@@ -153,6 +161,8 @@ def test_real_process_death_during_apply_reconciles_to_one_allowed_state(
         barrier,
         member_index=member_index,
     )
+
+    assert _discoverable_package_paths(library) == {"Song.feedpak"}
 
     restarted = _service(repair_module, tmp_path, library)
     counts = _anchor_counts(package)
@@ -198,6 +208,8 @@ def test_real_process_death_during_undo_never_leaves_a_mixed_package(
         member_index=member_index,
         backup_id=applied["backup_id"],
     )
+
+    assert _discoverable_package_paths(library) == {"Song.feedpak"}
 
     restarted = _service(repair_module, tmp_path, library)
     counts = _anchor_counts(package)
@@ -263,6 +275,12 @@ def test_real_process_death_inside_a_batch_package_preserves_boundaries(
         member_index=1,
         crash_package="Two.feedpak",
     )
+
+    assert _discoverable_package_paths(library) == {
+        "One.feedpak",
+        "Two.feedpak",
+        "Three.feedpak",
+    }
 
     restarted_repair = _service(repair_module, tmp_path, library)
     assert _anchor_counts(packages["One.feedpak"]) == (1, 1)

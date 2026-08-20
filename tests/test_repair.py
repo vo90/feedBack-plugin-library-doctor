@@ -2755,7 +2755,7 @@ def test_directory_candidate_verifies_every_unchanged_member(
 
     assert raised.value.code == "candidate_integrity_failed"
     assert cover.read_bytes() == untouched
-    assert not list(package.parent.glob(".library-doctor-repair-*"))
+    assert not list(package.parent.glob(".library-doctor-work-*"))
 
 
 def test_directory_candidate_integrity_allows_planned_add_change_and_delete(
@@ -2774,6 +2774,8 @@ def test_directory_candidate_integrity_allows_planned_add_change_and_delete(
 
     candidate, cleanup = service._candidate(package, replacements)
     try:
+        assert candidate.name == "candidate"
+        assert candidate.suffix.lower() not in {".feedpak", ".sloppak"}
         assert (candidate / "arrangements" / "lead.json").read_bytes() == replacements[
             "arrangements/lead.json"
         ]
@@ -3159,6 +3161,81 @@ def test_startup_recovery_never_overwrites_an_unknown_external_edit(
     assert receipt["outcome"] == "failure"
     assert receipt["file_state"] == "recovery_required"
     assert receipt["undo_available"] is False
+    assert receipt["recovery_required"] is True
+    assert receipt["resolution_actions"] == []
+    assert receipt["manual_review_required"] is True
+    assert "locked" in receipt["file_state_copy"].lower()
+
+    state = restarted.recovery_state("Song.feedpak")
+    assert state["required"] is True
+    assert state["backup_id"] == receipt["backup_id"]
+    assert state["next_action"] == "resolve_recovery"
+    assert state["restore_available"] is False
+
+    preview = restarted.preview_all("Song.feedpak")
+    assert isinstance(preview, dict)
+    with pytest.raises(repair.RepairPlanningError) as blocked:
+        restarted.apply_all("Song.feedpak", "0" * 64)
+    assert blocked.value.code == "recovery_required"
+    assert blocked.value.file_state == "recovery_required"
+    assert target.read_bytes() == external
+
+
+def test_matching_recovery_restore_resolves_the_package_lock(repair, tmp_path):
+    service, package, _original, _validate = _phase0_directory_service(
+        repair, tmp_path
+    )
+    plan = service.preview_all("Song.feedpak")
+    applied = service.apply_all("Song.feedpak", plan["plan_id"])
+    transaction = service._begin_transaction(
+        "Song.feedpak",
+        applied["backup_id"],
+        operation="repair",
+        target_state="repaired",
+    )
+    service._update_transaction(transaction, phase="recovery_required")
+
+    assert service.recovery_state("Song.feedpak")["required"] is True
+    restored = service.restore("Song.feedpak", applied["backup_id"])
+
+    assert restored["outcome"] == "restored"
+    assert service.recovery_state("Song.feedpak") == {"required": False}
+    assert not list(
+        (tmp_path / "config" / "library_doctor" / "repair_transactions").glob(
+            "*.json"
+        )
+    )
+    documents = [
+        json.loads((package / "arrangements" / name).read_bytes())
+        for name in ("lead.json", "rhythm.json")
+    ]
+    assert all(len(document["anchors"]) == 2 for document in documents)
+
+
+def test_matching_recovery_finalize_can_keep_a_complete_repaired_package(
+    repair, tmp_path,
+):
+    service, _package, _original, _validate = _phase0_directory_service(
+        repair, tmp_path
+    )
+    plan = service.preview_all("Song.feedpak")
+    applied = service.apply_all("Song.feedpak", plan["plan_id"])
+    transaction = service._begin_transaction(
+        "Song.feedpak",
+        applied["backup_id"],
+        operation="repair",
+        target_state="repaired",
+    )
+    service._update_transaction(transaction, phase="recovery_required")
+
+    preview = service.preview_finalize_backup(
+        "Song.feedpak", applied["backup_id"]
+    )
+    assert preview["package_state"] == "repaired"
+    finalized = service.finalize_backup("Song.feedpak", applied["backup_id"])
+
+    assert finalized["outcome"] == "finalized"
+    assert service.recovery_state("Song.feedpak") == {"required": False}
 
 
 def test_directory_repair_refuses_to_write_without_a_durable_journal(

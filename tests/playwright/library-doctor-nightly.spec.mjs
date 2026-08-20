@@ -148,7 +148,7 @@ test('first-run shell exposes the safe action and scoped live status', async ({ 
   await expect(root.locator('#lh-module-status')).toBeHidden();
   expect(requests.some((request) => /GET .*\/src\/app\.js/.test(request))).toBe(true);
   await expect(root.locator('#lh-health-workspace')).toHaveAttribute('data-view-state', 'first_run');
-  await expect(root.locator('#lh-scan-options')).toHaveAttribute('open', '');
+  await expect(root.locator('#lh-scan-options')).not.toHaveAttribute('open', '');
   await expect(root.getByRole('button', { name: 'Scan my library' })).toBeVisible();
   await expect(root.locator('#lh-results-section')).toBeHidden();
   await expect(root.locator('#lh-status')).not.toHaveAttribute('aria-live', /.+/);
@@ -165,8 +165,9 @@ test('result filtering and repair review/cancel never apply a package', async ({
     results: { total: 1, limit: 50, offset: 0, items: [syntheticReport] },
   });
 
-  await root.getByRole('button', { name: 'May affect FeedBack' }).click();
-  await expect(root.getByRole('button', { name: 'May affect FeedBack' })).toHaveAttribute('aria-pressed', 'true');
+  const warningFilter = root.getByRole('button', { name: 'May affect FeedBack', exact: true });
+  await warningFilter.click();
+  await expect(warningFilter).toHaveAttribute('aria-pressed', 'true');
   await expect.poll(() => requests.some((request) => request.includes('filter=warnings'))).toBe(true);
 
   await root.locator('.lh-package > summary').click();
@@ -201,7 +202,7 @@ test('reviewed HOPO journey can be cancelled without any mutation', async ({ pag
 
   await root.locator('.lh-package > summary').click();
   await root.getByRole('button', { name: 'Review with text only' }).click();
-  await expect(root.getByRole('heading', { name: /Candidate 1 of 1/ })).toBeFocused();
+  await expect(root.getByRole('heading', { name: /Issue 1 of 1/ })).toBeFocused();
   await expect(root.locator('.lh-reviewed-choice input:checked')).toHaveCount(0);
   await expect(root.getByRole('button', { name: 'Preview selected changes' })).toBeDisabled();
   await root.getByRole('radio', { name: /Remove HO\/PO/ }).check();
@@ -267,7 +268,7 @@ test('reviewed HOPO journey previews, confirms, applies, and offers Undo', async
     '0 unselected issues remain',
   );
   await expect(root.locator('.lh-reviewed-preview')).toContainText(
-    '0 candidates are expected to remain',
+    '0 issues are expected to remain',
   );
   await root.getByRole('button', { name: 'Confirm these reviewed changes' }).click();
   await expect(root.getByRole('button', { name: 'Apply reviewed changes' })).toBeFocused();
@@ -793,9 +794,10 @@ test('accessibility: keyboard focus, forced colors, and 400-percent-equivalent r
   });
 
   await page.emulateMedia({ forcedColors: 'active', reducedMotion: 'reduce' });
+  const libraryCheck = root.getByRole('button', { name: 'Library check', exact: true });
   const tools = root.getByRole('button', { name: 'Song tools', exact: true });
-  await tools.focus();
-  await page.keyboard.press('Shift+Tab');
+  await libraryCheck.focus();
+  await expect(libraryCheck).toBeFocused();
   await page.keyboard.press('Tab');
   await expect(tools).toBeFocused();
   await expect(tools).toHaveCSS('outline-style', 'solid');

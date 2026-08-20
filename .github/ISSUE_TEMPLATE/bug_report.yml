@@ -1,0 +1,82 @@
+name: Report a Library Doctor problem
+description: Tell us what happened in the plugin using ordinary language.
+title: "[Bug] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a problem. You do not need to understand the technical cause.
+
+        Please do not upload copyrighted songs, private library exports, recovery files, or screenshots that expose private folder paths. The wording shown by Library Doctor is usually enough to begin investigating.
+
+  - type: input
+    id: library_doctor_version
+    attributes:
+      label: Library Doctor version
+      description: Open Plugin Manager and copy the version shown for Library Doctor.
+      placeholder: 0.45.0
+    validations:
+      required: true
+
+  - type: input
+    id: feedback_version
+    attributes:
+      label: FeedBack version or build
+      description: Enter the version or build information shown by FeedBack.
+      placeholder: 0.3.0-alpha.1
+    validations:
+      required: true
+
+  - type: textarea
+    id: goal
+    attributes:
+      label: What were you trying to do?
+      description: Describe the scan, review, repair, Undo, or Song Tools action in your own words.
+      placeholder: I scanned my library, opened one song under Needs fixing, and selected Review safe fix.
+    validations:
+      required: true
+
+  - type: textarea
+    id: result
+    attributes:
+      label: What happened?
+      description: Include the exact message shown on screen and what you expected instead.
+      placeholder: Library Doctor displayed... I expected...
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps that make it happen again
+      description: List the buttons or screens used. It is fine if the problem happened only once.
+      placeholder: |
+        1. Open Library Doctor
+        2. Select Scan my library
+        3. ...
+
+  - type: dropdown
+    id: scope
+    attributes:
+      label: Which part of Library Doctor was involved?
+      options:
+        - Library scan or results
+        - One-song safe repair
+        - Fix several songs
+        - Undo or recovery
+        - Player Review
+        - Song Tools or Preview Creator
+        - Installation or startup
+        - Not sure
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Privacy and song safety
+      options:
+        - label: I have not attached copyrighted songs, private library data, or recovery files.
+          required: true
+        - label: I kept the original download or another backup if this report involves a changed song.
+          required: false

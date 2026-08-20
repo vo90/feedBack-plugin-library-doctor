@@ -1,0 +1,65 @@
+{
+  "schema": "library_doctor.architecture_contract.v1",
+  "modules": {
+    "routes.py": {
+      "maxLines": 1050,
+      "responsibility": "Compose plugin services and map HTTP endpoints to domain operations.",
+      "forbiddenImports": ["sqlite3", "zipfile"]
+    },
+    "route_support.py": {
+      "maxLines": 250,
+      "responsibility": "Own HTTP validation, error envelopes, and byte-range responses.",
+      "forbiddenImports": ["scanner", "repair", "batch_repair"]
+    },
+    "scanner.py": {
+      "maxLines": 2350,
+      "responsibility": "Own playback-aware scan orchestration, cancellation, and exports.",
+      "forbiddenImports": ["fastapi"]
+    },
+    "library_doctor_report_cache.py": {
+      "maxLines": 950,
+      "responsibility": "Own SQLite report persistence, migrations, and cached queries.",
+      "forbiddenImports": ["scanner", "repair", "fastapi"]
+    },
+    "library_doctor_scan_policy.py": {
+      "maxLines": 160,
+      "responsibility": "Choose bounded validation worker resources from host constraints.",
+      "forbiddenImports": ["scanner", "validator", "fastapi"]
+    },
+    "repair.py": {
+      "maxLines": 7400,
+      "responsibility": "Plan, validate, commit, recover, and audit package mutations.",
+      "forbiddenImports": ["fastapi", "scanner"]
+    },
+    "repair_catalog.py": {
+      "maxLines": 700,
+      "responsibility": "Declare the closed safe and reviewed-media repair allowlists.",
+      "forbiddenImports": ["repair", "scanner", "fastapi"]
+    },
+    "repair_actions.py": {
+      "maxLines": 350,
+      "responsibility": "Define immutable repair action and catalog value objects.",
+      "forbiddenImports": ["repair", "scanner", "fastapi"]
+    },
+    "repair_workspace.py": {
+      "maxLines": 300,
+      "responsibility": "Own non-discoverable same-volume candidate workspaces and bounded orphan reconciliation.",
+      "forbiddenImports": ["repair", "scanner", "fastapi"]
+    },
+    "repair_recovery.py": {
+      "maxLines": 200,
+      "responsibility": "Own recovery selection, public quarantine state, and mutation gating policy.",
+      "forbiddenImports": ["repair", "scanner", "fastapi"]
+    },
+    "repair_transaction.py": {
+      "maxLines": 425,
+      "responsibility": "Own durable repair-journal persistence and interrupted transaction reconciliation.",
+      "forbiddenImports": ["repair", "scanner", "fastapi"]
+    },
+    "repair_yaml.py": {
+      "maxLines": 60,
+      "responsibility": "Own strict YAML mapping-key validation for repair manifests.",
+      "forbiddenImports": ["repair", "scanner", "fastapi"]
+    }
+  }
+}

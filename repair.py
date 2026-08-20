@@ -22,7 +22,6 @@ import threading
 import time
 import uuid
 import zipfile
-from dataclasses import asdict, dataclass
 from pathlib import Path, PurePosixPath
 from typing import Iterable, Iterator
 
@@ -75,6 +74,89 @@ except ModuleNotFoundError:  # Tests and some plugin hosts load files by path.
         sys.modules[_reviewed_name] = _reviewed
         _reviewed_spec.loader.exec_module(_reviewed)
 
+_actions_name = "_library_doctor_repair_actions"
+_actions = sys.modules.get(_actions_name)
+if _actions is None:
+    _actions_spec = importlib.util.spec_from_file_location(
+        _actions_name,
+        Path(__file__).resolve().with_name("repair_actions.py"),
+    )
+    _actions = importlib.util.module_from_spec(_actions_spec)
+    sys.modules[_actions_name] = _actions
+    _actions_spec.loader.exec_module(_actions)
+RepairDefinition = _actions.RepairDefinition
+DuplicateGroup = _actions.DuplicateGroup
+DeleteArrayItems = _actions.DeleteArrayItems
+ChordMatchGroup = _actions.ChordMatchGroup
+DeleteNotesMatchingChords = _actions.DeleteNotesMatchingChords
+OmitEmptyRootArray = _actions.OmitEmptyRootArray
+RedundantHandshapeMatch = _actions.RedundantHandshapeMatch
+DeleteRedundantHandshapes = _actions.DeleteRedundantHandshapes
+MutedFretChange = _actions.MutedFretChange
+NormalizeMutedNegativeFrets = _actions.NormalizeMutedNegativeFrets
+StableSortBendPoints = _actions.StableSortBendPoints
+StableSortLyricCues = _actions.StableSortLyricCues
+StableSortTimelineMarkers = _actions.StableSortTimelineMarkers
+StableSortTimedEvents = _actions.StableSortTimedEvents
+
+_catalog_name = "_library_doctor_repair_catalog"
+_catalog = sys.modules.get(_catalog_name)
+if _catalog is None:
+    _catalog_spec = importlib.util.spec_from_file_location(
+        _catalog_name,
+        Path(__file__).resolve().with_name("repair_catalog.py"),
+    )
+    _catalog = importlib.util.module_from_spec(_catalog_spec)
+    sys.modules[_catalog_name] = _catalog
+    _catalog_spec.loader.exec_module(_catalog)
+_REPAIR_DEFINITIONS = _catalog.SAFE_REPAIR_DEFINITIONS
+_MEDIA_REPAIR_DEFINITIONS = _catalog.MEDIA_REPAIR_DEFINITIONS
+
+_workspace_name = "_library_doctor_repair_workspace"
+_workspace = sys.modules.get(_workspace_name)
+if _workspace is None:
+    _workspace_spec = importlib.util.spec_from_file_location(
+        _workspace_name,
+        Path(__file__).resolve().with_name("repair_workspace.py"),
+    )
+    _workspace = importlib.util.module_from_spec(_workspace_spec)
+    sys.modules[_workspace_name] = _workspace
+    _workspace_spec.loader.exec_module(_workspace)
+
+_recovery_name = "_library_doctor_repair_recovery"
+_recovery = sys.modules.get(_recovery_name)
+if _recovery is None:
+    _recovery_spec = importlib.util.spec_from_file_location(
+        _recovery_name,
+        Path(__file__).resolve().with_name("repair_recovery.py"),
+    )
+    _recovery = importlib.util.module_from_spec(_recovery_spec)
+    sys.modules[_recovery_name] = _recovery
+    _recovery_spec.loader.exec_module(_recovery)
+
+_yaml_name = "_library_doctor_repair_yaml"
+_yaml = sys.modules.get(_yaml_name)
+if _yaml is None:
+    _yaml_spec = importlib.util.spec_from_file_location(
+        _yaml_name,
+        Path(__file__).resolve().with_name("repair_yaml.py"),
+    )
+    _yaml = importlib.util.module_from_spec(_yaml_spec)
+    sys.modules[_yaml_name] = _yaml
+    _yaml_spec.loader.exec_module(_yaml)
+_UniqueSafeLoader = _yaml.UniqueSafeLoader
+
+_transaction_name = "_library_doctor_repair_transaction"
+_transaction = sys.modules.get(_transaction_name)
+if _transaction is None:
+    _transaction_spec = importlib.util.spec_from_file_location(
+        _transaction_name,
+        Path(__file__).resolve().with_name("repair_transaction.py"),
+    )
+    _transaction = importlib.util.module_from_spec(_transaction_spec)
+    sys.modules[_transaction_name] = _transaction
+    _transaction_spec.loader.exec_module(_transaction)
+
 
 REPAIR_CATALOG_VERSION = "repairs-20"
 REPAIR_PLAN_SCHEMA = "library_doctor.repair_plan.v1"
@@ -105,41 +187,6 @@ _REQUEST_FINGERPRINT_RE = re.compile(r"^[0-9a-f]{64}$")
 ALL_SAFE_RULE_CODE = "package.all-safe"
 
 
-class _UniqueSafeLoader(yaml.SafeLoader):
-    """Safe YAML loader that refuses ambiguous repeated mapping keys."""
-
-
-def _construct_unique_mapping(loader, node, deep=False):
-    loader.flatten_mapping(node)
-    mapping = {}
-    for key_node, value_node in node.value:
-        key = loader.construct_object(key_node, deep=deep)
-        try:
-            duplicate = key in mapping
-        except TypeError as exc:
-            raise yaml.constructor.ConstructorError(
-                "while constructing a mapping",
-                node.start_mark,
-                "found an unhashable mapping key",
-                key_node.start_mark,
-            ) from exc
-        if duplicate:
-            raise yaml.constructor.ConstructorError(
-                "while constructing a mapping",
-                node.start_mark,
-                f"found duplicate key {key!r}",
-                key_node.start_mark,
-            )
-        mapping[key] = loader.construct_object(value_node, deep=deep)
-    return mapping
-
-
-_UniqueSafeLoader.add_constructor(
-    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
-    _construct_unique_mapping,
-)
-
-
 class RepairPlanningError(ValueError):
     """A stable, user-safe reason why a repair preview cannot be produced."""
 
@@ -148,830 +195,6 @@ class RepairPlanningError(ValueError):
         self.code = code
         self.file_state = file_state
 
-
-@dataclass(frozen=True)
-class RepairDefinition:
-    rule_code: str
-    action_kind: str
-    source_kind: str
-    item_name: str
-    safety: str
-    title: str
-    description: str
-    player_result: str
-    user_value: str
-    change_kind: str = "remove_duplicates"
-
-    def to_dict(self) -> dict:
-        return asdict(self)
-
-
-@dataclass(frozen=True)
-class DuplicateGroup:
-    keep_index: int
-    remove_indices: tuple[int, ...]
-    entry_sha256: str
-
-    def to_dict(self) -> dict:
-        return {
-            "keep_index": self.keep_index,
-            "remove_indices": list(self.remove_indices),
-            "entry_sha256": self.entry_sha256,
-        }
-
-
-@dataclass(frozen=True)
-class DeleteArrayItems:
-    array_path: tuple[str | int, ...]
-    expected_length: int
-    duplicate_groups: tuple[DuplicateGroup, ...]
-
-    @property
-    def remove_indices(self) -> tuple[int, ...]:
-        return tuple(sorted(
-            (
-                index
-                for group in self.duplicate_groups
-                for index in group.remove_indices
-            ),
-            reverse=True,
-        ))
-
-    def to_dict(self) -> dict:
-        return {
-            "operation": "delete_array_items",
-            "array_path": list(self.array_path),
-            "expected_length": self.expected_length,
-            "remove_indices": list(self.remove_indices),
-            "duplicate_groups": [
-                group.to_dict() for group in self.duplicate_groups
-            ],
-        }
-
-
-@dataclass(frozen=True)
-class ChordMatchGroup:
-    chord_index: int
-    chord_note_index: int
-    chord_sha256: str
-    remove_indices: tuple[int, ...]
-    entry_sha256: str
-
-    def to_dict(self) -> dict:
-        return {
-            "chord_index": self.chord_index,
-            "chord_note_index": self.chord_note_index,
-            "chord_sha256": self.chord_sha256,
-            "remove_indices": list(self.remove_indices),
-            "entry_sha256": self.entry_sha256,
-        }
-
-
-@dataclass(frozen=True)
-class DeleteNotesMatchingChords:
-    note_array_path: tuple[str | int, ...]
-    chord_array_path: tuple[str | int, ...]
-    expected_note_length: int
-    expected_chord_length: int
-    match_groups: tuple[ChordMatchGroup, ...]
-
-    @property
-    def remove_indices(self) -> tuple[int, ...]:
-        return tuple(sorted(
-            (
-                index
-                for group in self.match_groups
-                for index in group.remove_indices
-            ),
-            reverse=True,
-        ))
-
-    def to_dict(self) -> dict:
-        return {
-            "operation": "delete_notes_matching_chords",
-            "note_array_path": list(self.note_array_path),
-            "chord_array_path": list(self.chord_array_path),
-            "expected_note_length": self.expected_note_length,
-            "expected_chord_length": self.expected_chord_length,
-            "remove_indices": list(self.remove_indices),
-            "match_groups": [group.to_dict() for group in self.match_groups],
-        }
-
-
-@dataclass(frozen=True)
-class OmitEmptyRootArray:
-    field: str
-    original_sha256: str
-    result_sha256: str
-
-    @property
-    def remove_indices(self) -> tuple[int, ...]:
-        return ()
-
-    def to_dict(self) -> dict:
-        return {
-            "operation": "omit_empty_root_array",
-            "array_path": [self.field],
-            "field": self.field,
-            "original_sha256": self.original_sha256,
-            "result_sha256": self.result_sha256,
-        }
-
-
-@dataclass(frozen=True)
-class RedundantHandshapeMatch:
-    handshape_index: int
-    chord_index: int
-    handshape_sha256: str
-    chord_sha256: str
-
-    def to_dict(self) -> dict:
-        return asdict(self)
-
-
-@dataclass(frozen=True)
-class DeleteRedundantHandshapes:
-    span_kind: str
-    handshape_array_path: tuple[str | int, ...]
-    chord_array_path: tuple[str | int, ...]
-    expected_handshape_length: int
-    expected_chord_length: int
-    match_groups: tuple[RedundantHandshapeMatch, ...]
-
-    @property
-    def remove_indices(self) -> tuple[int, ...]:
-        return tuple(sorted(
-            (group.handshape_index for group in self.match_groups),
-            reverse=True,
-        ))
-
-    def to_dict(self) -> dict:
-        return {
-            "operation": "delete_redundant_handshapes",
-            "span_kind": self.span_kind,
-            "handshape_array_path": list(self.handshape_array_path),
-            "chord_array_path": list(self.chord_array_path),
-            "expected_handshape_length": self.expected_handshape_length,
-            "expected_chord_length": self.expected_chord_length,
-            "remove_indices": list(self.remove_indices),
-            "match_groups": [group.to_dict() for group in self.match_groups],
-        }
-
-
-@dataclass(frozen=True)
-class MutedFretChange:
-    note_index: int
-    original_fret: int
-    replacement_fret: int
-    note_sha256: str
-
-    def to_dict(self) -> dict:
-        return asdict(self)
-
-
-@dataclass(frozen=True)
-class NormalizeMutedNegativeFrets:
-    note_array_path: tuple[str | int, ...]
-    expected_length: int
-    changes: tuple[MutedFretChange, ...]
-
-    @property
-    def remove_indices(self) -> tuple[int, ...]:
-        return ()
-
-    @property
-    def change_count(self) -> int:
-        return len(self.changes)
-
-    def to_dict(self) -> dict:
-        return {
-            "operation": "normalize_muted_negative_frets",
-            "note_array_path": list(self.note_array_path),
-            "expected_length": self.expected_length,
-            "changes": [change.to_dict() for change in self.changes],
-        }
-
-
-@dataclass(frozen=True)
-class StableSortBendPoints:
-    array_path: tuple[str | int, ...]
-    expected_length: int
-    original_sha256: str
-    sorted_sha256: str
-    sorted_indices: tuple[int, ...]
-    moved_count: int
-    note_time: float | None
-    string: int | None
-
-    @property
-    def remove_indices(self) -> tuple[int, ...]:
-        return ()
-
-    def to_dict(self) -> dict:
-        return {
-            "operation": "stable_sort_bend_points",
-            "array_path": list(self.array_path),
-            "expected_length": self.expected_length,
-            "original_sha256": self.original_sha256,
-            "sorted_sha256": self.sorted_sha256,
-            "sorted_indices": list(self.sorted_indices),
-            "moved_count": self.moved_count,
-            "note_time": self.note_time,
-            "string": self.string,
-        }
-
-
-@dataclass(frozen=True)
-class StableSortLyricCues:
-    expected_length: int
-    original_sha256: str
-    sorted_sha256: str
-    sorted_indices: tuple[int, ...]
-    moved_count: int
-
-    @property
-    def remove_indices(self) -> tuple[int, ...]:
-        return ()
-
-    def to_dict(self) -> dict:
-        return {
-            "operation": "stable_sort_lyric_cues",
-            "array_path": [],
-            "expected_length": self.expected_length,
-            "original_sha256": self.original_sha256,
-            "sorted_sha256": self.sorted_sha256,
-            "sorted_indices": list(self.sorted_indices),
-            "moved_count": self.moved_count,
-        }
-
-
-@dataclass(frozen=True)
-class StableSortTimelineMarkers:
-    field: str
-    expected_length: int
-    original_sha256: str
-    sorted_sha256: str
-    sorted_indices: tuple[int, ...]
-    moved_count: int
-
-    @property
-    def remove_indices(self) -> tuple[int, ...]:
-        return ()
-
-    def to_dict(self) -> dict:
-        return {
-            "operation": "stable_sort_timeline_markers",
-            "array_path": [self.field],
-            "field": self.field,
-            "expected_length": self.expected_length,
-            "original_sha256": self.original_sha256,
-            "sorted_sha256": self.sorted_sha256,
-            "sorted_indices": list(self.sorted_indices),
-            "moved_count": self.moved_count,
-        }
-
-
-@dataclass(frozen=True)
-class StableSortTimedEvents:
-    array_path: tuple[str | int, ...]
-    time_key: str
-    expected_length: int
-    original_sha256: str
-    sorted_sha256: str
-    sorted_indices: tuple[int, ...]
-    moved_count: int
-
-    @property
-    def remove_indices(self) -> tuple[int, ...]:
-        return ()
-
-    def to_dict(self) -> dict:
-        return {
-            "operation": "stable_sort_timed_events",
-            "array_path": list(self.array_path),
-            "time_key": self.time_key,
-            "expected_length": self.expected_length,
-            "original_sha256": self.original_sha256,
-            "sorted_sha256": self.sorted_sha256,
-            "sorted_indices": list(self.sorted_indices),
-            "moved_count": self.moved_count,
-        }
-
-
-_REPAIR_DEFINITIONS = (
-    RepairDefinition(
-        rule_code="chart.negative-muted-fret",
-        action_kind="normalize_muted_negative_frets",
-        source_kind="arrangement",
-        item_name="muted note fret",
-        safety="safe_automatic",
-        title="Normalize negative string-mute frets",
-        description=(
-            "Change only the negative fret value of notes carrying the exact "
-            "string-mute flag `mt: true` to fret 0. Keep every string, time, "
-            "sustain, technique flag, and unknown stored property unchanged."
-        ),
-        player_result=(
-            "The same pitchless muted strikes remain on the same strings and "
-            "at the same times. FeedBack still excludes them from pitch scoring."
-        ),
-        user_value=(
-            "Editors and Feedpak tools receive the standard fret 0 value instead "
-            "of an invalid negative fret, without changing what the player is "
-            "asked to perform."
-        ),
-        change_kind="normalize",
-    ),
-    RepairDefinition(
-        rule_code="chart.empty-phrases-key",
-        action_kind="omit_empty_phrases_key",
-        source_kind="arrangement",
-        item_name="phrase-ladder key",
-        safety="safe_automatic",
-        title="Omit the empty phrase ladder",
-        description=(
-            "Remove only an arrangement's root `phrases` key when its value is "
-            "exactly an empty array. Every playable event and other property "
-            "is preserved."
-        ),
-        player_result=(
-            "The arrangement still has no difficulty ladder; it now expresses "
-            "that state using the Feedpak-defined omission."
-        ),
-        user_value=(
-            "The arrangement conforms to the Feedpak contract without deleting "
-            "or changing any authored musical event."
-        ),
-        change_kind="omit_empty",
-    ),
-    RepairDefinition(
-        rule_code="timeline.empty-arrangement-tempos-key",
-        action_kind="omit_empty_arrangement_tempos_key",
-        source_kind="arrangement",
-        item_name="arrangement-tempo key",
-        safety="safe_automatic",
-        title="Omit the empty arrangement tempo override",
-        description=(
-            "Remove only an arrangement's root `tempos` key when its value is "
-            "exactly an empty array. The chart continues to follow the song tempo."
-        ),
-        player_result=(
-            "The chart still follows the song-level tempo map; no tempo event is "
-            "invented, removed, retimed, or changed."
-        ),
-        user_value=(
-            "The arrangement uses the Feedpak-defined omission for a chart with "
-            "no per-arrangement tempo override."
-        ),
-        change_kind="omit_empty",
-    ),
-    RepairDefinition(
-        rule_code="timeline.duplicate-tempo",
-        action_kind="remove_exact_duplicate_tempo_events",
-        source_kind="timeline",
-        item_name="tempo event",
-        safety="safe_automatic",
-        title="Remove exact duplicate tempo events",
-        description=(
-            "Keep the first tempo event and remove only later complete JSON-identical "
-            "copies from each active arrangement or song tempo list."
-        ),
-        player_result=(
-            "Every distinct authored tempo and timestamp remains. Conflicting "
-            "same-time tempo values remain for review."
-        ),
-        user_value=(
-            "FeedBack receives one stored copy of each identical tempo instruction "
-            "without changing the rhythm map."
-        ),
-    ),
-    RepairDefinition(
-        rule_code="timeline.tempos-out-of-order",
-        action_kind="reorder_tempo_events",
-        source_kind="timeline",
-        item_name="tempo timeline",
-        safety="safe_automatic",
-        title="Put tempo events in chronological order",
-        description=(
-            "Stable-sort each valid active tempo list by its existing finite "
-            "numeric `time`, preserving every object, property, and equal-time order."
-        ),
-        player_result=(
-            "The same tempo instructions reach FeedBack in playback order, without "
-            "retiming or choosing between conflicts."
-        ),
-        user_value=(
-            "Tempo lookup becomes deterministic across FeedBack and other Feedpak "
-            "tools while the authored tempo data remains unchanged."
-        ),
-        change_kind="reorder",
-    ),
-    RepairDefinition(
-        rule_code="timeline.duplicate-time-signature",
-        action_kind="remove_exact_duplicate_time_signature_events",
-        source_kind="timeline",
-        item_name="time-signature event",
-        safety="safe_automatic",
-        title="Remove exact duplicate time signatures",
-        description=(
-            "Keep the first time-signature event and remove only later complete "
-            "JSON-identical copies from the declared song timeline."
-        ),
-        player_result=(
-            "Every distinct meter and timestamp remains. Conflicting same-time "
-            "meters remain for review."
-        ),
-        user_value=(
-            "The song timeline has one stored copy of each identical meter "
-            "instruction without changing the rhythm map."
-        ),
-    ),
-    RepairDefinition(
-        rule_code="timeline.time-signatures-out-of-order",
-        action_kind="reorder_time_signature_events",
-        source_kind="timeline",
-        item_name="time-signature timeline",
-        safety="safe_automatic",
-        title="Put time signatures in chronological order",
-        description=(
-            "Stable-sort the valid song-level time-signature list by its existing "
-            "finite numeric `time`, preserving every object and equal-time order."
-        ),
-        player_result=(
-            "The same meter instructions reach FeedBack in playback order, without "
-            "retiming or choosing between conflicts."
-        ),
-        user_value=(
-            "Meter lookup becomes deterministic while every authored signature and "
-            "additional property remains intact."
-        ),
-        change_kind="reorder",
-    ),
-    RepairDefinition(
-        rule_code="tones.duplicate-change",
-        action_kind="remove_exact_duplicate_tone_changes",
-        source_kind="arrangement",
-        item_name="tone change",
-        safety="safe_automatic",
-        title="Remove exact duplicate tone changes",
-        description=(
-            "Keep the first tone change and remove only later complete JSON-identical "
-            "copies from an effective inline arrangement tone block."
-        ),
-        player_result=(
-            "Every distinct tone selection, rig binding, and timestamp remains. "
-            "Different same-time changes remain untouched."
-        ),
-        user_value=(
-            "The arrangement carries one stored copy of each identical tone switch "
-            "without changing the selected sound."
-        ),
-    ),
-    RepairDefinition(
-        rule_code="tones.changes-out-of-order",
-        action_kind="reorder_tone_changes",
-        source_kind="arrangement",
-        item_name="tone-change timeline",
-        safety="safe_automatic",
-        title="Put tone changes in chronological order",
-        description=(
-            "Stable-sort a valid effective inline tone-change list by canonical "
-            "finite numeric `t`, preserving every object and equal-time order."
-        ),
-        player_result=(
-            "The same tone switches reach FeedBack in playback order, without "
-            "changing their names, rigs, times, or unknown properties."
-        ),
-        user_value=(
-            "Tone automation becomes portable and predictable without choosing or "
-            "rewriting any authored sound."
-        ),
-        change_kind="reorder",
-    ),
-    RepairDefinition(
-        rule_code="chart.duplicate-note",
-        action_kind="remove_exact_duplicate_notes",
-        source_kind="arrangement",
-        item_name="note",
-        safety="safe_automatic",
-        title="Remove exact duplicate notes",
-        description=(
-            "Keep the first note and remove only copies with identical stored "
-            "values and properties from the same note list."
-        ),
-        player_result=(
-            "The song keeps one note at every repaired position. Its timing, "
-            "fret, sustain, and techniques remain unchanged."
-        ),
-        user_value=(
-            "The highway has one unambiguous gem to display and process instead "
-            "of redundant copies of the same authored note."
-        ),
-    ),
-    RepairDefinition(
-        rule_code="chart.duplicate-chord-note",
-        action_kind="remove_exact_duplicate_chord_notes",
-        source_kind="arrangement",
-        item_name="chord note",
-        safety="safe_automatic",
-        title="Remove exact duplicate chord notes",
-        description=(
-            "Keep the first chord member and remove only identical copies from "
-            "inside that same chord."
-        ),
-        player_result=(
-            "The chord keeps the same strings, frets, timing, and techniques, "
-            "with one stored instruction per intended chord member."
-        ),
-        user_value=(
-            "The editor and highway no longer have redundant gems stacked on "
-            "one string inside the chord."
-        ),
-    ),
-    RepairDefinition(
-        rule_code="chart.duplicate-chord",
-        action_kind="remove_exact_duplicate_chords",
-        source_kind="arrangement",
-        item_name="chord",
-        safety="safe_automatic",
-        title="Remove exact duplicate chords",
-        description=(
-            "Keep the first complete chord and remove only copies with identical "
-            "timing, shape, notes, techniques, and stored properties from the same list."
-        ),
-        player_result=(
-            "One complete chord remains at each repaired position with all of "
-            "its authored notes and techniques unchanged."
-        ),
-        user_value=(
-            "The editor and highway have one unambiguous chord event instead of "
-            "processing identical copies at the same moment."
-        ),
-    ),
-    RepairDefinition(
-        rule_code="chart.duplicate-anchor",
-        action_kind="remove_exact_duplicate_anchors",
-        source_kind="arrangement",
-        item_name="anchor",
-        safety="safe_automatic",
-        title="Remove exact duplicate anchors",
-        description=(
-            "Keep the first anchor and remove only copies with identical timing, "
-            "fret window, width, and stored properties from the same list."
-        ),
-        player_result=(
-            "The same fret-window instruction remains at each repaired position."
-        ),
-        user_value=(
-            "The highway receives one clear hand-position instruction without "
-            "redundant anchor data."
-        ),
-    ),
-    RepairDefinition(
-        rule_code="chart.duplicate-handshape",
-        action_kind="remove_exact_duplicate_handshapes",
-        source_kind="arrangement",
-        item_name="handshape",
-        safety="safe_automatic",
-        title="Remove exact duplicate handshapes",
-        description=(
-            "Keep the first handshape and remove only copies with identical chord, "
-            "time span, and stored properties from the same list."
-        ),
-        player_result=(
-            "The same chord-shape guide remains over the same time span."
-        ),
-        user_value=(
-            "The highway has one clear shape guide instead of redundant overlay data."
-        ),
-    ),
-    RepairDefinition(
-        rule_code="chart.zero-length-handshape",
-        action_kind="remove_redundant_zero_length_handshapes",
-        source_kind="arrangement",
-        item_name="zero-length handshape",
-        safety="safe_automatic",
-        title="Remove redundant zero-length handshapes",
-        description=(
-            "Remove a zero-duration, non-arpeggio handshape only when exactly one "
-            "chord with the same template ID already exists at the exact same time "
-            "in the same event list. Handshapes with unmatched chords, arpeggio "
-            "intent, or additional stored properties are left unchanged."
-        ),
-        player_result=(
-            "The matching authored chord remains at the same time with the same "
-            "shape and playable notes. Only a redundant shape guide that has no "
-            "duration is removed; any handshape that could supply a chord or other "
-            "meaning remains for manual review."
-        ),
-        user_value=(
-            "The chart no longer carries unusable zero-duration overlay records "
-            "where the real chord already provides the complete player instruction."
-        ),
-        change_kind="remove_redundant",
-    ),
-    RepairDefinition(
-        rule_code="chart.invalid-handshape-span",
-        action_kind="remove_redundant_reversed_handshapes",
-        source_kind="arrangement",
-        item_name="reversed handshape",
-        safety="safe_automatic",
-        title="Remove redundant reversed handshapes",
-        description=(
-            "Remove a non-arpeggio handshape whose end precedes its start only "
-            "when exactly one playable chord with the same template ID already "
-            "exists at the exact same time in the same event list. Missing or "
-            "negative times, unmatched chords, arpeggio intent, and additional "
-            "stored properties remain unchanged for manual review."
-        ),
-        player_result=(
-            "The matching authored chord remains at the same time with the same "
-            "shape, notes, and techniques. Only a reversed-duration shape guide "
-            "that cannot describe a playable interval is removed."
-        ),
-        user_value=(
-            "The highway no longer receives an impossible backward shape interval "
-            "where the complete playable chord already provides the instruction."
-        ),
-        change_kind="remove_redundant",
-    ),
-    RepairDefinition(
-        rule_code="chart.note-duplicates-chord",
-        action_kind="remove_notes_duplicating_chords",
-        source_kind="arrangement",
-        item_name="standalone note",
-        safety="safe_automatic",
-        title="Remove notes already contained in chords",
-        description=(
-            "Keep the complete chord and remove only standalone notes at the "
-            "same time whose string, fret, and every stored playable property "
-            "exactly match one explicit chord member."
-        ),
-        player_result=(
-            "The complete chord remains at every repaired position, including "
-            "all of its strings and techniques. Only the redundant standalone "
-            "copy is removed."
-        ),
-        user_value=(
-            "The editor and highway show one clear chord instruction instead "
-            "of stacking an extra gem on one of the chord strings."
-        ),
-    ),
-    RepairDefinition(
-        rule_code="chart.bend-points-out-of-order",
-        action_kind="reorder_bend_points",
-        source_kind="arrangement",
-        item_name="bend curve",
-        safety="safe_automatic",
-        title="Put bend points in chronological order",
-        description=(
-            "Stable-sort each affected bend curve by its existing relative "
-            "timestamps. Every bend point and stored property is preserved, "
-            "and points with equal timestamps keep their authored order."
-        ),
-        player_result=(
-            "FeedBack receives each bend curve in playback order directly from "
-            "the Feedpak instead of repairing its order temporarily while loading."
-        ),
-        user_value=(
-            "Bend animation becomes portable and predictable in FeedBack, the "
-            "editor, and other Feedpak tools without changing the authored curve."
-        ),
-        change_kind="reorder",
-    ),
-    RepairDefinition(
-        rule_code="lyrics.out-of-order",
-        action_kind="reorder_lyric_cues",
-        source_kind="lyrics",
-        item_name="lyric timeline",
-        safety="safe_automatic",
-        title="Put lyric cues in chronological order",
-        description=(
-            "Stable-sort the existing lyric cues by their start times. Every "
-            "cue, word, duration, and stored property is preserved, and cues "
-            "with equal start times keep their authored order."
-        ),
-        player_result=(
-            "FeedBack receives the same lyric cues in playback order, so the "
-            "lyric display no longer has to process a cue after a later one."
-        ),
-        user_value=(
-            "Lyrics advance predictably with the song without deleting, "
-            "rewriting, or retiming any authored text."
-        ),
-        change_kind="reorder",
-    ),
-    RepairDefinition(
-        rule_code="timeline.duplicate-beat",
-        action_kind="remove_exact_duplicate_beat_markers",
-        source_kind="timeline",
-        item_name="beat marker",
-        safety="safe_automatic",
-        title="Remove exact duplicate beat markers",
-        description=(
-            "Keep the first beat marker and remove only later copies with "
-            "identical time, measure, and every other stored property from the "
-            "active song timeline."
-        ),
-        player_result=(
-            "The same beat and measure grid remains, with one stored instruction "
-            "at each repaired position. Conflicting beat markers, if present, "
-            "remain visible for manual review."
-        ),
-        user_value=(
-            "FeedBack receives a clean rhythm grid without changing any authored "
-            "beat time or measure and without guessing between conflicting data."
-        ),
-    ),
-    RepairDefinition(
-        rule_code="timeline.beats-out-of-order",
-        action_kind="reorder_beat_markers",
-        source_kind="timeline",
-        item_name="beat timeline",
-        safety="safe_automatic",
-        title="Put beat markers in chronological order",
-        description=(
-            "Stable-sort the active song timeline's existing beat markers by "
-            "their stored times. Every marker and property is preserved, and "
-            "markers with equal times keep their authored relative order."
-        ),
-        player_result=(
-            "FeedBack receives the same beat and measure instructions in "
-            "chronological order, so rhythm-grid searches and measure tracking "
-            "no longer jump backward."
-        ),
-        user_value=(
-            "The highway gets a predictable rhythm grid without deleting, "
-            "retiming, or inventing any beat marker."
-        ),
-        change_kind="reorder",
-    ),
-    RepairDefinition(
-        rule_code="timeline.duplicate-section",
-        action_kind="remove_exact_duplicate_section_markers",
-        source_kind="timeline",
-        item_name="section marker",
-        safety="safe_automatic",
-        title="Remove exact duplicate section markers",
-        description=(
-            "Keep the first section marker and remove only later copies with "
-            "identical name, time, number, and every other stored property from "
-            "the active song timeline."
-        ),
-        player_result=(
-            "The same named song sections and boundaries remain, with one stored "
-            "instruction at each repaired position. Conflicting section markers, "
-            "if present, remain visible for manual review."
-        ),
-        user_value=(
-            "FeedBack receives clean section and navigation data without changing "
-            "any authored label or time and without guessing between conflicting data."
-        ),
-    ),
-    RepairDefinition(
-        rule_code="timeline.sections-out-of-order",
-        action_kind="reorder_section_markers",
-        source_kind="timeline",
-        item_name="section timeline",
-        safety="safe_automatic",
-        title="Put section markers in chronological order",
-        description=(
-            "Stable-sort the active song timeline's existing section markers "
-            "by their stored times. Every name, number, time, and additional "
-            "property is preserved, and equal-time markers keep their authored "
-            "relative order."
-        ),
-        player_result=(
-            "FeedBack receives the same section boundaries in playback order, "
-            "so section labels and navigation no longer jump backward."
-        ),
-        user_value=(
-            "Song navigation and structure follow playback without deleting, "
-            "renaming, or retiming any section marker."
-        ),
-        change_kind="reorder",
-    ),
-    RepairDefinition(
-        rule_code="drums.duplicate-hit",
-        action_kind="remove_exact_duplicate_drum_hits",
-        source_kind="drum_tab",
-        item_name="drum hit",
-        safety="safe_automatic",
-        title="Remove exact duplicate drum hits",
-        description=(
-            "Keep the first hit and remove only copies with identical stored "
-            "values and properties from the same drum-hit list."
-        ),
-        player_result=(
-            "The song keeps one drum hit at every repaired position, with the "
-            "same timing and authored properties."
-        ),
-        user_value=(
-            "The drum highway has one unambiguous hit to display and process "
-            "instead of redundant copies."
-        ),
-    ),
-)
 
 _REPAIR_BY_RULE = {
     definition.rule_code: definition for definition in _REPAIR_DEFINITIONS
@@ -1024,86 +247,6 @@ _CONDITIONAL_STRUCTURAL_RULES = frozenset({
     "tones.duplicate-change",
     "tones.changes-out-of-order",
 })
-
-_MEDIA_REPAIR_DEFINITIONS = (
-    RepairDefinition(
-        rule_code="media.preview-missing",
-        action_kind="create_song_preview",
-        source_kind="full_mix",
-        item_name="audio preview",
-        safety="review_required",
-        title="Create a song preview",
-        description=(
-            "Generate a 30-second Ogg excerpt from the full song mix and add it "
-            "to the existing Feedpak. Manual review and automatic creation use "
-            "the same selection standard."
-        ),
-        player_result=(
-            "Library browsing can play a short representative excerpt for this song."
-        ),
-        user_value=(
-            "The song becomes easier to recognize while browsing without changing gameplay audio."
-        ),
-        change_kind="replace_media",
-    ),
-    RepairDefinition(
-        rule_code="media.preview-too-short",
-        action_kind="replace_song_preview",
-        source_kind="full_mix",
-        item_name="audio preview",
-        safety="review_required",
-        title="Create a standard song preview",
-        description=(
-            "Generate a new 30-second Ogg excerpt from the full song mix. Manual "
-            "review and automatic creation use the same selection standard."
-        ),
-        player_result=(
-            "Library browsing plays a longer representative excerpt instead of an unusually short preview."
-        ),
-        user_value=(
-            "The preview gives the player a more useful sense of the song while remaining compact."
-        ),
-        change_kind="replace_media",
-    ),
-    RepairDefinition(
-        rule_code="media.preview-too-long",
-        action_kind="replace_song_preview",
-        source_kind="full_mix",
-        item_name="audio preview",
-        safety="review_required",
-        title="Create a short song preview",
-        description=(
-            "Generate a new 30-second Ogg excerpt from the full song mix. Manual "
-            "review and automatic creation use the same selection standard."
-        ),
-        player_result=(
-            "Library browsing plays a compact representative excerpt instead of an unusually long preview."
-        ),
-        user_value=(
-            "The Feedpak uses less unnecessary preview storage while preserving a useful sample."
-        ),
-        change_kind="replace_media",
-    ),
-    RepairDefinition(
-        rule_code="media.preview-regenerate",
-        action_kind="regenerate_song_preview",
-        source_kind="full_mix",
-        item_name="audio preview",
-        safety="review_required",
-        title="Create a different song preview",
-        description=(
-            "Generate a new 30-second Ogg excerpt from the full song mix even "
-            "when the current preview already passes the duration policy."
-        ),
-        player_result=(
-            "Library browsing plays the newly selected excerpt instead of the current preview."
-        ),
-        user_value=(
-            "A technically valid but unhelpful preview can be replaced without editing the Feedpak manually."
-        ),
-        change_kind="replace_media",
-    ),
-)
 
 _ALL_REPAIR_DEFINITIONS = _REPAIR_DEFINITIONS + _MEDIA_REPAIR_DEFINITIONS
 
@@ -1312,6 +455,60 @@ class RepairService:
             if isinstance(item, str)
         )
         self._lock = threading.Lock()
+        self._recovery_policy = _recovery.RecoveryPolicy(
+            backup_size=self._backup_size,
+            error_type=RepairPlanningError,
+            lock=self._lock,
+            prepare_finalize=self._prepare_finalize_backup,
+            prepare_restore=self._prepare_restore,
+            read_history=self._read_history,
+            read_transactions=self._read_transactions,
+            recover_legacy_receipts=self._recover_legacy_receipts,
+            resolve_package=self._resolve_package,
+            valid_backup_id=lambda value: bool(_BACKUP_ID_RE.fullmatch(value)),
+        )
+        self._transaction_journal = _transaction.TransactionJournal(
+            atomic_write=self._atomic_write,
+            backup_id_matches=lambda value: bool(_BACKUP_ID_RE.fullmatch(value)),
+            candidate=self._candidate,
+            capture_package_token=self._capture_package_token,
+            commit=self._commit,
+            config_dir=self._config_dir,
+            delete_backup=self._delete_backup,
+            error_type=RepairPlanningError,
+            file_handling=self._file_handling,
+            finish_transaction=self._finish_transaction,
+            log=self._log,
+            max_manifest_bytes=MAX_REPAIR_MANIFEST_BYTES,
+            max_member_bytes=MAX_REPAIR_MEMBER_BYTES,
+            max_pending=MAX_PENDING_TRANSACTIONS,
+            member_exists=self._member_exists,
+            public_recovery=self._recovery_policy.public_required,
+            read_backup=self._read_backup,
+            read_history=self._read_history,
+            read_member=self._read_member,
+            resolve_package=self._resolve_package,
+            schema=TRANSACTION_SCHEMA,
+            sync_directory=self._sync_directory,
+            update_transaction=self._update_transaction,
+            validate_feedpak=self._validate_feedpak,
+            write_history=self._write_history,
+        )
+        try:
+            self._workspace_reconciliation = _workspace.reconcile_stale_workspaces(
+                self._config_dir
+            )
+        except Exception as exc:
+            self._workspace_reconciliation = {
+                "pending": 0,
+                "removed": 0,
+                "unreadable": 1,
+                "capped": False,
+            }
+            self._log.warning(
+                "Library Doctor could not reconcile old repair workspaces: %s",
+                type(exc).__name__,
+            )
         self._reconcile_transactions()
 
     def preview(
@@ -1540,6 +737,7 @@ class RepairService:
         transaction_started = time.monotonic()
         with self._lock:
             _root, package_path, package_name = self._resolve_package(package)
+            self._assert_package_mutation_allowed(package_name, operation="repair")
             pending = self._pending_recovery_for_package(package_name)
             if pending is not None:
                 raise RepairPlanningError(
@@ -1613,40 +811,26 @@ class RepairService:
         return result
 
     def _pending_recovery_for_package(self, package_name: str) -> dict | None:
-        """Return the newest unresolved recovery checkpoint for one package."""
-        history = self._read_history()
-        known_backup_ids = {
-            item.get("backup_id")
-            for item in history
-            if isinstance(item, dict) and isinstance(item.get("backup_id"), str)
-        }
-        history.extend(
-            item
-            for item in self._recover_legacy_receipts()
-            if item.get("backup_id") not in known_backup_ids
+        return self._recovery_policy.pending_repair(package_name)
+
+    def recovery_state(self, package: str) -> dict:
+        """Return public, path-free quarantine state for one package."""
+        return self._recovery_policy.state(package)
+
+    def recovery_states(self, packages: Iterable[str]) -> dict[str, dict]:
+        """Return unresolved recovery states for a bounded set of public IDs."""
+        return self._recovery_policy.states(packages)
+
+    def _assert_package_mutation_allowed(
+        self,
+        package_name: str,
+        *,
+        operation: str,
+        backup_id: str | None = None,
+    ) -> dict | None:
+        return self._recovery_policy.assert_mutation_allowed(
+            package_name, operation=operation, backup_id=backup_id
         )
-        history.sort(key=lambda item: float(item.get("completed_at") or 0))
-        for item in reversed(history):
-            if item.get("package") != package_name:
-                continue
-            if item.get("action") != "repair" or item.get("outcome") != "success":
-                continue
-            backup_id = item.get("backup_id")
-            if (
-                not isinstance(backup_id, str)
-                or not _BACKUP_ID_RE.fullmatch(backup_id)
-                or self._backup_size(backup_id) is None
-            ):
-                continue
-            return {
-                "backup_id": backup_id,
-                "undo_available": True,
-                "change_count": int(item.get("change_count") or 0),
-                "change_kind": str(item.get("change_kind") or "repair"),
-                "title": str(item.get("title") or package_name),
-                "artist": str(item.get("artist") or ""),
-            }
-        return None
 
     def apply(
         self,
@@ -1668,6 +852,9 @@ class RepairService:
             _root, package_path, package_name = self._resolve_package(package)
             media_repair = self._is_preview_repair(rule_code)
             if media_repair:
+                self._assert_package_mutation_allowed(
+                    package_name, operation="repair"
+                )
                 internal = self._preview_repair.claim(
                     package_path,
                     package_name,
@@ -1678,6 +865,9 @@ class RepairService:
                     ),
                 )
             else:
+                self._assert_package_mutation_allowed(
+                    package_name, operation="repair"
+                )
                 internal = self._plan_package(package_path, package_name, rule_code)
                 if internal["plan_id"] != plan_id:
                     raise RepairPlanningError(
@@ -1845,6 +1035,7 @@ class RepairService:
         transaction_started = time.monotonic()
         with self._lock:
             _root, package_path, package_name = self._resolve_package(package)
+            self._assert_package_mutation_allowed(package_name, operation="repair")
             use_verified_report = bool(
                 package_path.is_file()
                 and self._can_reuse_verified_before_report(
@@ -1926,6 +1117,7 @@ class RepairService:
         transaction_started = time.monotonic()
         with self._lock:
             _root, package_path, package_name = self._resolve_package(package)
+            self._assert_package_mutation_allowed(package_name, operation="repair")
             internal = self._plan_all_package(
                 package_path,
                 package_name,
@@ -1973,6 +1165,7 @@ class RepairService:
         transaction_started = time.monotonic()
         with self._lock:
             _root, package_path, package_name = self._resolve_package(package)
+            self._assert_package_mutation_allowed(package_name, operation="repair")
             internal = self._plan_all_package(
                 package_path,
                 package_name,
@@ -2240,7 +1433,7 @@ class RepairService:
             })
             if not retain_recovery:
                 file_handling["summary"] = (
-                    "Library Doctor created and validated a complete candidate before replacing the Feedpak at the same path. "
+                    "Library Doctor checked the complete repaired song before replacing the Feedpak at the same location. "
                     "Its temporary recovery copy was then removed automatically, so no duplicate song or pending preview backup remains."
                     if backup_removed else
                     "The validated preview repair completed at the same Feedpak path, but Library Doctor could not remove its temporary recovery copy automatically. "
@@ -2514,6 +1707,12 @@ class RepairService:
         are preserved.
         """
         with self._lock:
+            _root, _package_path, package_name = self._resolve_package(package)
+            pending_transaction = self._assert_package_mutation_allowed(
+                package_name,
+                operation="restore",
+                backup_id=backup_id,
+            )
             prepared = self._prepare_restore(
                 package,
                 backup_id,
@@ -2556,6 +1755,8 @@ class RepairService:
                     backup_id,
                     exc,
                 )
+            if pending_transaction is not None:
+                self._finish_transaction(pending_transaction)
 
             result = {
                 **self._public_restore_plan(prepared),
@@ -2652,8 +1853,16 @@ class RepairService:
         discarding the only known original after an unrelated edit.
         """
         with self._lock:
+            _root, _package_path, package_name = self._resolve_package(package)
+            pending_transaction = self._assert_package_mutation_allowed(
+                package_name,
+                operation="finalize",
+                backup_id=backup_id,
+            )
             prepared = self._prepare_finalize_backup(package, backup_id)
             recovery_bytes_freed = self._delete_backup(backup_id)
+            if pending_transaction is not None:
+                self._finish_transaction(pending_transaction)
             summary = prepared["summary"]
             package_state = prepared["package_state"]
             result = {
@@ -2700,6 +1909,12 @@ class RepairService:
     def preview_finalize_backup(self, package: str, backup_id: str) -> dict:
         """Verify one recovery copy and report what finalization would remove."""
         with self._lock:
+            _root, _package_path, package_name = self._resolve_package(package)
+            self._assert_package_mutation_allowed(
+                package_name,
+                operation="finalize",
+                backup_id=backup_id,
+            )
             prepared = self._prepare_finalize_backup(package, backup_id)
             return {
                 key: value
@@ -2784,6 +1999,12 @@ class RepairService:
     ) -> dict:
         """Verify that one retained recovery backup can be restored now."""
         with self._lock:
+            _root, _package_path, package_name = self._resolve_package(package)
+            self._assert_package_mutation_allowed(
+                package_name,
+                operation="restore",
+                backup_id=backup_id,
+            )
             prepared = self._prepare_restore(
                 package,
                 backup_id,
@@ -4620,9 +3841,9 @@ class RepairService:
             "backup_retained": backup_id is not None,
             "backup_contents": "original_changed_song_data_files",
             "summary": (
-                "Library Doctor builds and validates a complete candidate first. Only then does it replace "
-                "the existing Feedpak at the same path. It does not add a second playable song to the library. "
-                "The original changed package files are kept in private recovery storage."
+                "Library Doctor checks the complete repaired song first. Only then does it replace "
+                "the existing Feedpak at the same location. It does not add a second playable song to the library. "
+                "The original changed song data is saved privately for Undo."
             ),
         }
 
@@ -4736,16 +3957,16 @@ class RepairService:
 
     def _candidate(self, package_path: Path, replacements: dict[str, bytes]):
         try:
-            temporary_root = Path(tempfile.mkdtemp(
-                prefix=".library-doctor-repair-", dir=package_path.parent
-            ))
-        except OSError as exc:
+            workspace = _workspace.create_candidate_workspace(
+                config_dir=self._config_dir,
+                package_path=package_path,
+            )
+        except _workspace.WorkspaceError as exc:
             raise RepairPlanningError(
                 "candidate_failed", "A repaired package candidate could not be created."
             ) from exc
+        candidate = workspace.candidate
         if package_path.is_dir():
-            candidate = temporary_root / package_path.name
-
             def link_or_copy(source, destination):
                 try:
                     os.link(source, destination)
@@ -4766,15 +3987,14 @@ class RepairService:
                     package_path, candidate, replacements
                 )
             except RepairPlanningError:
-                shutil.rmtree(temporary_root, ignore_errors=True)
+                workspace.cleanup()
                 raise
             except (OSError, shutil.Error) as exc:
-                shutil.rmtree(temporary_root, ignore_errors=True)
+                workspace.cleanup()
                 raise RepairPlanningError(
                     "candidate_failed", "A repaired package candidate could not be created."
                 ) from exc
         else:
-            candidate = temporary_root / package_path.name
             try:
                 with zipfile.ZipFile(package_path, "r") as source:
                     infos = source.infolist()
@@ -4806,16 +4026,16 @@ class RepairService:
                 shutil.copystat(package_path, candidate)
                 self._verify_archive_candidate(package_path, candidate, replacements)
             except RepairPlanningError:
-                shutil.rmtree(temporary_root, ignore_errors=True)
+                workspace.cleanup()
                 raise
             except (OSError, RuntimeError, zipfile.BadZipFile, zipfile.LargeZipFile) as exc:
-                shutil.rmtree(temporary_root, ignore_errors=True)
+                workspace.cleanup()
                 raise RepairPlanningError(
                     "candidate_failed", "A repaired package candidate could not be created."
                 ) from exc
 
         def cleanup():
-            shutil.rmtree(temporary_root, ignore_errors=True)
+            workspace.cleanup()
 
         return candidate, cleanup
 
@@ -5303,7 +4523,7 @@ class RepairService:
 
     @property
     def _transaction_dir(self) -> Path:
-        return self._config_dir / "library_doctor" / "repair_transactions"
+        return self._transaction_journal.directory
 
     def _begin_transaction(
         self,
@@ -5347,31 +4567,10 @@ class RepairService:
         self._write_transaction(transaction)
 
     def _write_transaction(self, transaction: dict) -> None:
-        backup_id = transaction.get("transaction_id")
-        if not isinstance(backup_id, str) or not _BACKUP_ID_RE.fullmatch(backup_id):
-            raise OSError("invalid repair transaction id")
-        path = self._transaction_dir / f"{backup_id}.json"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        self._atomic_write(
-            path,
-            json.dumps(transaction, ensure_ascii=False, indent=2).encode("utf-8"),
-        )
-        self._sync_directory(path.parent)
+        self._transaction_journal.write(transaction)
 
     def _finish_transaction(self, transaction: dict) -> None:
-        backup_id = transaction.get("transaction_id")
-        if not isinstance(backup_id, str) or not _BACKUP_ID_RE.fullmatch(backup_id):
-            return
-        path = self._transaction_dir / f"{backup_id}.json"
-        try:
-            path.unlink(missing_ok=True)
-            self._sync_directory(path.parent)
-        except OSError as exc:
-            self._log.warning(
-                "Library Doctor could not clear completed repair transaction %s: %s",
-                backup_id,
-                exc,
-            )
+        self._transaction_journal.finish(transaction)
 
     @staticmethod
     def _sync_directory(path: Path) -> None:
@@ -5388,170 +4587,13 @@ class RepairService:
                 os.close(descriptor)
 
     def _read_transactions(self) -> list[dict]:
-        try:
-            paths = sorted(self._transaction_dir.glob("*.json"))[
-                -MAX_PENDING_TRANSACTIONS:
-            ]
-        except OSError:
-            return []
-        transactions = []
-        for path in paths:
-            if not _BACKUP_ID_RE.fullmatch(path.stem):
-                continue
-            try:
-                raw = path.read_bytes()
-                if len(raw) > MAX_REPAIR_MANIFEST_BYTES:
-                    continue
-                item = json.loads(raw.decode("utf-8"))
-                if (
-                    not isinstance(item, dict)
-                    or item.get("schema") != TRANSACTION_SCHEMA
-                    or item.get("transaction_id") != path.stem
-                    or item.get("backup_id") != path.stem
-                    or item.get("operation") not in {"repair", "restore"}
-                    or item.get("target_state") not in {"repaired", "original"}
-                    or not isinstance(item.get("package"), str)
-                ):
-                    continue
-                transactions.append(item)
-            except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-                continue
-        return transactions
-
-    @staticmethod
-    def _matches_backup_state(
-        present: bool,
-        current_hash: str | None,
-        entry: dict,
-        state: str,
-    ) -> bool:
-        prefix = "repaired" if state == "repaired" else "original"
-        return (
-            present == entry[f"{prefix}_present"]
-            and current_hash == entry[f"{prefix}_sha256"]
-        )
+        return self._transaction_journal.read()
 
     def _reconcile_transactions(self) -> None:
-        """Resolve interrupted directory writes before accepting new repairs."""
-        for transaction in self._read_transactions():
-            try:
-                self._reconcile_transaction(transaction)
-            except Exception as exc:
-                self._log.error(
-                    "Library Doctor could not reconcile interrupted transaction %s: %s",
-                    transaction.get("transaction_id"),
-                    exc,
-                )
-                try:
-                    self._update_transaction(transaction, phase="recovery_required")
-                except OSError:
-                    pass
+        self._transaction_journal.reconcile_all()
 
     def _reconcile_transaction(self, transaction: dict) -> None:
-        package = transaction["package"]
-        backup_id = transaction["backup_id"]
-        for receipt in self._read_history():
-            if receipt.get("backup_id") != backup_id:
-                continue
-            completed_repair = (
-                transaction["operation"] == "repair"
-                and receipt.get("action") == "repair"
-                and receipt.get("outcome") == "success"
-            )
-            completed_restore = (
-                transaction["operation"] == "restore"
-                and receipt.get("action") == "restore"
-                and receipt.get("outcome") == "restored"
-            )
-            if completed_repair or completed_restore:
-                self._finish_transaction(transaction)
-                return
-        _root, package_path, package_name = self._resolve_package(package)
-        if not package_path.is_dir():
-            raise RepairPlanningError(
-                "recovery_required", "The interrupted package is no longer a directory."
-            )
-        metadata, originals = self._read_backup(backup_id, package_name)
-        member_states = []
-        current = {}
-        for entry in metadata["members"]:
-            member_path = entry["member_path"]
-            present = self._member_exists(package_path, member_path)
-            raw = (
-                self._read_member(package_path, member_path, MAX_REPAIR_MEMBER_BYTES)
-                if present else None
-            )
-            current_hash = hashlib.sha256(raw).hexdigest() if raw is not None else None
-            states = {
-                state
-                for state in ("original", "repaired")
-                if self._matches_backup_state(present, current_hash, entry, state)
-            }
-            if not states:
-                self._update_transaction(transaction, phase="recovery_required")
-                return
-            member_states.append(states)
-            current[member_path] = raw
-
-        target_state = transaction["target_state"]
-        source_state = "original" if target_state == "repaired" else "repaired"
-        if all(target_state in states for states in member_states):
-            if not self._record_recovered_transaction(transaction, metadata, committed=True):
-                return
-            if transaction["operation"] == "restore":
-                try:
-                    self._delete_backup(backup_id)
-                except RepairPlanningError as exc:
-                    self._log.warning(
-                        "Library Doctor completed interrupted Undo but could not remove backup %s: %s",
-                        backup_id,
-                        exc,
-                    )
-            self._finish_transaction(transaction)
-            return
-
-        if all(source_state in states for states in member_states):
-            if transaction["operation"] == "repair":
-                try:
-                    self._delete_backup(backup_id)
-                except RepairPlanningError as exc:
-                    self._log.warning(
-                        "Library Doctor found an unchanged interrupted repair but could not remove backup %s: %s",
-                        backup_id,
-                        exc,
-                    )
-            self._finish_transaction(transaction)
-            return
-
-        # A process died between member commits. Restoring originals is safe for
-        # an interrupted repair and completes the requested target for Undo.
-        candidate, cleanup = self._candidate(package_path, originals)
-        try:
-            self._validate_feedpak(candidate, package_name, deep_audio=False)
-            source_token = self._capture_package_token(package_path)
-            self._commit(
-                package_name,
-                package_path,
-                candidate,
-                originals,
-                current,
-                source_token=source_token,
-                transaction=None,
-                operation=transaction["operation"],
-            )
-        finally:
-            cleanup()
-        if not self._record_recovered_transaction(transaction, metadata, committed=False):
-            return
-        try:
-            self._delete_backup(backup_id)
-        except RepairPlanningError as exc:
-            self._log.warning(
-                "Library Doctor recovered interrupted transaction %s but could not remove backup: %s",
-                backup_id,
-                exc,
-            )
-        self._finish_transaction(transaction)
+        self._transaction_journal.reconcile(transaction)
 
     def _record_recovered_transaction(
         self,
@@ -5560,106 +4602,14 @@ class RepairService:
         *,
         committed: bool,
     ) -> bool:
-        history = self._read_history()
-        backup_id = transaction["backup_id"]
-        summary = metadata.get("summary")
-        if not isinstance(summary, dict):
-            summary = {}
-        operation = transaction["operation"]
-        repair_committed = operation == "repair" and committed
-        expected_action = "repair" if repair_committed else "restore"
-        expected_outcome = "success" if repair_committed else "restored"
-        if any(
-            item.get("backup_id") == backup_id
-            and item.get("action") == expected_action
-            and item.get("outcome") == expected_outcome
-            for item in history
-        ):
-            return True
-        item = {
-            "id": f"recovered-{backup_id}",
-            "action": expected_action,
-            "outcome": expected_outcome,
-            "completed_at": time.time(),
-            "package": transaction["package"],
-            "title": summary.get("title") or transaction["package"],
-            "artist": summary.get("artist") or "",
-            "rule_code": metadata.get("rule_code"),
-            "rule_codes": metadata.get("rule_codes", []),
-            "repair_summaries": summary.get("repair_summaries", []),
-            **(
-                {
-                    key: summary.get(key)
-                    for key in (
-                        "selected_count",
-                        "changing_count",
-                        "skipped_count",
-                        "blocked_count",
-                        "unresolved_count",
-                        "remaining_review_count",
-                        "decision_counts",
-                    )
-                }
-                if summary.get("change_kind") == "reviewed_decisions"
-                else {}
-            ),
-            "backup_id": backup_id,
-            "change_kind": summary.get("change_kind", "repair"),
-            "change_count": int(summary.get("change_count", 0) or 0),
-            "removed_count": int(summary.get("removed_count", 0) or 0),
-            "item_name": summary.get("item_name", "item"),
-            "player_result": summary.get("player_result", ""),
-            "user_value": summary.get("user_value", ""),
-            "recovered_transaction": True,
-            "recovery_summary": (
-                "Library Doctor verified and completed a repair that had reached disk before the app stopped."
-                if repair_committed else
-                "Library Doctor restored the verified original files after an interrupted package transaction."
-            ),
-            "file_handling": self._file_handling(backup_id),
-        }
-        history.append(item)
-        return self._write_history(history)
+        return self._transaction_journal.record_recovered(
+            transaction,
+            metadata,
+            committed=committed,
+        )
 
     def _pending_transaction_receipts(self) -> list[dict]:
-        receipts = []
-        for transaction in self._read_transactions():
-            if transaction.get("phase") != "recovery_required":
-                continue
-            backup_id = transaction["backup_id"]
-            summary = {}
-            try:
-                metadata, _originals = self._read_backup(
-                    backup_id, transaction["package"]
-                )
-                candidate_summary = metadata.get("summary")
-                if isinstance(candidate_summary, dict):
-                    summary = candidate_summary
-            except RepairPlanningError:
-                pass
-            receipts.append({
-                "id": f"recovery-required-{backup_id}",
-                "action": "recovery",
-                "outcome": "failure",
-                "completed_at": float(
-                    transaction.get("updated_at")
-                    or transaction.get("created_at")
-                    or time.time()
-                ),
-                "package": transaction["package"],
-                "title": summary.get("title") or transaction["package"],
-                "artist": summary.get("artist") or "",
-                "backup_id": backup_id,
-                "file_state": "recovery_required",
-                "message": (
-                    "Library Doctor found an external change while reconciling an interrupted directory transaction. "
-                    "It preserved both the current package and the verified recovery backup for manual review."
-                ),
-                "undo_available": False,
-                "recovered_transaction": False,
-                "file_handling": self._file_handling(backup_id),
-            })
-        return receipts
+        return self._transaction_journal.pending_receipts()
 
     @staticmethod
     def _request_metadata(
