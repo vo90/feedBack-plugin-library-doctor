@@ -120,7 +120,7 @@ export function createStatusView({
       el.scanDetails.open = true;
       el.moreFilters.open = true;
     } else if (viewChanged) {
-      el.scanOptions.open = view === 'first_run';
+      el.scanOptions.open = false;
       if (view !== 'complete') el.scanDetails.open = false;
       el.moreFilters.open = false;
     }

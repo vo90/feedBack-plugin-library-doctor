@@ -551,6 +551,28 @@ def test_scan_discovers_zip_and_directory_packages(scanner_module, tmp_path):
     assert {item[1] for item in seen} == {"Artist/one.feedpak", "two.sloppak"}
 
 
+@pytest.mark.parametrize(
+    "workspace_name",
+    [".library-doctor-work-current", ".library-doctor-repair-legacy"],
+)
+def test_discovery_never_descends_into_repair_workspaces(
+    scanner_module, tmp_path, workspace_name,
+):
+    library = tmp_path / "library"
+    library.mkdir()
+    (library / "real.feedpak").write_bytes(b"real")
+    workspace = library / workspace_name
+    workspace.mkdir()
+    (workspace / "phantom.feedpak").write_bytes(b"temporary")
+    nested = workspace / "nested.sloppak"
+    nested.mkdir()
+
+    packages, errors = scanner_module.LibraryScanner._discover(library)
+
+    assert errors == []
+    assert packages == [library / "real.feedpak"]
+
+
 def test_old_rule_scan_stays_visible_but_is_not_current_for_repairs(
     scanner_module, tmp_path,
 ):

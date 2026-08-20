@@ -271,7 +271,7 @@ test('reviewed repair groups related findings and has no default decision', asyn
   remove.click();
   assert.equal(app.document.querySelector('.lh-reviewed-footer .lh-button-primary').disabled, false);
   buttonByText(app.document.querySelector('.lh-reviewed-footer'), 'Next note').click();
-  assert.match(app.document.querySelector('.lh-reviewed-candidate h5').textContent, /Candidate 2 of 2/);
+  assert.match(app.document.querySelector('.lh-reviewed-candidate h5').textContent, /Issue 2 of 2/);
   assert.equal(app.document.querySelectorAll('.lh-reviewed-choice input:checked').length, 0);
   assert.match(app.document.querySelector('.lh-reviewed-footer').textContent, /1 selected change/);
 });
@@ -391,7 +391,7 @@ test('text-only exact previews recover their trigger and invalidate on review-st
   buttonByText(app.document.querySelector('.lh-reviewed-footer'), 'Next note').click();
   assert.equal(app.document.querySelector('.lh-reviewed-preview'), null);
   await waitFor(
-    () => app.document.querySelector('.lh-reviewed-candidate h5')?.textContent.includes('Candidate 2 of 2'),
+    () => app.document.querySelector('.lh-reviewed-candidate h5')?.textContent.includes('Issue 2 of 2'),
     'second candidate after invalidating preview',
   );
 
@@ -466,7 +466,7 @@ test('text-only pagination invalidates an exact preview before loading another p
   buttonByText(app.document.querySelector('.lh-reviewed-footer'), 'Next page').click();
   assert.equal(app.document.querySelector('.lh-reviewed-preview'), null);
   await waitFor(
-    () => app.document.querySelector('.lh-reviewed-candidate h5')?.textContent.includes('Candidate 2 of 2'),
+    () => app.document.querySelector('.lh-reviewed-candidate h5')?.textContent.includes('Issue 2 of 2'),
     'second page after preview invalidation',
   );
 });
@@ -491,7 +491,7 @@ test('a late text-only preview response cannot repaint after candidate navigatio
 
   buttonByText(app.document.querySelector('.lh-reviewed-footer'), 'Next note').click();
   await waitFor(
-    () => app.document.querySelector('.lh-reviewed-candidate h5')?.textContent.includes('Candidate 2 of 2'),
+    () => app.document.querySelector('.lh-reviewed-candidate h5')?.textContent.includes('Issue 2 of 2'),
     'navigation while preview is pending',
   );
   delayedPreview.resolve(jsonResponse({
@@ -590,7 +590,7 @@ test('reviewed pages retain decisions and expose blocked candidates without gues
 
   buttonByText(app.document.querySelector('.lh-reviewed-footer'), 'Next page').click();
   await waitFor(
-    () => app.document.querySelector('.lh-reviewed-candidate h5')?.textContent.includes('Candidate 2 of 2'),
+    () => app.document.querySelector('.lh-reviewed-candidate h5')?.textContent.includes('Issue 2 of 2'),
     'second reviewed page',
   );
   await waitFor(
@@ -605,7 +605,7 @@ test('reviewed pages retain decisions and expose blocked candidates without gues
 
   buttonByText(app.document.querySelector('.lh-reviewed-footer'), 'Previous page').click();
   await waitFor(
-    () => app.document.querySelector('.lh-reviewed-candidate h5')?.textContent.includes('Candidate 1 of 2'),
+    () => app.document.querySelector('.lh-reviewed-candidate h5')?.textContent.includes('Issue 1 of 2'),
     'first reviewed page again',
   );
   assert.equal(app.document.querySelector('input[value="remove_hopo"]').checked, true);
@@ -654,7 +654,7 @@ test('reviewed choices come only from outcome checks and skipped issues never be
   buttonByText(app.document.querySelector('.lh-reviewed-candidate'), 'Skip for now').click();
 
   await waitFor(
-    () => app.document.querySelector('.lh-reviewed-candidate h5')?.textContent.includes('Candidate 2 of 2')
+    () => app.document.querySelector('.lh-reviewed-candidate h5')?.textContent.includes('Issue 2 of 2')
       && app.document.querySelector('input[value="remove_hopo"]'),
     'server-filtered second issue',
   );
@@ -666,12 +666,12 @@ test('reviewed choices come only from outcome checks and skipped issues never be
 
   buttonByText(app.document.querySelector('.lh-reviewed-footer'), 'Review skipped issues').click();
   await waitFor(
-    () => app.document.querySelector('.lh-reviewed-candidate h5')?.textContent.includes('Candidate 1 of 2'),
+    () => app.document.querySelector('.lh-reviewed-candidate h5')?.textContent.includes('Issue 1 of 2'),
     'revisit skipped issue',
   );
   buttonByText(app.document.querySelector('.lh-reviewed-candidate'), 'Skip for now').click();
   await waitFor(
-    () => app.document.querySelector('.lh-reviewed-candidate h5')?.textContent.includes('Candidate 2 of 2'),
+    () => app.document.querySelector('.lh-reviewed-candidate h5')?.textContent.includes('Issue 2 of 2'),
     'return to selected issue after a second skip',
   );
   buttonByText(app.document.querySelector('.lh-reviewed-footer'), 'Preview selected changes').click();
@@ -745,7 +745,7 @@ test('preserved Player Review choices block Apply until failures are skipped', a
     ).click();
     buttonByText(
       app.document.querySelector('#lh-player-review-overlay'),
-      'Accept & Next issue',
+      'Keep choice & next',
     ).click();
   }
   await waitFor(() => /2 accepted changes/.test(
@@ -773,7 +773,7 @@ test('preserved Player Review choices block Apply until failures are skipped', a
   }, 'partial preserved approval');
   let apply = buttonByText(
     app.document.querySelector('#lh-player-review-overlay'),
-    'Apply accepted changes',
+    'Review 1 selected change',
   );
   assert.equal(apply.disabled, true);
   apply.disabled = false;
@@ -789,7 +789,7 @@ test('preserved Player Review choices block Apply until failures are skipped', a
   ), 'failed approval remains blocking');
   apply = buttonByText(
     app.document.querySelector('#lh-player-review-overlay'),
-    'Apply accepted changes',
+    'Review 1 selected change',
   );
   assert.equal(apply.disabled, true);
   buttonByText(app.document.querySelector('#lh-player-review-overlay'), 'Next issue').click();
@@ -802,13 +802,13 @@ test('preserved Player Review choices block Apply until failures are skipped', a
   buttonByText(app.document.querySelector('#lh-player-review-overlay'), 'Skip for now').click();
   await waitFor(() => {
     const overlay = app.document.querySelector('#lh-player-review-overlay');
-    const button = buttonByText(overlay, 'Apply accepted changes');
+    const button = buttonByText(overlay, 'Review 1 selected change');
     return button && !button.disabled
       && !/preserved choice/.test(overlay.querySelector('.lh-player-review-summary')?.textContent || '');
   }, 'Skip clears the failed complete-group gate');
   buttonByText(
     app.document.querySelector('#lh-player-review-overlay'),
-    'Apply accepted changes',
+    'Review 1 selected change',
   ).click();
   await waitFor(() => previewRequests.length === 1, 'approved remainder preview');
   assert.deepEqual(previewRequests[0].decisions, [{
@@ -941,7 +941,7 @@ test('Player Review opens the normal player and previews an explicit HO/PO choic
     /previewed on the Highway/,
   );
 
-  buttonByText(app.document.querySelector('#lh-player-review-overlay'), 'Accept & Next issue').click();
+  buttonByText(app.document.querySelector('#lh-player-review-overlay'), 'Keep choice & next').click();
   await waitFor(
     () => app.document.querySelector('.lh-player-review-count')?.textContent.includes('Issue 2'),
     'next Player Review issue',
@@ -1083,7 +1083,7 @@ test('Player Review composes the issue highlight with the incumbent provider and
   );
 });
 
-test('affected-song difficulty filter updates cached counters independently of the scan default', async (t) => {
+test('affected-song difficulty filter updates cached counters and remembers the review view', async (t) => {
   const app = await launchLibraryDoctor({
     status,
     results: { total: 1, items: [result] },
@@ -1132,9 +1132,8 @@ test('affected-song difficulty filter updates cached counters independently of t
   const scanRequestsBefore = app.requests.filter(({ key }) => key.endsWith('/scan')).length;
   const resultRequestsBefore = app.requests.filter(({ key }) => key.includes('/results?')).length;
   const listSelect = app.document.querySelector('#lh-review-list-difficulty-scope');
-  const defaultSelect = app.document.querySelector('#lh-review-difficulty-scope');
   assert.equal(listSelect.value, 'full_only');
-  assert.equal(defaultSelect.value, 'full_only');
+  assert.equal(app.document.querySelector('#lh-review-difficulty-scope'), null);
   assert.equal(app.document.querySelector('[data-summary="reviews"]').textContent, '7');
   listSelect.value = 'all_authored';
   listSelect.dispatchEvent(new app.window.Event('change', { bubbles: true }));
@@ -1154,7 +1153,7 @@ test('affected-song difficulty filter updates cached counters independently of t
     app.requests.filter(({ key }) => key.endsWith('/scan')).length,
     scanRequestsBefore,
   );
-  assert.equal(app.window.localStorage.getItem('library_doctor.review.difficulty_scope'), null);
+  assert.equal(app.window.localStorage.getItem('library_doctor.review.difficulty_scope'), 'all_authored');
 
   await waitFor(
     () => app.document.querySelector('button[data-rule="review.lower-only"]'),
@@ -1174,15 +1173,9 @@ test('affected-song difficulty filter updates cached counters independently of t
   const latestFullResultRequest = app.requests.filter(({ key }) => key.includes('/results?')).at(-1).key;
   assert.match(latestFullResultRequest, /review_difficulty_scope=full_only/);
   assert.doesNotMatch(latestFullResultRequest, /rule=review.lower-only/);
-  defaultSelect.value = 'all_authored';
-  defaultSelect.dispatchEvent(new app.window.Event('change', { bubbles: true }));
-  await new Promise((resolve) => setTimeout(resolve, 10));
-  assert.equal(app.window.localStorage.getItem('library_doctor.review.difficulty_scope'), 'all_authored');
+  assert.equal(app.window.localStorage.getItem('library_doctor.review.difficulty_scope'), 'full_only');
   assert.equal(listSelect.value, 'full_only');
-  assert.equal(
-    app.requests.filter(({ key }) => key.includes('/results?')).length,
-    resultRequestsAfterListToggle,
-  );
+  assert.equal(app.requests.filter(({ key }) => key.includes('/results?')).length, resultRequestsAfterListToggle);
 });
 
 test('changing the affected-song scope cannot resume a stale Player Review queue', async (t) => {
@@ -1297,7 +1290,7 @@ test('Player Review and timeline windows move independently and reset safely', a
   assert.ok(stored.positions.review);
   assert.ok(stored.positions.timeline);
 
-  buttonByText(review, 'Reset layout').click();
+  buttonByText(review, 'Reset panel position').click();
   assert.equal(Number.parseFloat(review.style.left), reviewStart);
   assert.equal(Number.parseFloat(timeline.style.left), timelineStart);
   assert.match(app.document.querySelector('.lh-player-review-status').textContent, /default positions/);
@@ -2302,15 +2295,18 @@ test('Player Review applies a partial group and pins Undo or Finalize before ano
     return input && !input.disabled;
   }, 'interactive Player Review issue');
   app.document.querySelector('#lh-player-review-overlay input[value="remove_hopo"]').click();
-  buttonByText(app.document.querySelector('#lh-player-review-overlay'), 'Accept & Next issue').click();
-  buttonByText(app.document.querySelector('#lh-player-review-overlay'), 'Apply accepted changes').click();
+  const overlay = app.document.querySelector('#lh-player-review-overlay');
+  assert.match(overlay.querySelector('.lh-player-review-file-state').textContent, /Preview only/);
+  assert.equal(overlay.querySelectorAll('.lh-player-review-steps li').length, 3);
+  buttonByText(overlay, 'Keep choice & next').click();
+  buttonByText(overlay, 'Review 1 selected change').click();
   await waitFor(
-    () => buttonByText(app.document.querySelector('#lh-player-review-overlay'), 'Confirm Apply'),
+    () => buttonByText(app.document.querySelector('#lh-player-review-overlay'), 'Apply 1 selected change'),
     'exact partial preview',
   );
-  buttonByText(app.document.querySelector('#lh-player-review-overlay'), 'Confirm Apply').click();
+  buttonByText(app.document.querySelector('#lh-player-review-overlay'), 'Apply 1 selected change').click();
   await waitFor(
-    () => buttonByText(app.document.querySelector('#lh-player-review-overlay'), 'Undo applied group'),
+    () => buttonByText(app.document.querySelector('#lh-player-review-overlay'), 'Undo applied changes'),
     'pinned recovery controls',
   );
 
@@ -2321,14 +2317,15 @@ test('Player Review applies a partial group and pins Undo or Finalize before ano
   assert.ok(app.capabilityRequests.some(
     (request) => request.capability === 'playback' && request.command === 'stop',
   ));
-  assert.match(app.document.querySelector('.lh-player-review-recovery').textContent, /checkpoint/);
-  assert.ok(buttonByText(app.document.querySelector('#lh-player-review-overlay'), 'Finalize applied group'));
+  assert.match(app.document.querySelector('.lh-player-review-recovery').textContent, /remove the Undo copy/);
+  assert.match(overlay.querySelector('.lh-player-review-file-state').textContent, /Changes applied/);
+  assert.ok(buttonByText(app.document.querySelector('#lh-player-review-overlay'), 'Keep changes (remove Undo)'));
 
   await waitFor(() => {
-    const undo = buttonByText(app.document.querySelector('#lh-player-review-overlay'), 'Undo applied group');
+    const undo = buttonByText(app.document.querySelector('#lh-player-review-overlay'), 'Undo applied changes');
     return undo && !undo.disabled;
   }, 'completed partial apply before Undo');
-  buttonByText(app.document.querySelector('#lh-player-review-overlay'), 'Undo applied group').click();
+  buttonByText(app.document.querySelector('#lh-player-review-overlay'), 'Undo applied changes').click();
   await waitFor(
     () => app.document.querySelector('#lh-player-review-overlay input[value="remove_hopo"]')
       && /exact original song data was restored/i.test(

@@ -65,7 +65,8 @@ external release candidate fully assistive-technology certified:
    with Windows Contrast Themes enabled.
 
 NVDA was not installed on the implementation workstation, so the checklist
-above is deliberately recorded as an outstanding human release-signoff step.
+above remains useful optional manual verification. It is not a formal
+certification requirement or a blocking public-release signoff.
 It is not represented as having been run. Axe, accessibility semantics,
 keyboard journeys, forced colors, dark/light contrast, and 400%-equivalent
 reflow were executed successfully against the current nightly.

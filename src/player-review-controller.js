@@ -833,7 +833,7 @@ export function createPlayerReviewController({
         });
         reviewSession.pendingPlan = plan;
         setStatus(
-          `Exact preview ready: ${number(plan.changing_count)} reviewed change${Number(plan.changing_count) === 1 ? '' : 's'}. Press Confirm Apply to validate, back up, and save this partial group.`,
+          `Review ready: ${number(plan.changing_count)} selected change${Number(plan.changing_count) === 1 ? '' : 's'}. Check the count, then choose Apply to save this group.`,
           'review',
         );
         return;
@@ -868,7 +868,7 @@ export function createPlayerReviewController({
       if (currentCandidate()
         && !(await openCurrentInPlayer({ forceStart: true })).opened) return;
       setStatus(
-        'The selected partial group was applied and validated. Undo or finalize this checkpoint before applying another group; you may continue reviewing now.',
+        'The selected changes were applied safely. You may keep reviewing, but first undo these changes or keep them and remove the Undo copy before applying another group.',
         'good',
       );
     } catch (error) {
@@ -936,6 +936,12 @@ export function createPlayerReviewController({
     if (!reviewSession) {
       return;
     }
+    reviewOverlay.setFileState(
+      reviewSession.pendingRecovery
+        ? 'Changes applied — Undo is available'
+        : 'Preview only — song files have not changed',
+      reviewSession.pendingRecovery ? 'applied' : 'preview',
+    );
     const candidates = currentCandidates();
     const candidate = currentCandidate();
     if (!candidate) {
@@ -947,11 +953,23 @@ export function createPlayerReviewController({
       reviewOverlay.appendRecovery(overlayBody, reviewSession, resolveRecovery);
       return;
     }
+    const acceptedChanging = changingDecisions().length;
+    const skippedTotal = reviewSession.skipped.size;
+    const hasTentativeChoice = Boolean(reviewSession.tentative?.decision);
+    const currentStep = reviewSession.pendingPlan || (acceptedChanging && !hasTentativeChoice)
+      ? 3 : hasTentativeChoice ? 2 : 1;
+    const steps = make('ol', 'lh-player-review-steps');
+    ['1. Inspect and listen', '2. Choose', '3. Review and apply'].forEach((label, offset) => {
+      const step = make('li', '', label);
+      step.dataset.current = String(currentStep === offset + 1);
+      steps.appendChild(step);
+    });
+    overlayBody.appendChild(steps);
     const issue = make('section', 'lh-player-review-issue');
     issue.appendChild(make(
       'p',
       'lh-player-review-count',
-      `Issue ${number(reviewSession.index + 1)} of ${number(candidates.length)}`,
+      `Issue ${number(reviewSession.index + 1)} of ${number(candidates.length)} · ${reviewSession.difficultyScope === 'all_authored' ? 'all authored difficulties' : 'max difficulty only'}`,
     ));
     issue.appendChild(make(
       'h3',
@@ -978,7 +996,7 @@ export function createPlayerReviewController({
     const jumpButton = make('button', 'lh-button', 'Jump to issue');
     const previewButton = make(
       'button',
-      'lh-button lh-button-primary',
+      hasTentativeChoice || acceptedChanging ? 'lh-button' : 'lh-button lh-button-primary',
       previewRun?.candidateId === candidate.review_item_id
         ? 'Playing preview…'
         : 'Play preview (2s before + 2s after)',
@@ -1040,7 +1058,7 @@ export function createPlayerReviewController({
           reviewSession.skipped.delete(candidate.review_item_id);
           reviewSession.tentative = { candidate, decision: name };
           reviewSession.pendingPlan = null;
-          setStatus(`${definition.label} resolves this issue in simulation. Preparing its Highway preview; the Feedpak is still unchanged.`);
+          setStatus(`${definition.label} resolves this issue in the safety check. Preparing its Highway preview; the song file is still unchanged.`);
           render();
           const preview = await refreshTransform({
             reason: 'choice-selected',
@@ -1048,8 +1066,8 @@ export function createPlayerReviewController({
           });
           setStatus(
             preview?.verified
-              ? `${definition.label} resolves this issue in simulation and is previewed on the Highway. The Feedpak is still unchanged.`
-              : `${definition.label} resolves this issue in simulation, but Library Doctor could not verify the live Highway preview. The Feedpak is still unchanged.`,
+              ? `${definition.label} resolves this issue and is previewed on the Highway. The song file is still unchanged.`
+              : `${definition.label} resolves this issue, but Library Doctor could not confirm the live Highway preview. The song file is still unchanged.`,
             preview?.verified ? '' : 'review',
           );
       },
@@ -1060,7 +1078,7 @@ export function createPlayerReviewController({
       issue.appendChild(make(
         'p',
         'lh-player-review-note',
-        'Live changes are shown in the 2D or 3D Highway when the host chart-transform capability is available. Full Tab View uses a separate GP5 source and updates only after Apply reloads the song.',
+        'A live Highway preview is not available in this FeedBack build. Your choice is still a preview and will not be saved unless you review and apply it.',
       ));
     }
     if (candidate.blockers?.length) {
@@ -1072,7 +1090,6 @@ export function createPlayerReviewController({
     }
     overlayBody.appendChild(issue);
 
-    const acceptedChanging = changingDecisions().length; const skippedTotal = reviewSession.skipped.size;
     const summary = make(
       'p',
       'lh-player-review-summary',
@@ -1087,7 +1104,11 @@ export function createPlayerReviewController({
     overlayBody.appendChild(summary);
     const controls = make('div', 'lh-player-review-buttons');
     const previous = make('button', 'lh-button', 'Previous issue');
-    const accept = make('button', 'lh-button lh-button-primary', 'Accept & Next issue');
+    const accept = make(
+      'button',
+      hasTentativeChoice ? 'lh-button lh-button-primary' : 'lh-button',
+      'Keep choice & next',
+    );
     const skip = make(
       'button',
       'lh-button',
@@ -1098,8 +1119,10 @@ export function createPlayerReviewController({
     const next = make('button', 'lh-button', 'Next issue');
     const apply = make(
       'button',
-      'lh-button lh-button-primary',
-      reviewSession.pendingPlan ? 'Confirm Apply' : 'Apply accepted changes',
+      currentStep === 3 ? 'lh-button lh-button-primary' : 'lh-button',
+      reviewSession.pendingPlan
+        ? `Apply ${number(reviewSession.pendingPlan.changing_count)} selected change${Number(reviewSession.pendingPlan.changing_count) === 1 ? '' : 's'}`
+        : `Review ${number(acceptedChanging)} selected change${acceptedChanging === 1 ? '' : 's'}`,
     );
     previous.type = accept.type = skip.type = next.type = apply.type = 'button';
     previous.disabled = reviewSession.busy || timeline.isScrubbing() || candidates.length < 2;

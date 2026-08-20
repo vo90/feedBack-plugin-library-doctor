@@ -1,7 +1,7 @@
 {
   "first_run": {
     "status": {"stage": "idle", "running": false, "summary": {"total": 0}},
-    "expected": {"view": "first_run", "scan_options_open": true, "results_visible": false}
+    "expected": {"view": "first_run", "scan_options_open": false, "results_visible": false}
   },
   "cached_complete": {
     "status": {

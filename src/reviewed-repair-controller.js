@@ -187,7 +187,7 @@ export function createReviewedRepairController({
       shell.appendChild(make(
         'p',
         'lh-repair-warning',
-        `${number(hiddenLower)} lower-difficulty candidate${hiddenLower === 1 ? '' : 's'} hidden by “Full difficulty only.” Change the saved difficulty filter to show them without scanning again.`,
+        `${number(hiddenLower)} lower-difficulty issue${hiddenLower === 1 ? '' : 's'} hidden by “Full difficulty only.” Change the saved difficulty filter to show them without scanning again.`,
       ));
     }
     if (inspection.inspection_blocker) {
@@ -346,7 +346,7 @@ export function createReviewedRepairController({
       if (!Number.isInteger(offset) || offset < 0) return;
       invalidatePreview();
       const requestNumber = ++pageRequest;
-      text(live, 'Loading another bounded candidate page.');
+      text(live, 'Loading another page of issues.');
       try {
         const nextInspection = await request('/reviewed-repair/inspect', {
           method: 'POST',
@@ -409,7 +409,7 @@ export function createReviewedRepairController({
     function renderCandidate() {
       candidateRegion.replaceChildren();
       if (!candidates.length) {
-        candidateRegion.appendChild(make('p', '', 'No current HO/PO candidates remain in this package.'));
+        candidateRegion.appendChild(make('p', '', 'No current HO/PO issues remain in this package.'));
         renderFooter();
         return;
       }
@@ -418,7 +418,7 @@ export function createReviewedRepairController({
       const title = make(
         'h5',
         '',
-        `Candidate ${number(globalIndex)} of ${number(currentInspection.total_candidate_count ?? candidates.length)} · string ${number(candidate.string + 1)}, fret ${number(candidate.fret)}`,
+        `Issue ${number(globalIndex)} of ${number(currentInspection.total_candidate_count ?? candidates.length)} · string ${number(candidate.string + 1)}, fret ${number(candidate.fret)}`,
       );
       title.tabIndex = -1;
       candidateRegion.appendChild(title);
@@ -457,7 +457,7 @@ export function createReviewedRepairController({
         candidateRegion.appendChild(make(
           'p',
           'lh-inline-error',
-          `This candidate cannot be mutated here: ${candidate.blockers.join(', ')}. You may skip it for now and continue.`,
+          `Library Doctor cannot safely change this issue here: ${candidate.blockers.join(', ')}. You may skip it for now and continue.`,
         ));
       }
       const optionState = optionStates.get(candidate.candidate_id);
@@ -510,7 +510,7 @@ export function createReviewedRepairController({
             invalidatePreview();
             skipped.delete(candidate.review_item_id);
             selected.set(candidate.candidate_id, name);
-            text(live, `${definition.label} selected for candidate ${globalIndex}.`);
+            text(live, `${definition.label} selected for issue ${globalIndex}.`);
             renderFooter();
           });
           const copy = make('span');
@@ -540,13 +540,13 @@ export function createReviewedRepairController({
         invalidatePreview();
         if (skipped.has(candidate.review_item_id)) {
           skipped.delete(candidate.review_item_id);
-          text(live, `Candidate ${globalIndex} is back in the current review pass.`);
+          text(live, `Issue ${globalIndex} is back in the current review pass.`);
           renderCandidate();
           return;
         }
         selected.delete(candidate.candidate_id);
         skipped.add(candidate.review_item_id);
-        text(live, `Candidate ${globalIndex} was skipped for now and remains unresolved.`);
+        text(live, `Issue ${globalIndex} was skipped for now and remains unresolved.`);
         if (index < candidates.length - 1) {
           index += 1;
           renderCandidate();
@@ -577,7 +577,7 @@ export function createReviewedRepairController({
       ));
       candidateRegion.appendChild(technical);
       renderFooter();
-      text(live, `Showing candidate ${globalIndex} of ${currentInspection.total_candidate_count ?? candidates.length}.`);
+      text(live, `Showing issue ${globalIndex} of ${currentInspection.total_candidate_count ?? candidates.length}.`);
       focus(title);
     }
 
@@ -610,7 +610,7 @@ export function createReviewedRepairController({
         previewNode.appendChild(make(
           'p',
           '',
-          `${number(plan.changing_count)} outcome-checked note decision${plan.changing_count === 1 ? '' : 's'} will change. ${number(plan.unresolved_count)} unselected issue${Number(plan.unresolved_count) === 1 ? '' : 's'} remain in this review pass, and ${number(plan.remaining_review_count)} candidate${Number(plan.remaining_review_count) === 1 ? '' : 's'} are expected to remain after these choices. Skipped issues are not included.`,
+          `${number(plan.changing_count)} outcome-checked note decision${plan.changing_count === 1 ? '' : 's'} will change. ${number(plan.unresolved_count)} unselected issue${Number(plan.unresolved_count) === 1 ? '' : 's'} remain in this review pass, and ${number(plan.remaining_review_count)} issue${Number(plan.remaining_review_count) === 1 ? '' : 's'} are expected to remain after these choices. Skipped issues are not included.`,
         ));
         const list = make('ul', 'lh-all-safe-list');
         Object.entries(plan.decision_counts || {})

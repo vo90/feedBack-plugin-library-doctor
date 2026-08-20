@@ -1,181 +1,260 @@
 # Library Doctor
 
-Library Doctor is FeedBack's Feedpak library validator and conservative repair
-assistant. Scans are always read-only. The plugin reports problems in `.feedpak`
-and legacy `.sloppak` packages. Deterministic song-data repairs show an exact
-change preview; audio-preview recommendations offer both a listen-first workflow
-and a confirmed automatic workflow. A separate **Song Tools** workspace provides
-optional, user-requested changes for any indexed local song without requiring a
-scan finding.
+> **Status: Public beta** — Library Doctor is ready for normal use, but this is
+> its first wider public release. Keep the original download or another backup
+> of any song you would be unhappy to lose.
 
-The first scan validates every package. Later scans reuse cached reports only
-when package identity, file metadata, filesystem change time, and content
-windows spread across large files still match. Small files are hashed in full,
-and archive member CRC/size metadata is included. This catches ordinary in-place
-changes even when an editor preserves file size and modification time.
-Validation runs in a background coordinator and, when enough uncached packages
-need checking, a bounded pool of read-only worker processes. Automatic worker
-selection considers physical CPU cores, available memory, FeedBack's global
-scan-worker ceiling, the pending package count, and the operating-system limit.
-Small and fully cached scans stay single-worker. An advanced custom maximum is
-available, but remains a ceiling rather than forcing unsafe parallelism. Both
-scan modes automatically pause all workers while a song session is open and
-resume after the player is closed, so gameplay always has priority.
-Every uncached package is validated in an isolated worker with a bounded
-active-time deadline. A worker that stops responding is terminated and
-replaced; Library Doctor records a `package.validation-timeout` finding for the
-affected package and continues the scan without changing the package.
-Workers also have a measured per-process RSS ceiling: 768 MiB for a normal scan
-and 1.5 GiB for Deep Audio. A multi-worker overage is retried with one isolated
-worker so the package can be identified safely. A repeat overage records
-`package.validation-memory-limit`, terminates that worker, and continues with
-the remaining packages.
+Library Doctor is a free, open-source plugin that checks your FeedBack song
+library. It tells you what looks wrong, what you may notice in the game, and
+what you can do next—in ordinary language.
 
-## Install
+A scan never changes a song. When Library Doctor knows a repair is mechanical
+and unambiguous, it lets you review the planned change before confirming it.
+The plugin creates recovery data first, checks the repaired song completely,
+and keeps **Undo** available when that repair supports it. If the plugin cannot
+make a trustworthy choice, it explains the problem and leaves the song alone.
 
-Library Doctor is designed to remain an optional plugin. To install it in the
-FeedBack desktop app:
+[Download Library Doctor](https://github.com/vo90/feedBack-plugin-library-doctor/releases)
+· [Installation](#installation)
+· [Your first scan](#your-first-scan)
+· [Help](#getting-help)
+
+## Is Library Doctor for me?
+
+Library Doctor is useful if you play custom songs in FeedBack and want help
+finding packages that may be broken, incomplete, or behaving strangely.
+
+It can:
+
+- scan your whole library, one folder, or one Feedpak;
+- explain problems with charts, song metadata, lyrics, timelines, previews,
+  audio declarations, and other supported Feedpak data;
+- safely repair a limited set of exact duplicates, ordering mistakes, empty
+  optional data, and other changes that do not require musical guesswork;
+- create or replace supported song previews;
+- help review certain HO/PO technique questions in **Player Review**;
+- repair several eligible songs through one reviewed batch; and
+- keep repair history, recovery information, and available Undo actions visible.
+
+It deliberately does not:
+
+- guess how a chart was supposed to be authored;
+- silently change a song during a scan;
+- promise an automatic fix for every finding;
+- upload your songs or scan results; or
+- treat “no issues found” as proof that every possible musical problem is absent.
+
+## Before you install
+
+- Use a current FeedBack Desktop build. The technical minimum is
+  **0.3.0-alpha.1**, but older builds with the same version text may not contain
+  the plugin features Library Doctor needs. If FeedBack reports an incompatible
+  plugin, update FeedBack to the newest available build.
+- Keep the original song downloads or your own backup. Library Doctor is
+  designed to fail safely and maintains private recovery copies for supported
+  repairs, but recovery data should not be the only copy of valuable songs.
+- Library Doctor currently targets the normal Windows FeedBack Desktop setup.
+
+## Installation
+
+### Download the release ZIP — recommended for most players
+
+1. Close FeedBack.
+2. Open the
+   [Library Doctor Releases page](https://github.com/vo90/feedBack-plugin-library-doctor/releases).
+3. Choose the newest release labelled **Public Beta**. Under **Assets**, download
+   the file named like
+   <code>feedBack-plugin-library-doctor-0.45.0.zip</code>.
+4. Extract the downloaded ZIP. Do not leave the plugin inside the ZIP file.
+5. Press **Win+R**, enter
+   <code>%APPDATA%\feedback-desktop\plugins</code>, and press Enter. Create the
+   <code>plugins</code> folder if Windows says it does not exist.
+6. Move the extracted <code>feedBack-plugin-library-doctor</code> folder into
+   that <code>plugins</code> folder.
+7. Check that <code>plugin.json</code> is directly inside the folder you moved.
+   The finished layout should look like:
+
+   <code>%APPDATA%\feedback-desktop\plugins\feedBack-plugin-library-doctor\plugin.json</code>
+
+8. Start FeedBack. Open **Plugins → Plugin Manager** and confirm that
+   **Library Doctor** appears. Restart FeedBack once if it asks you to.
+
+GitHub's **Code → Download ZIP** option is also installable, but it downloads
+the current repository rather than the exact tested release. Prefer the ZIP
+listed under a release's **Assets**. If you use **Code → Download ZIP**, the
+folder may end in <code>-main</code>; that is fine as long as
+<code>plugin.json</code> is directly inside it.
+
+### Install through Plugin Manager with Git
+
+If Git is already installed on your computer:
 
 1. Open **Plugins → Plugin Manager → Install Plugin**.
-2. Paste `https://github.com/vo90/feedBack-plugin-library-doctor.git`.
+2. Paste
+   <code>https://github.com/vo90/feedBack-plugin-library-doctor.git</code>.
 3. Select **Install**, then restart FeedBack when prompted.
-4. Enable the Library Doctor pedal in Plugin Manager if it is switched off.
 
-The Plugin Manager uses Git to download and update plugins, so `git` must be
-available on the computer's `PATH`. FeedBack installs Library Doctor's small
-Python runtime dependency from `requirements.txt` during plugin startup.
+If FeedBack says Git is missing, use the release ZIP instructions above.
+FeedBack installs Library Doctor's small Python dependency automatically when
+the plugin starts.
 
-For local development, put this repository directly under FeedBack Desktop's
-user-plugins directory (or point `SLOPSMITH_PLUGINS_DIR` at its parent
-directory), then restart FeedBack. Do not copy its files into FeedBack core.
-During the Phase 1 transition, append `?libraryDoctorLayout=legacy` to the local
-FeedBack URL to reopen the temporary high-density layout for rollback testing.
+## Your first scan
 
-## Use
+1. Open **Library Doctor** from FeedBack's plugin navigation.
+2. Select **Scan my library**. Leave **Scan options** closed for the recommended
+   first scan.
+3. Let the scan finish. You may leave the Library Doctor screen while it works.
+   Opening a song pauses scanning so gameplay keeps priority; scanning resumes
+   after you leave the player.
+4. Start with **Needs fixing**, then review **May affect FeedBack** and
+   **Optional improvements**.
+5. Open a song result to read:
 
-1. Open **Library Doctor** from FeedBack's plugin navigation. **Library check** is
-   the diagnostic and repair workspace; **Song tools** is for optional changes
-   to a song you choose.
-2. Select **Scan my library** for the recommended read-only check. Open **Scan
-   options** when you need **All songs**, **A folder**, or **One package**. Folder
-   scans include all Feedpaks and Sloppaks in their subfolders. A selected folder
-   or package can be anywhere on the computer. The same applicable, explicitly
-   confirmed repairs work in that selected scope; it does not need to be inside
-   FeedBack's configured song library.
-3. Start the scan. You can leave the screen while it works or cancel the scan;
-   completed reports are kept and the dashboard clearly marks the result as
-   incomplete. Enable **Deep audio checks** after a normal scan when you also
-   want supported Ogg container and duration validation; it reads substantially
-   more data, can take a long time for a large library, and is therefore off by
-   default. If you open a song, the scan pauses without losing progress and
-   resumes automatically when you leave the player. **Scan performance** uses
-   an automatic worker count by default and shows the chosen count in progress
-   and scan provenance. Its custom maximum is for troubleshooting or deliberate
-   tuning; it cannot override CPU, memory, task, or platform safety limits.
-4. Review **Needs fixing** first, followed by **May affect FeedBack** and
-   **Optional improvements**. Additional coverage filters, rule aggregation,
-   provenance, and exports remain under expandable details. Every finding separates the actual
-   data problem, what a player may notice in FeedBack, and why fixing it matters.
-   A suggested next action follows, while the expandable technical details retain
-   the stable rule code, file, arrangement, time, and stored string index.
-   JSON and CSV exports use the current package, search, and rule filters.
-5. When **Review safe fix** appears beside a finding, open the preview to see
-   exactly how many stored copies and musical positions are affected. Applying
-   the repair requires a separate confirmation. Library Doctor creates
-   recovery data, validates a repaired candidate, and saves it only if it
-   introduces no new finding. A persistent result card confirms success or
-   failure, states exactly what changed and what to expect in game, and offers
-   **Undo repair** after a successful chart repair. The latest receipt stays in
-   the Library check workspace under **Activity and recovery** instead of
-   appearing above unrelated Song tools. Repeated findings for the same repair rule
-   are grouped into one package-wide action with an arrangement/source
-   breakdown. When a Feedpak has more than one distinct safe repair type,
-   **Fix all safe issues** previews and applies them as one validated package
-   transaction with one recovery backup and one Undo. The individual repair
-   controls remain available. Findings without a deterministic repair remain
-   report-only. Every newly written recovery ZIP is reopened and its original
-   members are verified byte-for-byte before commit. Directory-package writes
-   also keep a durable private transaction journal. If FeedBack or the computer
-   stops between member writes, the next Library Doctor startup verifies the
-   journal and recovery backup, then either accepts the fully committed package
-   or restores the exact original members.
-   Unknown external edits are never overwritten and are surfaced for manual
-   recovery. Preview recommendations make **Listen and choose a preview** the
-   primary action, with **Create automatically and finish** as the secondary path.
-   Both generate from the full song mix using the same selection standard; listen-first review lets you hear and choose
-   another starting point. A validated preview repair removes its temporary
-   recovery copy automatically, so no later finalization step is required.
-6. Open **Song tools** to search FeedBack's indexed local library and select any
-   song, even one that has not been scanned or has no warning. **Preview
-   Creator** can add a missing preview or replace an existing valid preview.
-   It reuses the same source-bound generation, complete-package validation, and
-   temporary-recovery transaction as preview repair; it is not a separate audio
-   implementation.
-7. Correct remaining source-package problems in an editor, then run the same
-   target again. Only changed packages are revalidated. **Recheck without
-   cache** is available when timestamps cannot be trusted or a fresh
-   confirmation is wanted.
+   - what Library Doctor found;
+   - what you might notice in FeedBack;
+   - why it may be worth fixing; and
+   - the recommended next step.
 
-Cache signatures are invalidation hints, not a hostile-filesystem security
-boundary. Large files use nine distributed content windows plus the native
-filesystem change record. An edit outside those windows can evade a cached scan
-if it also preserves size and modification time and the filesystem does not
-produce a distinct change record; a privileged process able to forge those
-records has the same capability. **Recheck without cache** is the explicit
-response to that threat. Repair Apply and Undo do not trust the cache as their
-commit guard: affected directory members are SHA-256 checked, and archived
-packages are bound to the complete archive SHA-256 immediately before
-replacement.
+6. If **Review safe fix** is available, open it and read the preview. Nothing is
+   changed until you confirm the separate repair step.
+7. Run the same scan again after making repairs or editing songs elsewhere.
+   Unchanged songs reuse their previous result, making later scans faster.
 
-Saved reports from an older Library Doctor rule version remain readable after
-an update, but are clearly marked as needing a new scan and do not expose repair
-controls. This prevents historical classifications from being treated as a
-current automatic-repair decision.
+Start with the normal scan. **Deep audio checks** read much more audio data and
+can take considerably longer, so enable them only when you want the additional
+audio-container and duration checks.
 
-For larger cleanups, **Review safe repairs** sits below the affected-song results
-and uses the complete current scan scope
-(whole library, selected folder, or single Feedpak). It first builds a read-only
-preview showing eligible packages, repair totals, and every package excluded by
-a safety blocker. The scan records whether conditional handshape findings are
-actually unambiguous enough for automatic repair and whether a missing or invalid
-preview has a usable full-song source; findings that require author review or
-lack source audio are never advertised as batch-repairable. Flagged missing,
-short, and long previews can be included with
-an explicit opt-in; acceptable previews are never replaced by batch repair. A
-second confirmation is required before execution. Packages are then repaired
-one at a time, with their own candidate validation, cache refresh, and result.
-Safe song-data changes retain an individual Undo backup. Automatic previews use
-temporary recovery while the candidate is validated, then remove that copy and
-finish without Preview Undo. Gameplay pauses the batch between packages.
-Stopping also takes effect between packages: completed repairs remain valid,
-while packages not yet started remain unchanged.
-During a running repair, live counters show repaired, partial, safely skipped,
-failed, and generated-preview outcomes. A compact durable checkpoint is written
-only between complete Feedpak transactions, at most once per minute or every
-100 packages, so completed receipts survive an unexpected app or system stop
-without materially slowing the batch. The completed result can be searched,
-filtered by outcome, sorted by attention/change count/song/artist/path, and
-browsed in a progressively rendered scrollable list instead of page-by-page.
-The completed result distinguishes repairs that are still active from originals
-that have since been restored. **Review Undo all remaining repairs** first checks
-every retained backup and current repaired song-data file without changing anything. A
-second confirmation restores eligible Feedpaks one at a time. Packages changed
-after repair or backed by an unreadable recovery file are excluded rather than
-overwritten; already-restored packages are not attempted again.
+Use **Scan options** when you want to check one folder or one package, or when
+you deliberately want to recheck without using saved scan results.
 
-Errors indicate invalid data or a contradiction that cannot work as authored.
-Warnings identify data that FeedBack may repair, omit, or display incorrectly.
-**FeedBack compatibility** identifies format-valid data that exceeds a current
-game or 3D-highway capability.
-**Authoring review** is a separate, lower-confidence tier for technically valid
-tab data that may be difficult or impossible to play; unusual intentional
-authoring is not labelled as broken. “No lyrics”, “No preview”, and “Partial
-deep audio” are coverage filters only; they do not make a package unhealthy.
+## Understanding the results
 
-Summary cards can overlap because a package may, for example, both have an error
-and omit optional lyrics. "No issues found by current checks" means exactly
-that; it is not a guarantee that every possible musical or authoring problem is
-absent.
+| Result | What it means | What to do |
+|---|---|---|
+| **Needs fixing** | Library Doctor found invalid or contradictory data. | Review these songs first. Use a safe fix when offered, or edit/replace the source package. |
+| **May affect FeedBack** | The data may be accepted but can display, play, or behave incorrectly in FeedBack. | Read the explanation and decide whether the symptom matters to you. |
+| **Optional improvements** | The song may work, but Library Doctor found something worth reviewing. | Treat this as advice, not proof that the author made a mistake. |
+| **No issues found** | None of Library Doctor's current checks found a problem. | No action is needed unless you still notice something wrong in game. |
+
+One song can appear in more than one group. Technical details such as the rule
+code, file, arrangement, and time remain available inside each result for
+authors and bug reports.
+
+## Repairs and review
+
+### How a safe repair works
+
+1. Select **Review safe fix**.
+2. Read the exact planned change.
+3. Cancel if anything is unclear, or confirm when it matches your intention.
+4. Library Doctor creates recovery data and builds the repaired song privately.
+5. The complete candidate must pass validation before it can replace the
+   current song.
+6. The result explains what changed and shows **Undo repair** when available.
+
+A finding without a repair button is not a failure of the interface. It means
+Library Doctor cannot make that decision without guessing. Follow the displayed
+next step and use a Feedpak editor or replace the song when necessary.
+
+### Fix several songs
+
+After a complete scan, **Fix several songs** can collect the same narrowly safe
+repairs across eligible songs. It always shows a read-only preview and asks for
+confirmation before changing anything. Songs that changed, have uncertain
+recovery state, or no longer match the scan are skipped rather than overwritten.
+
+Batch repair works one song at a time. Completed repairs stay valid if you stop
+the batch, while songs that were not started remain unchanged.
+
+### Player Review
+
+**Player Review** currently supports a focused set of HO/PO technique decisions.
+It lets you listen, inspect the relevant chart position, and make the choice
+yourself. Library Doctor does not decide the musical answer for you. More
+review-assisted repair types may be added in future versions.
+
+### Song Tools and previews
+
+Open **Song tools** to search FeedBack's indexed library and select a song
+directly. **Preview Creator** can add a missing preview or replace an existing
+one. You can listen and choose a starting point, or explicitly select the
+automatic option. Preview work uses the same private candidate validation and
+recovery safeguards as suggested repairs.
+
+## Undo and recovery
+
+| Message or action | Meaning |
+|---|---|
+| **Undo repair** | Restore the exact song data saved before the repair. |
+| **Finalize repair** or **Remove recovery copy** | Keep the repaired song and permanently remove Library Doctor's private Undo copy. |
+| **Recovery needed** | A repair was interrupted or its result is uncertain. Library Doctor blocks further changes to that song until the state is resolved. |
+| **Manual review needed** | The song was also changed outside Library Doctor, so the plugin will not choose which version to overwrite. Preserve both versions and compare them manually. |
+
+Do not manually delete recovery files just to clear a warning. Use the actions
+shown under **Activity and recovery**, or keep both versions until you can
+review them safely.
+
+## Privacy
+
+Library Doctor reads song packages stored on your computer. Normal scans and
+repairs do not upload songs, titles, paths, or results. JSON and CSV exports are
+created only when you request them.
+
+Support diagnostics contain bounded technical counts and state information.
+They remove song titles, local package paths, exception text that may reveal
+those paths, and song file contents.
+
+## Troubleshooting
+
+- **Library Doctor does not appear:** close FeedBack and check that exactly one
+  folder directly under
+  <code>%APPDATA%\feedback-desktop\plugins</code> contains
+  <code>plugin.json</code>. Remove an accidental extra folder level, then
+  restart FeedBack.
+- **FeedBack says the plugin needs a newer version:** update FeedBack Desktop to
+  the newest available build.
+- **A Python dependency failed to install:** restart FeedBack once while
+  connected to the internet. If it still fails, open FeedBack's plugin
+  diagnostics and keep the displayed error for a bug report.
+- **The scan seems slow:** finish a normal scan before enabling Deep audio.
+  Scanning also pauses while a song is open.
+- **A repair button is missing:** the finding is intentionally report-only, the
+  package changed after scanning, or another recovery decision must be resolved
+  first. Read the next-action text shown with the finding.
+- **The displayed result seems out of date:** use **Recheck without cache** for
+  that scope.
+
+## Updating or removing Library Doctor
+
+Close FeedBack before replacing a manually installed folder. Keep only one
+Library Doctor folder in the plugins directory; two copies use the same plugin
+ID and make it unclear which version FeedBack loaded.
+
+Replacing or deleting the plugin folder does not automatically delete scan
+history or retained recovery data. Resolve any visible Undo or recovery choices
+before removing the plugin if you may need them later.
+
+## Getting help
+
+Open a
+[GitHub issue](https://github.com/vo90/feedBack-plugin-library-doctor/issues)
+and include:
+
+- your Library Doctor version;
+- your FeedBack version/build;
+- what you were trying to do;
+- the exact wording shown on screen; and
+- whether retrying or rescanning changed the result.
+
+Do not upload copyrighted songs or a private song library. A small song you
+created specifically to reproduce the problem is useful only when you are
+comfortable sharing it.
+
+The remaining sections are technical reference for Feedpak authors,
+contributors, and anyone who wants to inspect the safety boundaries.
+
+<details>
+<summary><strong>Technical repair catalog and validation coverage</strong></summary>
 
 ## Safe repairs
 
@@ -453,8 +532,8 @@ overwrites the gameplay audio. Charts, lyrics, artwork, and every unrelated
 package member are preserved.
 
 Preview repair remains separate from the per-song **Fix all safe issues** chart
-transaction because it creates audio and follows different recovery semantics.
-It can be included explicitly in **Review safe repairs** after reviewing the batch
+repair because it creates audio and follows different recovery rules. It can be
+included explicitly in **Fix several songs** after reviewing the multi-song
 scope and confirming that flagged previews should be generated automatically.
 The read-only batch review performs no encoding; generation happens for one
 Feedpak at a time during the confirmed run. During replacement, temporary
@@ -622,6 +701,11 @@ preview repair, and checkpoint work without recording additional song identity
 data. These diagnostics make performance changes measurable while keeping the
 normal in-game workflow focused on package outcomes.
 
+</details>
+
+<details>
+<summary><strong>Developer architecture and verification commands</strong></summary>
+
 ## Architecture
 
 - `validator.py` contains the package reader and validation rules. It has no
@@ -631,15 +715,25 @@ normal in-game workflow focused on package outcomes.
   planning.
 - `reviewed_repair.py` owns the closed reviewed-repair adapter registry and
   registered decision vocabulary without performing filesystem writes.
-- `scanner.py` owns the playback-aware background scan, incremental SQLite
-  cache, corruption quarantine, bounded lock handling, cancellation,
-  pagination, rule summaries, and report exports.
+- `scanner.py` owns the playback-aware background scan, scope resolution,
+  cancellation, worker lifecycle, report enrichment, and exports.
+- `library_doctor_report_cache.py` owns incremental SQLite persistence,
+  corruption quarantine, bounded lock handling, scope state, pagination, and
+  cached rule/summary queries.
+- `library_doctor_scan_policy.py` owns the independently testable CPU, memory,
+  platform, and user ceilings used to select validation worker counts.
 - `library_doctor_scan_worker.py` is the spawn-safe, side-effect-free process
   worker. It can only read and validate a package; SQLite and every file change
   remain in the parent process.
-- `repair.py` owns the small repair allowlist, source-bound previews, candidate
-  construction, full archive-integrity and validation gates, recovery backups,
-  bounded repair receipts, undo, and transactional package writes.
+- `repair.py` owns source-bound previews, candidate construction, full
+  archive-integrity and validation gates, recovery backups, bounded repair
+  receipts, undo, and transactional package writes.
+- `repair_actions.py` owns the immutable action values shared by repair
+  planning and application. It has no filesystem, validation, or service state.
+- `repair_catalog.py` owns the closed declarative metadata allowlists for safe
+  structural repairs and reviewed preview-media repairs.
+- `repair_transaction.py` owns durable transaction-journal persistence and
+  reconciles interrupted directory-package repairs before new changes begin.
 - `preview_repair.py` generates bounded, listenable Ogg candidates in private
   temporary storage. It never writes to the song library; `repair.py` remains
   the only package transaction and recovery authority.
@@ -661,6 +755,13 @@ normal in-game workflow focused on package outcomes.
   `context["load_sibling"]` for backend modules. Every route failure uses
   `{code, message, file_state, retryable, next_action}`. Standalone Apply,
   Undo, and Finalize share the same exclusive mutation reservation.
+- `route_support.py` owns FastAPI validation normalization, public error
+  mapping, and browser byte-range responses without importing domain services.
+- `architecture-contract.json` records backend module ownership, dependency
+  direction, and regression size ceilings enforced by the test suite.
+- `src/batch-controller.js` owns batch requests, confirmation, cancellation,
+  and polling; `src/batch-results-view.js` renders searchable repair, Undo, and
+  finalization outcomes without owning network state.
 - `screen.html`, the thin native-module `screen.js` entry, `src/`, and
   `assets/library-doctor.css` provide the in-game interface. The plugin needs
   FeedBack's capability-capable `0.3.0-alpha.1` nightly (commit `05be9eb` or newer),
@@ -681,9 +782,9 @@ the test dependencies and run:
 python -m pip install -r requirements-test.txt
 python -m pip check
 python -m pip_audit -r requirements.txt
-python -m ruff check validator.py scanner.py library_doctor_scan_worker.py repair.py repair_eligibility.py reviewed_repair.py preview_repair.py batch_repair.py migration.py privacy.py diagnostics.py api_contracts.py mutation_receipts.py routes.py tools tests
+python -m ruff check validator.py scanner.py library_doctor_report_cache.py library_doctor_scan_policy.py library_doctor_scan_worker.py repair.py repair_actions.py repair_catalog.py repair_eligibility.py repair_recovery.py repair_transaction.py repair_workspace.py repair_yaml.py reviewed_repair.py preview_repair.py batch_repair.py migration.py privacy.py diagnostics.py api_contracts.py mutation_receipts.py routes.py route_support.py tools tests
 python -m pytest --cov --cov-report=term
-python -m py_compile validator.py scanner.py library_doctor_scan_worker.py repair.py repair_eligibility.py reviewed_repair.py preview_repair.py batch_repair.py migration.py privacy.py diagnostics.py api_contracts.py mutation_receipts.py routes.py tools/verify_host_contract.py
+python -m py_compile validator.py scanner.py library_doctor_report_cache.py library_doctor_scan_policy.py library_doctor_scan_worker.py repair.py repair_actions.py repair_catalog.py repair_eligibility.py repair_recovery.py repair_transaction.py repair_workspace.py repair_yaml.py reviewed_repair.py preview_repair.py batch_repair.py migration.py privacy.py diagnostics.py api_contracts.py mutation_receipts.py routes.py route_support.py tools/verify_host_contract.py
 npm ci
 npm run audit:dependencies
 npm run check:frontend
@@ -712,16 +813,19 @@ Verify a candidate minimum or latest FeedBack checkout without changing it:
 python tools/verify_host_contract.py /path/to/feedBack
 ```
 
-The full accessibility certification matrix and manual assistive-technology
-journeys are in `docs/accessibility-certification-2026-08-11.md`. Scanner and
+Optional accessibility and manual assistive-technology checks are collected in
+`docs/accessibility-certification-2026-08-11.md`. They are useful release
+guidance, not formal certification or mandatory evidence. Scanner and
 adversarial-corpus limits are defined in
 `docs/performance-and-fuzz-budgets.md`. Pytest keeps temporary files and its
 cache in ignored repository-local `.test-artifacts/` and `.test-cache/`
 directories, so a clean checkout does not depend on the system temp directory.
-The versioned release-candidate ledger and remaining human procedures are in
-`release-signoff.json` and `docs/release-signoff-0.45.0.md`.
+The practical public-release workflow is documented in
+`docs/public-release-implementation-plan-2026-08-20.md`.
 
 `library_doctor` is the plugin ID and API namespace from version 0.15 onward.
 Upgrading from an earlier release moves the previous local cache and recovery
 data automatically before Library Doctor opens it. If both old and new data
 folders exist, startup stops safely so neither copy is overwritten.
+
+</details>

@@ -181,6 +181,17 @@ class _BlockingUndoService(_BlockingRepairService):
         }
 
 
+class _RecoveryAwareRepairService(_BlockingRepairService):
+    @staticmethod
+    def recovery_state(package):
+        if package == "two.feedpak":
+            return {
+                "required": True,
+                "message": "Resolve this interrupted repair before changing it.",
+            }
+        return {"required": False}
+
+
 class _PreviewFailureAfterSafeRepair(_BlockingRepairService):
     def __init__(self):
         super().__init__()
@@ -325,6 +336,47 @@ def test_batch_cancellation_finishes_current_feedpak_and_keeps_its_receipt(tmp_p
         assert scanner.cached[0][0] == "one.feedpak"
         assert scanner.finish_count == 2
         assert (tmp_path / "config" / "library_doctor" / "batch_result.json").is_file()
+    finally:
+        sys.modules.pop(name, None)
+
+
+def test_batch_preview_excludes_packages_with_required_recovery(tmp_path):
+    name, module = _load_batch_module()
+    try:
+        repairs = _RecoveryAwareRepairService()
+        manager = module.BatchRepairManager(
+            config_dir=tmp_path / "config",
+            scanner=_Scanner(),
+            repair_service=repairs,
+            repair_error_type=_RepairError,
+            log=logging.getLogger("library-doctor-batch-recovery-lock-tests"),
+        )
+        snapshot = {
+            "schema": "library_doctor.repair_scope.v1",
+            "target": {"kind": "folder", "label": "Test folder"},
+            "deep_audio": False,
+            "validator_version": "rules-test",
+            "scope_package_count": 2,
+            "candidates": [
+                {
+                    "package": package,
+                    "title": package,
+                    "artist": "Artist",
+                    "rule_codes": ["chart.duplicate-note"],
+                }
+                for package in ("one.feedpak", "two.feedpak")
+            ],
+        }
+
+        manager.start_preview(snapshot)
+        manager.join(5)
+        preview = manager.status()["preview"]
+
+        assert preview["eligible_count"] == 1
+        assert preview["blocked_count"] == 1
+        assert preview["packages"][0]["package"] == "one.feedpak"
+        assert preview["blocked"][0]["package"] == "two.feedpak"
+        assert preview["blocked"][0]["code"] == "recovery_required"
     finally:
         sys.modules.pop(name, None)
 

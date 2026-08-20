@@ -2,6 +2,7 @@ import concurrent.futures
 import importlib.util
 import json
 import logging
+import sqlite3
 import sys
 import threading
 import time
@@ -159,13 +160,13 @@ def _wait_for_batch(client, phases, timeout=10):
 
 def test_audio_response_supports_browser_byte_ranges():
     root = Path(__file__).parents[1]
-    routes = _load(root / "routes.py", "library_doctor_routes_range_test")
+    support = _load(root / "route_support.py", "library_doctor_route_support_range_test")
     payload = b"0123456789"
 
-    full = routes._audio_response(payload)
-    first = routes._audio_response(payload, "bytes=0-3")
-    remainder = routes._audio_response(payload, "bytes=7-")
-    suffix = routes._audio_response(payload, "bytes=-3")
+    full = support.audio_response(payload)
+    first = support.audio_response(payload, "bytes=0-3")
+    remainder = support.audio_response(payload, "bytes=7-")
+    suffix = support.audio_response(payload, "bytes=-3")
 
     assert full.status_code == 200
     assert full.body == payload
@@ -186,12 +187,12 @@ def test_audio_response_supports_browser_byte_ranges():
 )
 def test_audio_response_rejects_invalid_or_unsupported_ranges(range_header):
     root = Path(__file__).parents[1]
-    routes = _load(
-        root / "routes.py",
-        f"library_doctor_routes_invalid_range_test_{range_header}",
+    support = _load(
+        root / "route_support.py",
+        f"library_doctor_route_support_invalid_range_test_{range_header}",
     )
 
-    response = routes._audio_response(b"0123456789", range_header)
+    response = support.audio_response(b"0123456789", range_header)
 
     assert response.status_code == 416
     assert response.body == b""
@@ -265,6 +266,35 @@ def test_deep_audio_option_is_forwarded_and_reported(tmp_path):
     assert response.status_code == 202
     assert status["deep_audio"] is True
     assert observed == [True]
+    client.close()
+
+
+def test_results_mark_packages_locked_by_required_recovery(tmp_path):
+    def hook(module):
+        def recovery_states(_service, packages):
+            package = next(iter(packages))
+            return {
+                package: {
+                    "required": True,
+                    "file_state": "recovery_required",
+                    "backup_id": "20260820-120000-123456789abc",
+                    "restore_available": True,
+                    "message": "Resolve the interrupted repair.",
+                    "next_action": "resolve_recovery",
+                }
+            }
+
+        module.RepairService.recovery_states = recovery_states
+
+    client, library = _client(tmp_path, repair_hook=hook)
+    _valid_package(library)
+    client.post("/api/plugins/library_doctor/scan")
+    _wait_for_scan(client)
+
+    report = client.get("/api/plugins/library_doctor/results").json()["items"][0]
+
+    assert report["features"]["recovery"]["required"] is True
+    assert report["features"]["recovery"]["next_action"] == "resolve_recovery"
     client.close()
 
 
@@ -1225,6 +1255,13 @@ def test_status_accepts_the_independent_review_difficulty_view(tmp_path):
     assert full.status_code == 200, full.text
     assert full.json()["review_difficulty_scope"] == "full_only"
     assert invalid.status_code == 400
+    assert invalid.json()["detail"] == {
+        "code": "invalid_review_difficulty_scope",
+        "message": "Unknown review difficulty scope",
+        "file_state": "unchanged",
+        "retryable": False,
+        "next_action": "correct_request",
+    }
     client.close()
 
 
@@ -1233,7 +1270,7 @@ def test_unexpected_database_fault_stays_inside_the_error_contract(tmp_path):
 
     def scanner_hook(module):
         def fail_status(_scanner, _review_difficulty_scope="all_authored"):
-            raise module.sqlite3.DatabaseError(private_detail)
+            raise sqlite3.DatabaseError(private_detail)
 
         module.LibraryScanner.status = fail_status
 
@@ -3984,7 +4021,7 @@ def test_failed_candidate_validation_keeps_the_original_and_creates_no_backup(tm
 
         def reject_candidate(path, *args, **kwargs):
             report = original(path, *args, **kwargs)
-            if ".library-doctor-repair-" in str(path):
+            if ".library-doctor-work-" in str(path):
                 report["findings"].append({
                     "severity": "error",
                     "code": "test.candidate-regression",

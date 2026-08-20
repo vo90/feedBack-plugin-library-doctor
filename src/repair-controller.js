@@ -51,7 +51,7 @@ export function createRepairController({
       }
       if (restoredChange.change_kind === 'replace_media') {
         if (restoredChange.media?.creates_preview) {
-          return 'Removed the generated preview and restored the exact original manifest from recovery storage. The package has no embedded preview again.';
+          return 'Removed the generated preview and restored the exact original song settings from the recovery copy. The package has no embedded preview again.';
         }
         return 'Restored the exact original preview state from recovery storage. The repaired preview recommendation is expected to return.';
       }
@@ -70,7 +70,7 @@ export function createRepairController({
     }
     if (summaries.length > 1) {
       const changes = summaries.map((item) => plannedRepairChange(item));
-      return `Applied ${number(summaries.length)} safe repair types in one transaction with ${number(count)} safe stored ${count === 1 ? 'change' : 'changes'}: ${changes.join('; ')}.`;
+      return `Applied ${number(summaries.length)} kinds of safe fix together, making ${number(count)} safe stored ${count === 1 ? 'change' : 'changes'}: ${changes.join('; ')}.`;
     }
     if (receipt.change_kind === 'combined' && summaries.length === 1) {
       return `${completedRepairChange(summaries[0])}.`;
@@ -112,6 +112,117 @@ export function createRepairController({
     });
   }
 
+  function repairReceiptKey(receipt) {
+    return receipt && (receipt.backup_id || receipt.id);
+  }
+
+  function recoveryRequired(receipt) {
+    return Boolean(
+      receipt?.recovery_required || receipt?.file_state === 'recovery_required',
+    );
+  }
+
+  function receiptNeedsAttention(receipt) {
+    return Boolean(
+      recoveryRequired(receipt)
+      || receipt?.undo_available
+      || receipt?.file_handling?.backup_cleanup_required
+      || (receipt?.file_handling?.backup_retained && receipt?.outcome === 'restored'),
+    );
+  }
+
+  function upsertRepairHistory(receipt) {
+    const key = repairReceiptKey(receipt);
+    if (!key) return;
+    const existing = Array.isArray(state.repairHistory) ? state.repairHistory : [];
+    state.repairHistory = [
+      receipt,
+      ...existing.filter((item) => repairReceiptKey(item) !== key),
+    ].slice(0, 20);
+  }
+
+  function renderRecoveryList() {
+    const list = el.recoveryList;
+    if (!list) return;
+    const actionableItems = (Array.isArray(state.repairHistory) ? state.repairHistory : [])
+      .filter(receiptNeedsAttention);
+    const latestKey = repairReceiptKey(state.latestRepair);
+    const items = actionableItems.filter((receipt) => (
+      !latestKey || repairReceiptKey(receipt) !== latestKey
+    ));
+    list.replaceChildren();
+    text(
+      el.activitySummaryLabel,
+      actionableItems.length
+        ? `Activity and recovery · ${number(actionableItems.length)} ${actionableItems.length === 1 ? 'action' : 'actions'}`
+        : 'Activity and recovery',
+    );
+    setHidden(list, items.length === 0);
+    items.forEach((receipt) => {
+      const required = recoveryRequired(receipt);
+      const card = make(
+        'article',
+        required ? 'lh-recovery-item lh-recovery-item-required' : 'lh-recovery-item',
+      );
+      card.appendChild(badge(
+        required ? 'Recovery needed' : 'Undo available',
+        required ? 'error' : 'review',
+      ));
+      card.appendChild(make(
+        'h4',
+        '',
+        receipt.title || receipt.package || 'Selected song',
+      ));
+      if (receipt.artist) card.appendChild(make('p', 'lh-muted', receipt.artist));
+      card.appendChild(make(
+        'p',
+        '',
+        required
+          ? receipt.file_state_copy || receipt.message || 'This song is locked against further changes until recovery is resolved.'
+          : 'Library Doctor still has the saved original data for this repair.',
+      ));
+      const actions = make('div', 'lh-repair-buttons');
+      const resolutionActions = new Set(receipt.resolution_actions || []);
+      if (required && resolutionActions.has('restore')) {
+        const restore = make('button', 'lh-button lh-button-primary', 'Restore saved original');
+        restore.type = 'button';
+        restore.addEventListener('click', () => confirmRestore(receipt, restore, actions));
+        actions.appendChild(restore);
+      } else if (!required && receipt.undo_available && receipt.backup_id) {
+        const undo = make('button', 'lh-button', 'Undo repair');
+        undo.type = 'button';
+        undo.addEventListener('click', () => confirmRestore(receipt, undo, actions));
+        actions.appendChild(undo);
+      }
+      if (required && resolutionActions.has('finalize')) {
+        const keep = make('button', 'lh-button', 'Keep current version');
+        keep.type = 'button';
+        keep.addEventListener('click', () => confirmFinalizeRecovery(receipt, keep, actions));
+        actions.appendChild(keep);
+      } else if (!required && receipt.backup_id && (
+        receipt.undo_available || receipt.file_handling?.backup_cleanup_required
+        || receipt.file_handling?.backup_retained
+      )) {
+        const finalize = make('button', 'lh-button', 'Remove recovery copy…');
+        finalize.type = 'button';
+        finalize.addEventListener('click', () => confirmFinalizeRecovery(
+          receipt, finalize, actions,
+        ));
+        actions.appendChild(finalize);
+      }
+      if (required && actions.childElementCount === 0) {
+        card.appendChild(make(
+          'p',
+          'lh-repair-warning',
+          'Library Doctor found song files that no longer match either saved state. It will not overwrite them automatically. Keep the current package and recovery copy, then review the song files manually or include diagnostics when asking for help.',
+        ));
+      }
+      if (actions.childElementCount) card.appendChild(actions);
+      list.appendChild(card);
+    });
+    if (actionableItems.length) setHidden(el.activitySection, false);
+  }
+
   function renderRepairFailure(report, error) {
     const stateCopy = error.fileState === 'recovery_required'
       ? 'Automatic rollback could not be confirmed. Do not play or repair this package again until its recovery backup has been restored.'
@@ -127,14 +238,18 @@ export function createRepairController({
       artist: report.artist || '',
       message: error.message,
       file_state_copy: stateCopy,
+      file_state: error.fileState,
+      recovery_required: error.fileState === 'recovery_required',
     });
   }
 
   function renderRepairResult(receipt, { reveal = true } = {}) {
-    const receiptKey = receipt && (receipt.backup_id || receipt.id);
-    if (!receipt || !el.repairResult || receiptKey === state.dismissedRepairId) return;
+    if (!receipt || !el.repairResult) return;
+    upsertRepairHistory(receipt);
     state.latestRepair = receipt;
+    renderRecoveryList();
     const failed = receipt.outcome === 'failure';
+    const requiredRecovery = recoveryRequired(receipt);
     const restored = receipt.outcome === 'restored' || receipt.action === 'restore';
     const finalized = receipt.outcome === 'finalized' || receipt.action === 'finalize';
     const cleanupRequired = Boolean(receipt.file_handling?.backup_cleanup_required);
@@ -149,13 +264,15 @@ export function createRepairController({
     const heading = make('div', 'lh-repair-result-heading');
     const copy = make('div');
     copy.appendChild(badge(
-      failed ? 'Nothing changed' : restored ? 'Original restored' : finalized ? 'Undo backup deleted' : cleanupRequired ? 'Change completed · cleanup needed' : 'Change completed',
+      requiredRecovery ? 'Recovery needed' : failed ? 'Nothing changed' : restored ? 'Original restored' : finalized ? 'Undo backup deleted' : cleanupRequired ? 'Change completed · cleanup needed' : 'Change completed',
       failed ? 'error' : finalized || cleanupRequired ? 'review' : 'good',
     ));
     copy.appendChild(make(
       'h3',
       '',
-      failed
+      requiredRecovery
+        ? 'This song is locked until recovery is resolved'
+        : failed
         ? 'The repair was not completed'
         : restored
           ? receipt.change_kind === 'replace_media'
@@ -174,22 +291,25 @@ export function createRepairController({
       'lh-muted',
       `${receipt.title || receipt.package || 'Selected package'}${receipt.artist ? ` — ${receipt.artist}` : ''}`,
     ));
-    const dismiss = make('button', 'lh-repair-dismiss', 'Dismiss');
-    dismiss.type = 'button';
-    dismiss.setAttribute('aria-label', 'Dismiss repair result');
-    dismiss.addEventListener('click', () => {
-      state.dismissedRepairId = receiptKey;
-      state.latestRepair = null;
-      setHidden(panel, true);
-      setHidden(el.activitySection, true);
-      actionRegistry.updateDashboardShell(state.status || {});
+    const collapse = make('button', 'lh-repair-dismiss', 'Collapse details');
+    collapse.type = 'button';
+    collapse.setAttribute('aria-label', 'Collapse activity and recovery details');
+    collapse.addEventListener('click', () => {
+      el.activitySection.open = false;
+      el.activitySection.querySelector('summary')?.focus();
     });
     heading.appendChild(copy);
-    heading.appendChild(dismiss);
+    heading.appendChild(collapse);
     panel.appendChild(heading);
 
     const answers = make('div', 'lh-repair-result-answers');
-    const blocks = failed ? [
+    const blocks = requiredRecovery ? [
+      ['What happened', receipt.message || 'An interrupted repair could not be reconciled automatically.'],
+      ['Safety state', receipt.file_state_copy || 'The current package and recovery copy were preserved. Further changes are locked.'],
+      ['What to do next', (receipt.resolution_actions || []).length
+        ? 'Use the available recovery action above. Library Doctor verifies the current files again before changing or removing anything.'
+        : 'Library Doctor will not overwrite either version automatically. Keep both versions and review this song manually or include diagnostics when asking for help.'],
+    ] : failed ? [
       ['What happened', receipt.message || 'The repair could not be completed.'],
       ['What changed in the Feedpak', receipt.file_state_copy],
       ['What to do next', receipt.file_state_copy?.includes('Scan')
@@ -208,8 +328,8 @@ export function createRepairController({
     ] : [
       ['What changed', repairChangeSummary(receipt)],
       ['What to expect in game', receipt.player_result || 'FeedBack will load the repaired song data the next time the song is opened.'],
-      ['Why the fix matters', receipt.user_value || 'The repaired data is now unambiguous and passed the current validation checks.'],
-      ['What happened to the Feedpak', receipt.file_handling?.summary || 'The validated candidate replaced the package at the same path. No duplicate song was added, and original changed song-data files were backed up.'],
+      ['Why the fix matters', receipt.user_value || 'The repaired data is now unambiguous and passed every safety check.'],
+      ['What happened to the Feedpak', receipt.file_handling?.summary || 'Library Doctor checked the complete repaired song before replacing the Feedpak at the same location. No duplicate song was added, and the original changed song data was saved for Undo.'],
     ];
     blocks.forEach(([label, value]) => {
       const block = make('div', 'lh-repair-result-answer');
@@ -249,8 +369,8 @@ export function createRepairController({
           : finalized
             ? `The current package members were checked against the recovery record before it was removed.${receipt.receipt_saved === false ? ' The recovery copy was removed, but this result could not be saved to repair history.' : ''}`
           : cleanupRequired
-            ? `The complete repaired candidate passed validation before it replaced the existing package. Its temporary recovery copy could not be removed automatically; use the cleanup option below to finish.${receipt.cache_updated === false ? ' Scan this package again to refresh its displayed result.' : ''}`
-            : `The complete repaired candidate passed validation before it replaced the existing package.${completedPreview ? ' Its temporary recovery copy was removed automatically, so this preview repair is fully complete.' : ''}${receipt.cache_updated === false ? ' The repair succeeded, but you should scan this package again to refresh its displayed result.' : ''}${receipt.receipt_saved === false ? completedPreview ? ' The repair succeeded and left no recovery copy, but this result could not be saved to repair history.' : ' The repair succeeded, but this result could not be saved to repair history; the recovery backup still exists.' : ''}`,
+            ? `The complete repaired song passed every safety check before it replaced the existing package. Its temporary recovery copy could not be removed automatically; use the cleanup option below to finish.${receipt.cache_updated === false ? ' Scan this package again to refresh its displayed result.' : ''}`
+            : `The complete repaired song passed every safety check before it replaced the existing package.${completedPreview ? ' Its temporary recovery copy was removed automatically, so this preview repair is fully complete.' : ''}${receipt.cache_updated === false ? ' The repair succeeded, but you should scan this package again to refresh its displayed result.' : ''}${receipt.receipt_saved === false ? completedPreview ? ' The repair succeeded and left no recovery copy, but this result could not be saved to repair history.' : ' The repair succeeded, but this result could not be saved to repair history; the recovery backup still exists.' : ''}`,
       ));
     }
 
@@ -411,10 +531,14 @@ export function createRepairController({
 
   async function loadRepairHistory() {
     try {
-      const payload = await request('/repair/history?limit=1');
+      const payload = await request('/repair/history?limit=20');
       if (!state.active) return;
-      const latest = Array.isArray(payload?.items) ? payload.items[0] : null;
+      const items = Array.isArray(payload?.items) ? payload.items : [];
+      state.repairHistory = items.slice(0, 20);
+      renderRecoveryList();
+      const latest = items[0] || null;
       if (latest) renderRepairResult(latest, { reveal: false });
+      else if (!state.latestRepair) setHidden(el.activitySection, true);
     } catch (error) {
       if (isAbortError(error)) return;
       console.warn('[Library Doctor] Could not load repair history:', error);
@@ -425,6 +549,7 @@ export function createRepairController({
     if (
       state.status?.target?.repairs_available === false
       || report.features?.repair_scan_current === false
+      || report.features?.recovery?.required === true
     ) return null;
     const definition = state.repairRules[finding.code];
     if (!definition || !['safe_automatic', 'review_required'].includes(definition.safety)) return null;
@@ -462,7 +587,7 @@ export function createRepairController({
       [
         'What happens to the Feedpak',
         plan.file_handling?.summary || (
-          'A complete repaired candidate is validated first. It then replaces the existing Feedpak at the same path, while the original changed song-data files are kept in private recovery storage. No duplicate song is added to the library.'
+          'Library Doctor checks the complete repaired song first. It then replaces the Feedpak at the same location, while the original changed song data is saved privately for Undo. No duplicate song is added to the library.'
         ),
       ],
     ].forEach(([label, value]) => {
@@ -476,8 +601,8 @@ export function createRepairController({
       'p',
       'lh-muted',
       plan.change_kind === 'replace_media'
-        ? 'If audio generation, temporary recovery, integrity checking, or validation fails, the existing Feedpak is not replaced. After a successful repair, the temporary recovery copy is removed automatically and the new preview is ready to use.'
-        : 'If candidate creation, backup, integrity checking, or validation fails, the existing Feedpak is not replaced. After a successful repair, Undo can restore the saved original song data.',
+        ? 'If Library Doctor cannot create the audio, save a recovery copy, or pass every safety check, the existing Feedpak is not replaced. After a successful repair, the temporary recovery copy is removed automatically and the new preview is ready to use.'
+        : 'If Library Doctor cannot prepare the repaired song, save an Undo copy, or pass every safety check, the existing Feedpak is not replaced. After a successful repair, Undo can restore the saved original song data.',
     ));
   }
 
@@ -485,6 +610,7 @@ export function createRepairController({
     if (
       state.status?.target?.repairs_available === false
       || report.features?.repair_scan_current === false
+      || report.features?.recovery?.required === true
     ) return new Set();
     return new Set(
       (Array.isArray(report.findings) ? report.findings : [])
@@ -508,7 +634,7 @@ export function createRepairController({
     copy.appendChild(make(
       'p',
       '',
-      `${number(ruleCodes.size)} safe repair types are available for this Feedpak. Review and apply them together with one validation, one backup, and one Undo.`,
+      `${number(ruleCodes.size)} kinds of safe fix are available for this Feedpak. Review and apply them together after one complete-song safety check, with one recovery copy and one Undo.`,
     ));
     heading.appendChild(copy);
     heading.appendChild(badge(`${number(ruleCodes.size)} safe fixes`, 'good'));

@@ -714,8 +714,8 @@ class PreviewRepairEngine:
                     "backup_created": True,
                     "backup_contents": "original_preview_and_manifest_state",
                     "summary": (
-                        "Library Doctor validates a complete candidate before replacing the Feedpak "
-                        "at the same path. Temporary recovery data protects the write and is removed "
+                        "Library Doctor checks the complete repaired song before replacing the Feedpak "
+                        "at the same location. Temporary recovery data protects the write and is removed "
                         "automatically after success; no duplicate playable song or pending preview backup remains."
                     ),
                 },

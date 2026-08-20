@@ -20,7 +20,7 @@ function initialState() {
     batchRenderKey: '',
     batchAttentionKey: '',
     latestRepair: null,
-    dismissedRepairId: null,
+    repairHistory: [],
     dashboardView: '',
     legacyLayout: false,
     targetKind: 'library',

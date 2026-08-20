@@ -133,7 +133,7 @@ def test_phase1_shell_is_progressive_and_reversible():
     assert '<details id="lh-scan-options"' in screen
     assert '<details id="lh-more-filters"' in screen
     assert '<details id="lh-scan-details"' in screen
-    assert screen.index('id="lh-batch-section"') < screen.index('id="lh-results"')
+    assert screen.index('id="lh-results"') < screen.index('id="lh-batch-section"')
     assert screen.index('id="lh-health-workspace"') < screen.index('id="lh-repair-result"')
     assert screen.index('id="lh-repair-result"') < screen.index('id="lh-song-tools-workspace"')
     assert "libraryDoctorLayout" in script
@@ -228,10 +228,11 @@ def test_player_review_declares_scope_and_uses_capability_owned_player_surfaces(
     assert "Manual Player Review:" in screen
     assert "only for songs inside the configured song library" in screen
     assert "Review in Player" in script
-    assert "Accept & Next issue" in script
-    assert "Apply accepted changes" in script
-    assert "Undo applied group" in script
-    assert "Finalize applied group" in script
+    assert "Keep choice & next" in script
+    assert "Review ${number(acceptedChanging)} selected change" in script
+    assert "Apply ${number(reviewSession.pendingPlan.changing_count)} selected change" in script
+    assert "Undo applied changes" in script
+    assert "Keep changes (remove Undo)" in script
     assert "Return to Library Doctor" in script
     assert "dispatch('playback', 'start'" in script
     assert "dispatch('chart-transform', 'register-provider'" in script
@@ -307,7 +308,7 @@ def test_batch_preview_repairs_are_explicit_opt_in_and_explain_recovery():
     styles = (ROOT / "assets" / "library-doctor.css").read_text(encoding="utf-8")
 
     assert 'id="lh-batch-preview-media" type="checkbox"' in screen
-    assert "Also repair flagged audio previews automatically" in screen
+    assert "Also include flagged audio previews" in screen
     assert "include_preview_repairs: !!el.batchPreviewMedia.checked" in script
     assert "Valid previews are untouched" in screen
     assert "are not included in Undo" in script
@@ -421,7 +422,7 @@ def test_screen_offers_one_combined_transaction_for_multiple_safe_repair_types()
     assert script.index("request('/repair/all/preview'") < script.index(
         "request('/repair/all/apply'"
     )
-    assert "one validation, one backup, and one Undo" in script
+    assert "one complete-song safety check, with one recovery copy and one Undo" in script
     assert "Apply all safe fixes" in script
     assert "repair_summaries" in script
 
@@ -438,7 +439,7 @@ def test_screen_requires_batch_preview_and_confirmation_with_progress_and_recove
     )
     assert "Continue to confirmation" in script
     assert "Apply batch repair" in script
-    assert "Stop after current Feedpak" in script
+    assert "Stop after current song" in script
     assert "Library Doctor batch paused - resumes when you exit" in script
     assert "Review Undo" in script
     assert "request('/repair/batch/undo/preview'" in script
@@ -461,7 +462,8 @@ def test_screen_requires_batch_preview_and_confirmation_with_progress_and_recove
     assert "Originals restored" in script
     assert "Number(result.completed_count || 0)" in script
     assert "Package outcome details will return when the current operation finishes." in script
-    assert "Review safe repairs" in screen
+    assert "Fix several songs" in screen
+    assert "Preview multi-song fixes" in screen
     assert ".lh-batch-progress" in styles
     assert ".lh-batch-undo-card" in styles
 
