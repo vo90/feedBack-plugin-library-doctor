@@ -97,12 +97,22 @@ def _zip_info(name: str) -> zipfile.ZipInfo:
     return info
 
 
+def _archive_bytes(source: Path) -> bytes:
+    """Return platform-independent bytes for an allowlisted text file."""
+    data = source.read_bytes()
+    try:
+        data.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise ValueError(f"Release allowlist contains a non-UTF-8 file: {source}") from error
+    return data.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+
+
 def build_release(output: Path, root: Path = ROOT) -> Path:
     output = output.resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
         for source, member in zip(release_files(root), expected_members(root), strict=True):
-            archive.writestr(_zip_info(member), source.read_bytes(), compresslevel=9)
+            archive.writestr(_zip_info(member), _archive_bytes(source), compresslevel=9)
     verify_release(output, root)
     return output
 

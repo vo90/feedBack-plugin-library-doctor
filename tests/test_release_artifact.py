@@ -39,6 +39,25 @@ def test_release_zip_is_deterministic_allowlisted_and_installable(tmp_path):
         py_compile.compile(str(source), doraise=True)
 
 
+def test_release_zip_is_identical_across_line_ending_styles(tmp_path):
+    lf_root = tmp_path / "lf"
+    crlf_root = tmp_path / "crlf"
+    for source in build_release.release_files():
+        relative = source.relative_to(build_release.ROOT)
+        lf_target = lf_root / relative
+        crlf_target = crlf_root / relative
+        lf_target.parent.mkdir(parents=True, exist_ok=True)
+        crlf_target.parent.mkdir(parents=True, exist_ok=True)
+        normalized = build_release._archive_bytes(source)
+        lf_target.write_bytes(normalized)
+        crlf_target.write_bytes(normalized.replace(b"\n", b"\r\n"))
+
+    lf_zip = build_release.build_release(tmp_path / "lf.zip", root=lf_root)
+    crlf_zip = build_release.build_release(tmp_path / "crlf.zip", root=crlf_root)
+
+    assert lf_zip.read_bytes() == crlf_zip.read_bytes()
+
+
 def test_release_contains_every_runtime_sibling_reference():
     relative_files = {
         path.relative_to(build_release.ROOT).as_posix()

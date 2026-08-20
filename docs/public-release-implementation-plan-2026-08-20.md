@@ -6,10 +6,10 @@ Date: 2026-08-20
 
 Phases 0 through 9 are implemented and locally verified as of 2026-08-20. The
 exact allowlisted 76-file `0.45.0` release ZIP (SHA-256
-`19fce239113fd7599a53e8185a8025ec9f1a6f560fce804514fbe093af5365a7`)
+`9fb360316ec2a9f472d260b0eb79712c76c45dbbc74c4c0ee5ba0b89ac9a30f0`)
 loaded in a disposable current FeedBack host and passed all nine Playwright
-journeys. The complete local gates passed with 565 Python tests, 89 frontend
-tests, 85.89% Python coverage, clean Python/Node dependency audits,
+journeys. The complete local gates passed with 566 Python tests, 89 frontend
+tests, 85.88% Python coverage, clean Python/Node dependency audits,
 minimum/current host-contract checks, Python and JavaScript static checks, and
 deterministic release-artifact verification.
 

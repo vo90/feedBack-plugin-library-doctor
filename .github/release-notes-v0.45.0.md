@@ -60,14 +60,14 @@ available.
 
 ## Verification
 
-- 565 Python tests passed with 85.89% coverage.
+- 566 Python tests passed with 85.88% coverage.
 - 89 frontend tests passed.
 - 9 installed-plugin browser journeys passed against the current FeedBack
   nightly host, including repair/Undo and accessibility journeys.
 - Python and Node dependency audits reported no known vulnerabilities.
 - The minimum and current FeedBack capability contracts passed.
 
-ZIP SHA-256: `19fce239113fd7599a53e8185a8025ec9f1a6f560fce804514fbe093af5365a7`
+ZIP SHA-256: `9fb360316ec2a9f472d260b0eb79712c76c45dbbc74c4c0ee5ba0b89ac9a30f0`
 
 ## Need help?
 
