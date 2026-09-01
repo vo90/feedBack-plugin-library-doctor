@@ -316,6 +316,20 @@ def test_batch_preview_repairs_are_explicit_opt_in_and_explain_recovery():
     assert ".lh-batch-preview-option" in styles
 
 
+def test_batch_repairs_offer_separate_adaptive_worker_controls():
+    script = _source("screen.js")
+    screen = _source("screen.html")
+
+    assert 'id="lh-repair-worker-mode"' in screen
+    assert 'id="lh-repair-worker-limit"' in screen
+    assert "Repair performance" in screen
+    assert re.search(r"Final package saving\s+remains\s+coordinated", screen)
+    assert "library_doctor.repair.worker_mode" in script
+    assert "library_doctor.repair.worker_limit" in script
+    assert "payload.max_workers" in script
+    assert "worker_policy?.selected_workers" in script
+
+
 def test_preview_tools_can_replace_a_valid_preview_and_show_the_finished_audio():
     script = _source("screen.js")
     screen = (ROOT / "screen.html").read_text(encoding="utf-8")

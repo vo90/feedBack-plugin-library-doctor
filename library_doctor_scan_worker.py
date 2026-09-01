@@ -15,6 +15,7 @@ import importlib.util
 import multiprocessing
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -189,12 +190,19 @@ class ValidationProcessPool:
                 self._cancel_event,
             ),
         )
+        self._shutdown_lock = threading.Lock()
+        self._shutdown_processes = None
+        self._shutdown_complete = False
+        self._shutdown_started = False
 
     def submit(self, path: Path, package: str, deep_audio: bool):
-        return self._executor.submit(
-            _validate_task,
-            (str(path), package, bool(deep_audio)),
-        )
+        with self._shutdown_lock:
+            if self._shutdown_started:
+                raise RuntimeError("validation process pool is stopping")
+            return self._executor.submit(
+                _validate_task,
+                (str(path), package, bool(deep_audio)),
+            )
 
     def set_paused(self, paused: bool) -> None:
         if paused:
@@ -203,8 +211,10 @@ class ValidationProcessPool:
             self._pause_event.clear()
 
     def cancel(self) -> None:
-        self._cancel_event.set()
-        self._pause_event.clear()
+        with self._shutdown_lock:
+            self._shutdown_started = True
+            self._cancel_event.set()
+            self._pause_event.clear()
 
     def memory_usage(self) -> dict[int, int]:
         """Return best-effort RSS by worker PID for parent-side budget checks."""
@@ -230,33 +240,95 @@ class ValidationProcessPool:
         timeout_seconds: float = 5.0,
     ) -> None:
         """Stop workers within a bounded interval, terminating stragglers."""
-        self._pause_event.clear()
-        self._cancel_event.set()
-        processes = list((getattr(self._executor, "_processes", None) or {}).values())
-        self._executor.shutdown(wait=False, cancel_futures=True)
-        deadline = time.monotonic() + max(0.0, float(timeout_seconds))
+        shutdown_lock = getattr(self, "_shutdown_lock", None)
+        if shutdown_lock is None:
+            shutdown_lock = threading.Lock()
+            self._shutdown_lock = shutdown_lock
+        with shutdown_lock:
+            if getattr(self, "_shutdown_complete", False):
+                return
+            self._shutdown_started = True
+            try:
+                self._pause_event.clear()
+            except Exception:
+                pass
+            try:
+                self._cancel_event.set()
+            except Exception:
+                pass
+            if getattr(self, "_shutdown_processes", None) is None:
+                self._shutdown_processes = list(
+                    (getattr(self._executor, "_processes", None) or {}).values()
+                )
+            processes = list(self._shutdown_processes)
+            try:
+                self._executor.shutdown(wait=False, cancel_futures=True)
+            except Exception:
+                # The captured process handles below remain authoritative.  A
+                # management-thread failure must not skip child termination.
+                pass
+            deadline = time.monotonic() + max(0.0, float(timeout_seconds))
 
-        if not force:
-            for process in processes:
-                remaining = max(0.0, deadline - time.monotonic())
-                process.join(remaining)
+            if not force:
+                for process in processes:
+                    try:
+                        remaining = max(0.0, deadline - time.monotonic())
+                        process.join(remaining)
+                    except Exception:
+                        continue
 
-        alive = [process for process in processes if process.is_alive()]
-        for process in alive:
-            process.terminate()
-        terminate_deadline = time.monotonic() + 1.0
-        for process in alive:
-            process.join(max(0.0, terminate_deadline - time.monotonic()))
+            alive = self._alive_processes(processes)
+            for process in alive:
+                try:
+                    process.terminate()
+                except Exception:
+                    continue
+            terminate_deadline = deadline
+            for process in alive:
+                try:
+                    process.join(
+                        max(0.0, terminate_deadline - time.monotonic())
+                    )
+                except Exception:
+                    continue
 
-        alive = [process for process in alive if process.is_alive()]
-        for process in alive:
-            kill = getattr(process, "kill", None)
-            if callable(kill):
-                kill()
-            else:  # pragma: no cover - current supported Python exposes kill.
-                process.terminate()
-        for process in alive:
-            process.join(0.25)
+            alive = self._alive_processes(alive)
+            for process in alive:
+                try:
+                    kill = getattr(process, "kill", None)
+                    if callable(kill):
+                        kill()
+                    else:  # pragma: no cover - supported Python exposes kill.
+                        process.terminate()
+                except Exception:
+                    continue
+            kill_deadline = deadline
+            for process in alive:
+                try:
+                    process.join(
+                        max(0.0, kill_deadline - time.monotonic())
+                    )
+                except Exception:
+                    continue
+
+            alive = self._alive_processes(alive)
+            if alive:
+                raise RuntimeError(
+                    f"{len(alive)} validation worker process(es) did not stop"
+                )
+            self._shutdown_complete = True
+
+    @staticmethod
+    def _alive_processes(processes) -> list:
+        alive = []
+        for process in processes:
+            try:
+                if process.is_alive():
+                    alive.append(process)
+            except Exception:
+                # An unreadable process state is not proof that it stopped.
+                alive.append(process)
+        return alive
 
     def terminate(self, *, timeout_seconds: float = 1.0) -> None:
         self.shutdown(force=True, timeout_seconds=timeout_seconds)

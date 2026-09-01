@@ -9,6 +9,7 @@ contracts.
 from __future__ import annotations
 
 import copy
+import concurrent.futures
 import hashlib
 import json
 import os
@@ -30,6 +31,10 @@ BATCH_CHECKPOINT_SCHEMA = "library_doctor.batch_checkpoint.v1"
 MAX_BATCH_PACKAGES = 10_000
 CHECKPOINT_INTERVAL_SECONDS = 60.0
 CHECKPOINT_PACKAGE_INTERVAL = 100
+MAX_DEFAULT_PREPARE_WORKERS = 4
+PROCESS_STOP_MAX_ATTEMPTS = 3
+PROCESS_STOP_ATTEMPT_SECONDS = 0.25
+_DEFAULT_PREPARE_EXECUTOR = object()
 _SKIPPED_REPAIR_CODES = {
     "source_changed",
     "nothing_to_repair",
@@ -78,6 +83,528 @@ def _digest(value: dict) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _default_prepare_worker_policy(
+    pending_packages: int,
+    *,
+    deep_audio: bool,
+    include_preview_repairs: bool,
+    requested_max: int | None,
+    worker_backend_available: bool,
+    storage_total_bytes: int | None = None,
+    storage_free_bytes: int | None = None,
+    largest_source_package_bytes: int | None = None,
+) -> dict:
+    del storage_total_bytes, storage_free_bytes, largest_source_package_bytes
+    pending = max(0, int(pending_packages or 0))
+    logical = max(1, os.cpu_count() or 1)
+    physical_guess = max(1, (logical + 1) // 2)
+    recommended = min(max(1, pending), physical_guess, MAX_DEFAULT_PREPARE_WORKERS)
+    if include_preview_repairs:
+        recommended = min(recommended, 2)
+    manual = requested_max if isinstance(requested_max, int) and requested_max > 0 else None
+    selected = min(recommended, manual) if manual is not None else recommended
+    reason = "automatic"
+    if not worker_backend_available:
+        selected = 1
+        reason = "worker_backend_unavailable"
+    elif pending < 2:
+        selected = 1
+        reason = "small_scope"
+    return {
+        "schema": "library_doctor.repair_worker_policy.v1",
+        "mode": "custom" if manual is not None else "automatic",
+        "reason": reason,
+        "selected_workers": max(1, selected),
+        "recommended_workers": max(1, recommended),
+        "manual_max_workers": manual,
+        "pending_packages": pending,
+        "deep_audio": bool(deep_audio),
+        "include_preview_repairs": bool(include_preview_repairs),
+        "logical_cpus": logical,
+    }
+
+
+class _PreparedApplyPipeline:
+    """Prepare distinct packages concurrently and expose serialized commits."""
+
+    def __init__(
+        self,
+        manager,
+        plans: list[dict],
+        snapshot: dict,
+        worker_policy: dict,
+    ) -> None:
+        self._manager = manager
+        self._plans = plans
+        self._snapshot = snapshot
+        self._service = manager._repair_service
+        self._cancel = manager._cancel
+        self._workers = max(
+            1,
+            min(
+                int(worker_policy.get("selected_workers") or 1),
+                int(worker_policy.get("active_worker_limit") or len(plans)),
+            ),
+        )
+        self._policy = copy.deepcopy(worker_policy)
+        self._executor = None
+        self._process_pool = None
+        self._process_pool_shutdown_lock = threading.Lock()
+        self._process_pool_closed = False
+        self._process_pool_quarantined = False
+        self._validation_runner = None
+        self._futures: dict[int, concurrent.futures.Future] = {}
+        self._consumed: set[int] = set()
+        self._next_index = 0
+        self._index_by_package = {
+            item["package"]: index for index, item in enumerate(plans)
+        }
+        self._started = False
+
+    def _change(self, key: str, amount: int) -> None:
+        with self._manager._lock:
+            state = self._manager._state
+            state[key] = max(0, int(state.get(key) or 0) + int(amount))
+
+    def _set_policy(self, **updates) -> None:
+        self._policy.update(updates)
+        with self._manager._lock:
+            self._manager._state["worker_policy"] = copy.deepcopy(self._policy)
+
+    def _worker_validate(
+        self,
+        path: Path,
+        package: str,
+        *,
+        deep_audio: bool,
+    ) -> dict:
+        if not self._manager._wait_for_playback("applying"):
+            self._shutdown_process_pool(force=True)
+            raise self._manager._repair_error_type(
+                "batch_cancelled",
+                "The batch stopped before this Feedpak was validated.",
+                file_state="unchanged",
+            )
+        try:
+            future = self._process_pool.submit(
+                path, package, bool(deep_audio)
+            )
+            while True:
+                if future.done():
+                    payload = future.result()
+                    break
+                try:
+                    payload = future.result(timeout=0.05)
+                    break
+                except concurrent.futures.TimeoutError:
+                    if self._cancel.is_set():
+                        self._shutdown_process_pool(force=True)
+                        raise self._manager._repair_error_type(
+                            "batch_cancelled",
+                            "The batch stopped before this Feedpak was validated.",
+                            file_state="unchanged",
+                        )
+                    if (
+                        self._manager._scanner.playback_active()
+                        and not self._manager._wait_for_playback("applying")
+                    ):
+                        self._shutdown_process_pool(force=True)
+                        raise self._manager._repair_error_type(
+                            "batch_cancelled",
+                            "The batch stopped before this Feedpak was validated.",
+                            file_state="unchanged",
+                        )
+        except Exception as exc:
+            if getattr(exc, "preserve_candidate_workspace", False):
+                raise
+            if self._cancel.is_set():
+                self._shutdown_process_pool(force=True)
+                raise self._manager._repair_error_type(
+                    "batch_cancelled",
+                    "The batch stopped before this Feedpak was committed.",
+                    file_state="unchanged",
+                ) from exc
+            self._manager._log.warning(
+                "Library Doctor repair validation worker failed for %s: %s",
+                package,
+                type(exc).__name__,
+            )
+            raise self._manager._repair_error_type(
+                "candidate_validation_failed",
+                "A validation worker could not confirm this Feedpak, so nothing was changed.",
+                file_state="unchanged",
+            ) from exc
+        if not isinstance(payload, dict):
+            raise self._manager._repair_error_type(
+                "candidate_validation_failed",
+                "A validation worker returned an invalid result, so nothing was changed.",
+                file_state="unchanged",
+            )
+        if payload.get("outcome") == "complete" and isinstance(
+            payload.get("report"), dict
+        ):
+            return payload["report"]
+        if payload.get("outcome") == "cancelled":
+            if self._cancel.is_set():
+                self._shutdown_process_pool(force=True)
+            raise self._manager._repair_error_type(
+                "batch_cancelled",
+                "The batch stopped before this Feedpak was committed.",
+                file_state="unchanged",
+            )
+        self._manager._log.warning(
+            "Library Doctor repair validation worker rejected %s with %s.",
+            package,
+            str(payload.get("error_type") or "validation_error"),
+        )
+        raise self._manager._repair_error_type(
+            "candidate_validation_failed",
+            "A validation worker could not confirm this Feedpak, so nothing was changed.",
+            file_state="unchanged",
+        )
+
+    def _shutdown_process_pool(
+        self,
+        *,
+        force: bool,
+        timeout_seconds: float = 5.0,
+    ) -> None:
+        with self._process_pool_shutdown_lock:
+            if self._process_pool_closed or self._process_pool is None:
+                return
+            if self._process_pool_quarantined:
+                raise self._manager._validation_pool_stop_error()
+            force_stop = bool(force)
+            last_error = None
+            for attempt in range(1, PROCESS_STOP_MAX_ATTEMPTS + 1):
+                try:
+                    self._process_pool.shutdown(
+                        force=force_stop,
+                        timeout_seconds=min(
+                            max(0.0, float(timeout_seconds)),
+                            PROCESS_STOP_ATTEMPT_SECONDS,
+                        ),
+                    )
+                except Exception as exc:
+                    last_error = exc
+                    force_stop = True
+                    self._manager._log.warning(
+                        "Library Doctor repair validator shutdown attempt %s failed: %s",
+                        attempt,
+                        type(exc).__name__,
+                    )
+                    if attempt < PROCESS_STOP_MAX_ATTEMPTS:
+                        time.sleep(0.05 * attempt)
+                    continue
+                self._process_pool_closed = True
+                return
+            self._process_pool_quarantined = True
+            self._manager._quarantine_prepare_process_pool(
+                self._process_pool,
+                error_type=type(last_error).__name__ if last_error else "unknown",
+            )
+            raise self._manager._validation_pool_stop_error() from last_error
+
+    def start(self) -> None:
+        if self._started:
+            return
+        self._started = True
+        if self._manager._prepare_process_pool_factory is not None:
+            try:
+                self._process_pool = self._manager._prepare_process_pool_factory(
+                    self._workers,
+                    self._service.validator_version,
+                )
+                if not callable(getattr(self._process_pool, "submit", None)):
+                    raise TypeError("invalid repair validation process pool")
+                self._validation_runner = self._worker_validate
+            except Exception as exc:
+                if self._process_pool is not None:
+                    try:
+                        self._process_pool.shutdown(
+                            force=True, timeout_seconds=1.0
+                        )
+                    except Exception:
+                        pass
+                self._process_pool = None
+                self._validation_runner = None
+                self._workers = 1
+                self._manager._log.warning(
+                    "Library Doctor repair process pool was unavailable; using one in-process worker: %s",
+                    type(exc).__name__,
+                )
+                self._set_policy(
+                    reason="worker_backend_unavailable",
+                    selected_workers=1,
+                    active_worker_limit=1,
+                    process_backend_available=False,
+                )
+        try:
+            self._executor = self._manager._prepare_executor_factory(
+                self._workers
+            )
+        except Exception:
+            self.close()
+            raise
+        with self._manager._lock:
+            self._manager._active_prepare_process_pool = self._process_pool
+        self._fill()
+
+    def _prepare(self, item: dict, *, preview_only: bool = False) -> dict:
+        package = item["package"]
+        safe_rule_codes = list(item.get("safe_rule_codes") or [])
+        preview_rule_code = item.get("preview_rule_code")
+        source_options = self._source_options(
+            item,
+            after_safe=bool(preview_only and safe_rule_codes),
+        )
+        if safe_rule_codes and not preview_only:
+            prepared = self._service.prepare_selected(
+                package,
+                rule_codes=safe_rule_codes,
+                deep_audio=bool(self._snapshot.get("deep_audio")),
+                validation_runner=self._validation_runner,
+                **source_options,
+            )
+            return {"kind": "safe", "prepared": prepared}
+        if isinstance(preview_rule_code, str):
+            prepared = self._service.prepare_automatic_preview(
+                package,
+                preview_rule_code,
+                validation_runner=self._validation_runner,
+                **source_options,
+            )
+            return {"kind": "preview", "prepared": prepared}
+        raise self._manager._repair_error_type(
+            "nothing_to_repair",
+            "No planned batch repair remains for this Feedpak.",
+        )
+
+    def _source_options(self, item: dict, *, after_safe: bool) -> dict:
+        if after_safe:
+            return {}
+        package = item["package"]
+        expected_signature = item.get("scan_signature")
+        signature_checker = getattr(
+            self._manager._scanner, "package_matches_signature", None
+        )
+        if (
+            not isinstance(expected_signature, str)
+            or not expected_signature
+            or not callable(signature_checker)
+        ):
+            raise self._manager._repair_error_type(
+                "source_changed",
+                "This Feedpak is not bound to a completed scan. Scan it again before repairing it.",
+                file_state="unchanged",
+            )
+
+        def source_guard(p=package, s=expected_signature):
+            try:
+                return bool(signature_checker(p, s))
+            except Exception:
+                return False
+        if not source_guard():
+            raise self._manager._repair_error_type(
+                "source_changed",
+                "This Feedpak changed after the batch preview. Scan it again before repairing it.",
+                file_state="unchanged",
+            )
+        options = {"source_guard": source_guard}
+        if not self._snapshot.get("deep_audio"):
+            return options
+        report_reader = getattr(
+            self._manager._scanner,
+            "deep_audio_report_for_signature",
+            None,
+        )
+        if not callable(report_reader):
+            report_reader = getattr(
+                self._manager._scanner,
+                "verified_deep_audio_report",
+                None,
+            )
+        if callable(report_reader):
+            report = report_reader(package, expected_signature)
+            if isinstance(report, dict):
+                options["verified_before_report"] = report
+        return options
+
+    def _run_prepare(self, item: dict, *, preview_only: bool = False) -> dict:
+        try:
+            context = self._prepare(item, preview_only=preview_only)
+        except BaseException:
+            self._change("prepare_in_flight", -1)
+            raise
+        self._change("prepare_in_flight", -1)
+        self._change("prepared_ready", 1)
+        self._change("prepared_completed", 1)
+        return context
+
+    def _submit(self, index: int) -> None:
+        self._change("prepare_in_flight", 1)
+        try:
+            future = self._executor.submit(
+                self._run_prepare,
+                self._plans[index],
+            )
+        except BaseException:
+            self._change("prepare_in_flight", -1)
+            raise
+        self._futures[index] = future
+
+    def _fill(self) -> None:
+        while (
+            not self._cancel.is_set()
+            and not self._manager._scanner.playback_active()
+            and self._next_index < len(self._plans)
+            and len(self._futures) - len(self._consumed) < self._workers
+        ):
+            self._submit(self._next_index)
+            self._next_index += 1
+
+    def _discard(self, context: dict | None) -> None:
+        prepared = context.get("prepared") if isinstance(context, dict) else None
+        if prepared is None:
+            return
+        try:
+            self._service.discard_prepared(prepared)
+        finally:
+            self._change("prepared_discarded", 1)
+
+    def _abandon_before(self, index: int) -> None:
+        for earlier in sorted(item for item in self._futures if item < index):
+            if earlier in self._consumed:
+                continue
+            future = self._futures[earlier]
+            try:
+                context = future.result()
+                self._change("prepared_ready", -1)
+                self._discard(context)
+            except Exception:
+                pass
+            self._consumed.add(earlier)
+            self._fill()
+
+    def _take(self, package: str) -> dict:
+        self.start()
+        index = self._index_by_package[package]
+        self._abandon_before(index)
+        self._fill()
+        while index not in self._futures:
+            self._fill()
+            if index in self._futures:
+                break
+            if self._manager._scanner.playback_active():
+                if self._manager._wait_for_playback("applying"):
+                    continue
+            if index not in self._futures:
+                raise self._manager._repair_error_type(
+                    "batch_cancelled",
+                    "The batch stopped before this Feedpak was prepared.",
+                    file_state="unchanged",
+                )
+        context = self._futures[index].result()
+        self._consumed.add(index)
+        self._change("prepared_ready", -1)
+        return context
+
+    def _commit(self, context: dict, *, refill: bool) -> dict:
+        if self._cancel.is_set() or not self._manager._wait_for_playback(
+            "applying"
+        ):
+            self._discard(context)
+            raise self._manager._repair_error_type(
+                "batch_cancelled",
+                "The batch stopped before this prepared Feedpak was committed.",
+                file_state="unchanged",
+            )
+        self._change("commit_in_flight", 1)
+        try:
+            return self._service.commit_prepared(context["prepared"])
+        finally:
+            self._change("commit_in_flight", -1)
+            if refill:
+                self._fill()
+
+    def commit_safe(self, package: str) -> dict:
+        index = self._index_by_package[package]
+        has_preview = isinstance(
+            self._plans[index].get("preview_rule_code"), str
+        )
+        return self._commit(self._take(package), refill=not has_preview)
+
+    def commit_preview(self, package: str, *, after_safe: bool) -> dict:
+        if not after_safe:
+            return self._commit(self._take(package), refill=True)
+        if self._cancel.is_set() or not self._manager._wait_for_playback(
+            "applying"
+        ):
+            raise self._manager._repair_error_type(
+                "batch_cancelled",
+                "The batch stopped before preparing this audio preview.",
+                file_state="unchanged",
+            )
+        index = self._index_by_package[package]
+        self._change("prepare_in_flight", 1)
+        try:
+            future = self._executor.submit(
+                self._run_prepare,
+                self._plans[index],
+                preview_only=True,
+            )
+        except BaseException:
+            self._change("prepare_in_flight", -1)
+            self._fill()
+            raise
+        try:
+            context = future.result()
+        except BaseException:
+            self._fill()
+            raise
+        self._change("prepared_ready", -1)
+        return self._commit(context, refill=True)
+
+    def set_paused(self, paused: bool) -> None:
+        if self._process_pool is not None:
+            self._process_pool.set_paused(bool(paused))
+
+    def cancel(self) -> None:
+        if self._process_pool is not None:
+            self._process_pool.cancel()
+
+    def close(self) -> None:
+        if self._cancel.is_set():
+            self.cancel()
+            if not self._process_pool_quarantined:
+                try:
+                    self._shutdown_process_pool(force=True)
+                except Exception:
+                    pass
+        if self._executor is not None:
+            try:
+                self._executor.shutdown(wait=True, cancel_futures=True)
+            except TypeError:
+                self._executor.shutdown(wait=True)
+        for index, future in self._futures.items():
+            if index in self._consumed or future.cancelled():
+                continue
+            try:
+                context = future.result()
+                self._discard(context)
+            except Exception:
+                pass
+        if not self._process_pool_closed and not self._process_pool_quarantined:
+            try:
+                self._shutdown_process_pool(force=False)
+            except Exception:
+                pass
+        with self._manager._lock:
+            self._manager._active_prepare_process_pool = None
+            for key in ("prepare_in_flight", "prepared_ready", "commit_in_flight"):
+                self._manager._state[key] = 0
+
+
 class BatchRepairManager:
     """Run read-only batch planning and confirmed package repairs in a worker."""
 
@@ -90,12 +617,37 @@ class BatchRepairManager:
         repair_error_type,
         log,
         legacy_schemas: dict | None = None,
+        prepare_worker_policy=None,
+        prepare_executor_factory=_DEFAULT_PREPARE_EXECUTOR,
+        prepare_process_pool_factory=None,
     ) -> None:
         self._config_dir = Path(config_dir)
         self._scanner = scanner
         self._repair_service = repair_service
         self._repair_error_type = repair_error_type
         self._log = log
+        self._prepare_worker_policy = (
+            prepare_worker_policy
+            if callable(prepare_worker_policy)
+            else _default_prepare_worker_policy
+        )
+        self._prepare_executor_factory = (
+            (
+                lambda workers: concurrent.futures.ThreadPoolExecutor(
+                    max_workers=workers,
+                    thread_name_prefix="library-doctor-repair-prepare",
+                )
+            )
+            if prepare_executor_factory is _DEFAULT_PREPARE_EXECUTOR
+            else prepare_executor_factory if callable(prepare_executor_factory) else None
+        )
+        self._prepare_process_pool_factory = (
+            prepare_process_pool_factory
+            if callable(prepare_process_pool_factory)
+            else None
+        )
+        self._active_prepare_process_pool = None
+        self._quarantined_prepare_process_pool = None
         compatibility = legacy_schemas if isinstance(legacy_schemas, dict) else {}
         self._legacy_batch_result_schemas = frozenset(
             item
@@ -115,17 +667,17 @@ class BatchRepairManager:
         recovered_checkpoint = False
         if (
             isinstance(checkpoint, dict)
-            and float(checkpoint.get("checkpointed_at") or 0)
-            > float((latest or {}).get("completed_at") or 0)
+            and self._result_freshness(
+                checkpoint.get("result"),
+                fallback=checkpoint.get("checkpointed_at"),
+            ) > self._result_freshness(latest)
         ):
             latest = self._checkpoint_result(checkpoint)
             recovered_checkpoint = True
         if latest is not None:
             normalized = self._refresh_result_counts(latest)
-            if normalized or recovered_checkpoint:
-                self._write_last_result(latest)
-        if recovered_checkpoint:
-            self._delete_checkpoint()
+            if normalized or recovered_checkpoint or isinstance(checkpoint, dict):
+                self._persist_latest_result(latest)
         self._state["last_result"] = latest
 
     @staticmethod
@@ -146,6 +698,13 @@ class BatchRepairManager:
             "completed_at": None,
             "packages_per_second": 0.0,
             "eta_seconds": None,
+            "worker_policy": None,
+            "prepare_in_flight": 0,
+            "prepared_ready": 0,
+            "commit_in_flight": 0,
+            "prepared_completed": 0,
+            "prepared_discarded": 0,
+            "repair_backend_fault": None,
             "live_outcomes": {
                 "completed": 0,
                 "repaired": 0,
@@ -165,6 +724,13 @@ class BatchRepairManager:
 
     def status(self) -> dict:
         with self._lock:
+            if (
+                self._quarantined_prepare_process_pool is not None
+                and not isinstance(self._state.get("repair_backend_fault"), dict)
+            ):
+                self._state["repair_backend_fault"] = (
+                    self._backend_fault_payload()
+                )
             status = copy.deepcopy(self._state)
         if status.get("running"):
             # The main status endpoint is polled several times per second. Keep
@@ -181,6 +747,189 @@ class BatchRepairManager:
                 payload.pop("blocked", None)
                 payload.pop("outcomes", None)
         return status
+
+    @staticmethod
+    def _backend_fault_payload() -> dict:
+        return {
+            "code": "validation_pool_stop_unconfirmed",
+            "message": (
+                "Repair validation could not be stopped safely. Restart Library Doctor "
+                "before repairing, undoing, or finalizing again. No unconfirmed "
+                "candidate was written to a Feedpak."
+            ),
+            "restart_required": True,
+            "candidate_cleanup_deferred": True,
+        }
+
+    def _validation_pool_stop_error(self):
+        fault = self._backend_fault_payload()
+        error = self._repair_error_type(
+            fault["code"], fault["message"], file_state="unchanged"
+        )
+        error.preserve_candidate_workspace = True
+        return error
+
+    def _quarantine_prepare_process_pool(
+        self,
+        process_pool,
+        *,
+        error_type: str,
+    ) -> None:
+        fault = self._backend_fault_payload()
+        self._cancel.set()
+        with self._lock:
+            self._quarantined_prepare_process_pool = process_pool
+            self._state["repair_backend_fault"] = fault
+            if self._state.get("running"):
+                self._state["phase"] = "cancelling"
+                self._state["message"] = fault["message"]
+        self._log.error(
+            "Library Doctor quarantined an unconfirmed repair validator pool: %s",
+            error_type,
+        )
+
+    def raise_if_repair_backend_faulted(self) -> None:
+        with self._lock:
+            fault = (
+                self._backend_fault_payload()
+                if self._quarantined_prepare_process_pool is not None
+                else copy.deepcopy(self._state.get("repair_backend_fault"))
+            )
+        if isinstance(fault, dict):
+            raise BatchRepairError(
+                str(fault.get("code") or "repair_backend_restart_required"),
+                str(fault.get("message") or (
+                    "Restart Library Doctor before changing another Feedpak."
+                )),
+            )
+
+    def retry_quarantined_prepare_backend(self) -> bool:
+        """Retry a retained validator stop without exposing candidate paths."""
+        with self._lock:
+            if self._state.get("running"):
+                return False
+            process_pool = self._quarantined_prepare_process_pool
+        if process_pool is None:
+            return True
+        try:
+            process_pool.shutdown(
+                force=True,
+                timeout_seconds=PROCESS_STOP_ATTEMPT_SECONDS,
+            )
+        except Exception as exc:
+            self._log.warning(
+                "Library Doctor quarantined validator is still active: %s",
+                type(exc).__name__,
+            )
+            return False
+        with self._lock:
+            if self._quarantined_prepare_process_pool is process_pool:
+                self._quarantined_prepare_process_pool = None
+                self._state["repair_backend_fault"] = None
+                self._state["message"] = (
+                    "The repair validation backend stopped safely. Review the batch again before retrying."
+                )
+        return True
+
+    def _select_prepare_worker_policy(
+        self,
+        plans: list[dict],
+        snapshot: dict,
+        requested_max: int | None,
+    ) -> dict:
+        service = self._repair_service
+        has_preview = any(
+            isinstance(item.get("preview_rule_code"), str) for item in plans
+        )
+        split_api_available = all(
+            callable(getattr(service, name, None))
+            for name in ("prepare_selected", "commit_prepared", "discard_prepared")
+        ) and (
+            not has_preview
+            or callable(getattr(service, "prepare_automatic_preview", None))
+        )
+        worker_backend_available = bool(
+            split_api_available
+            and self._prepare_executor_factory is not None
+            and self._prepare_process_pool_factory is not None
+        )
+        storage_options = {}
+        storage_reader = getattr(
+            self._scanner, "repair_storage_evidence", None
+        )
+        if callable(storage_reader):
+            try:
+                storage_evidence = storage_reader(
+                    item["package"] for item in plans
+                )
+            except Exception as exc:
+                self._log.warning(
+                    "Library Doctor repair storage evidence was unavailable: %s",
+                    type(exc).__name__,
+                )
+                storage_evidence = {}
+            if isinstance(storage_evidence, dict):
+                storage_options = {
+                    key: storage_evidence.get(key)
+                    for key in (
+                        "storage_total_bytes",
+                        "storage_free_bytes",
+                        "largest_source_package_bytes",
+                    )
+                    if key in storage_evidence
+                }
+        try:
+            selected = self._prepare_worker_policy(
+                len(plans),
+                deep_audio=bool(snapshot.get("deep_audio")),
+                include_preview_repairs=has_preview,
+                requested_max=requested_max,
+                worker_backend_available=worker_backend_available,
+                **storage_options,
+            )
+        except Exception as exc:
+            self._log.warning(
+                "Library Doctor repair worker policy failed; using one worker: %s",
+                type(exc).__name__,
+            )
+            selected = {
+                "schema": "library_doctor.repair_worker_policy.v1",
+                "mode": "automatic",
+                "reason": "policy_error",
+                "selected_workers": 1,
+            }
+        policy = copy.deepcopy(selected) if isinstance(selected, dict) else {}
+        try:
+            workers = int(policy.get("selected_workers") or 1)
+        except (TypeError, ValueError):
+            workers = 1
+        workers = max(1, min(len(plans), workers))
+        if not worker_backend_available:
+            workers = 1
+            policy["reason"] = (
+                "legacy_repair_service"
+                if not split_api_available
+                else "worker_backend_unavailable"
+            )
+        try:
+            active_workers = int(policy.get("active_worker_limit") or workers)
+        except (TypeError, ValueError):
+            active_workers = workers
+        active_workers = max(1, min(workers, active_workers))
+        policy.update({
+            "schema": str(
+                policy.get("schema")
+                or "library_doctor.repair_worker_policy.v1"
+            ),
+            "selected_workers": workers,
+            "active_worker_limit": active_workers,
+            "pending_packages": len(plans),
+            "pipeline_enabled": bool(
+                split_api_available and self._prepare_executor_factory is not None
+            ),
+            "process_backend_available": bool(worker_backend_available),
+        })
+        return policy
 
     @staticmethod
     def _refresh_result_counts(result: dict) -> bool:
@@ -325,6 +1074,11 @@ class BatchRepairManager:
             self._plans = []
             self._snapshot = copy.deepcopy(snapshot)
             started_at = time.time()
+            backend_fault = (
+                self._backend_fault_payload()
+                if self._quarantined_prepare_process_pool is not None
+                else copy.deepcopy(self._state.get("repair_backend_fault"))
+            )
             self._state = {
                 **self._initial_state(),
                 "phase": "previewing",
@@ -339,6 +1093,7 @@ class BatchRepairManager:
                 "total": len(candidates),
                 "started_at": started_at,
                 "last_result": self._state.get("last_result"),
+                "repair_backend_fault": backend_fault,
             }
             self._thread = threading.Thread(
                 target=self._run_preview,
@@ -355,10 +1110,25 @@ class BatchRepairManager:
                 raise
             return copy.deepcopy(self._state)
 
-    def start_apply(self, batch_plan_id: str) -> dict:
+    def start_apply(
+        self,
+        batch_plan_id: str,
+        *,
+        max_workers: int | None = None,
+    ) -> dict:
+        self.raise_if_repair_backend_faulted()
         if not isinstance(batch_plan_id, str) or len(batch_plan_id) != 64:
             raise BatchRepairError(
                 "invalid_batch_plan", "Review the batch again before applying it."
+            )
+        if max_workers is not None and (
+            isinstance(max_workers, bool)
+            or not isinstance(max_workers, int)
+            or max_workers < 1
+        ):
+            raise BatchRepairError(
+                "invalid_worker_limit",
+                "The repair worker maximum must be a positive whole number.",
             )
         with self._lock:
             preview = self._state.get("preview")
@@ -380,11 +1150,18 @@ class BatchRepairManager:
                 raise BatchRepairError("library_busy", reason)
             self._cancel.clear()
             started_at = time.time()
+            plans = copy.deepcopy(self._plans)
+            snapshot = copy.deepcopy(self._snapshot) if self._snapshot else {}
+            worker_policy = self._select_prepare_worker_policy(
+                plans,
+                snapshot,
+                max_workers,
+            )
             self._state.update({
                 "phase": "applying",
                 "running": True,
                 "mode": "apply",
-                "message": "Applying one validated Feedpak transaction at a time.",
+                "message": "Preparing validated Feedpaks for one-at-a-time commit.",
                 "total": len(self._plans),
                 "done": 0,
                 "current": "",
@@ -392,15 +1169,18 @@ class BatchRepairManager:
                 "completed_at": None,
                 "packages_per_second": 0.0,
                 "eta_seconds": None,
+                "worker_policy": worker_policy,
+                "prepare_in_flight": 0,
+                "prepared_ready": 0,
+                "commit_in_flight": 0,
+                "prepared_completed": 0,
+                "prepared_discarded": 0,
                 "live_outcomes": self._initial_state()["live_outcomes"],
                 "result": None,
             })
-            self._delete_checkpoint()
-            plans = copy.deepcopy(self._plans)
-            snapshot = copy.deepcopy(self._snapshot) if self._snapshot else {}
             self._thread = threading.Thread(
                 target=self._run_apply,
-                args=(batch_plan_id, plans, snapshot),
+                args=(batch_plan_id, plans, snapshot, worker_policy),
                 name="library-doctor-batch-apply",
                 daemon=True,
             )
@@ -494,6 +1274,7 @@ class BatchRepairManager:
             return self.status()
 
     def start_undo_apply(self, undo_plan_id: str) -> dict:
+        self.raise_if_repair_backend_faulted()
         if not isinstance(undo_plan_id, str) or len(undo_plan_id) != 64:
             raise BatchRepairError(
                 "invalid_undo_plan", "Review Undo all again before applying it."
@@ -644,6 +1425,7 @@ class BatchRepairManager:
             return self.status()
 
     def start_finalize_apply(self, finalize_plan_id: str) -> dict:
+        self.raise_if_repair_backend_faulted()
         if not isinstance(finalize_plan_id, str) or len(finalize_plan_id) != 64:
             raise BatchRepairError(
                 "invalid_finalize_plan",
@@ -701,10 +1483,12 @@ class BatchRepairManager:
             return self.status()
 
     def cancel(self) -> bool:
+        process_pool = None
         with self._lock:
             if not self._state["running"]:
                 return False
             self._cancel.set()
+            process_pool = self._active_prepare_process_pool
             self._state["phase"] = "cancelling"
             mode = self._state.get("mode")
             if mode in {"apply", "undo-apply", "finalize-apply"}:
@@ -713,7 +1497,12 @@ class BatchRepairManager:
                 )
             else:
                 self._state["message"] = "Stopping the read-only preview."
-            return True
+        if process_pool is not None:
+            try:
+                process_pool.cancel()
+            except Exception:
+                pass
+        return True
 
     def invalidate_ready(self, reason: str) -> bool:
         """Expire a completed preview when scan scope or package data changes."""
@@ -779,7 +1568,7 @@ class BatchRepairManager:
             if updated and isinstance(self._state.get("last_result"), dict):
                 latest = copy.deepcopy(self._state["last_result"])
         if latest is not None:
-            self._write_last_result(latest)
+            self._persist_latest_result(latest)
         return updated
 
     @staticmethod
@@ -868,7 +1657,7 @@ class BatchRepairManager:
             if updated and isinstance(self._state.get("last_result"), dict):
                 latest = copy.deepcopy(self._state["last_result"])
         if latest is not None:
-            self._write_last_result(latest)
+            self._persist_latest_result(latest)
         return updated
 
     def join(self, timeout: float | None = None) -> None:
@@ -877,7 +1666,15 @@ class BatchRepairManager:
             thread.join(timeout)
 
     def _wait_for_playback(self, resume_phase: str) -> bool:
-        if self._scanner.playback_active():
+        playback_active = self._scanner.playback_active()
+        with self._lock:
+            process_pool = self._active_prepare_process_pool
+        if process_pool is not None:
+            try:
+                process_pool.set_paused(playback_active)
+            except Exception:
+                pass
+        if playback_active:
             with self._lock:
                 self._state["phase"] = "paused"
                 self._state["message"] = (
@@ -888,12 +1685,17 @@ class BatchRepairManager:
                     "Batch repair paused while a song is open. It will resume automatically."
                 )
         ready = self._scanner.wait_for_playback(self._cancel)
+        if ready and process_pool is not None:
+            try:
+                process_pool.set_paused(False)
+            except Exception:
+                pass
         if ready:
             with self._lock:
                 self._state["phase"] = resume_phase
                 messages = {
                     "previewing": "Checking completed-scan repair candidates without changing any Feedpaks.",
-                    "applying": "Applying one validated Feedpak transaction at a time.",
+                    "applying": "Preparing validated Feedpaks for one-at-a-time commit.",
                     "undo_previewing": "Checking retained backups without changing any Feedpaks.",
                     "undoing": "Restoring one validated Feedpak at a time.",
                     "finalize_previewing": "Verifying recovery copies without changing any Feedpaks.",
@@ -984,11 +1786,19 @@ class BatchRepairManager:
                 signature_checker = getattr(
                     self._scanner, "package_matches_signature", None
                 )
+                signature_matches = False
                 if (
                     isinstance(expected_signature, str)
+                    and expected_signature
                     and callable(signature_checker)
-                    and not signature_checker(package, expected_signature)
                 ):
+                    try:
+                        signature_matches = bool(
+                            signature_checker(package, expected_signature)
+                        )
+                    except Exception:
+                        signature_matches = False
+                if not signature_matches:
                     package_blockers.append({
                         "code": "package_changed",
                         "message": (
@@ -1257,6 +2067,12 @@ class BatchRepairManager:
             "preview_bytes_saved": preview_bytes_saved,
             "cache_refresh_failed_count": cache_refresh_failed,
             "performance": copy.deepcopy(performance),
+            "worker_policy": copy.deepcopy(
+                self._state.get("worker_policy")
+            ),
+            "repair_backend_fault": copy.deepcopy(
+                self._state.get("repair_backend_fault")
+            ),
             "outcomes": copy.deepcopy(outcomes),
             "include_preview_repairs": bool(
                 snapshot.get("include_preview_repairs")
@@ -1270,7 +2086,13 @@ class BatchRepairManager:
         self._refresh_result_counts(result)
         return result
 
-    def _run_apply(self, batch_plan_id: str, plans: list[dict], snapshot: dict) -> None:
+    def _run_apply(
+        self,
+        batch_plan_id: str,
+        plans: list[dict],
+        snapshot: dict,
+        worker_policy: dict,
+    ) -> None:
         total = len(plans)
         started = time.monotonic()
         result_id = uuid.uuid4().hex
@@ -1287,6 +2109,7 @@ class BatchRepairManager:
         preview_failed = 0
         preview_bytes_saved = 0
         cache_refresh_failed = 0
+        pipeline = None
         performance = {
             "signature_seconds": 0.0,
             "scan_report_lookup_seconds": 0.0,
@@ -1355,6 +2178,10 @@ class BatchRepairManager:
             last_checkpoint_at = now
             last_checkpoint_count = len(outcomes)
         try:
+            if worker_policy.get("pipeline_enabled"):
+                pipeline = _PreparedApplyPipeline(
+                    self, plans, snapshot, worker_policy
+                )
             for item in plans:
                 if self._cancel.is_set() or not self._wait_for_playback("applying"):
                     break
@@ -1371,25 +2198,37 @@ class BatchRepairManager:
                 preview_rule_code = item.get("preview_rule_code")
                 try:
                     expected_signature = item.get("scan_signature")
-                    signature_verified = False
                     signature_checker = getattr(
                         self._scanner, "package_matches_signature", None
                     )
-                    if isinstance(expected_signature, str) and callable(signature_checker):
-                        operation_started = time.monotonic()
+                    if (
+                        not isinstance(expected_signature, str)
+                        or not expected_signature
+                        or not callable(signature_checker)
+                    ):
+                        raise self._repair_error_type(
+                            "source_changed",
+                            "This Feedpak is not bound to a completed scan. Scan it again before repairing it.",
+                        )
+
+                    def source_guard(p=package, s=expected_signature):
                         try:
-                            signature_verified = bool(
-                                signature_checker(package, expected_signature)
-                            )
-                        finally:
-                            performance["signature_seconds"] += max(
-                                0.0, time.monotonic() - operation_started
-                            )
-                        if not signature_verified:
-                            raise self._repair_error_type(
-                                "source_changed",
-                                "This Feedpak changed after the batch preview. Scan it again before repairing it.",
-                            )
+                            return bool(signature_checker(p, s))
+                        except Exception:
+                            return False
+
+                    operation_started = time.monotonic()
+                    try:
+                        signature_verified = source_guard()
+                    finally:
+                        performance["signature_seconds"] += max(
+                            0.0, time.monotonic() - operation_started
+                        )
+                    if not signature_verified:
+                        raise self._repair_error_type(
+                            "source_changed",
+                            "This Feedpak changed after the batch preview. Scan it again before repairing it.",
+                        )
 
                     verified_report = None
                     if snapshot.get("deep_audio"):
@@ -1420,23 +2259,21 @@ class BatchRepairManager:
                                 verified_report = candidate_report
 
                     if safe_rule_codes:
-                        apply_options = {
-                            "deep_audio": bool(snapshot.get("deep_audio")),
-                            "rule_codes": safe_rule_codes,
-                        }
-                        if isinstance(verified_report, dict):
-                            apply_options.update({
-                                "verified_before_report": verified_report,
-                                "source_guard": (
-                                    lambda p=package, s=expected_signature:
-                                    self._scanner.package_matches_signature(p, s)
-                                ),
-                            })
                         operation_started = time.monotonic()
                         try:
-                            safe_result = self._repair_service.apply_selected(
-                                package, **apply_options
-                            )
+                            if pipeline is not None:
+                                safe_result = pipeline.commit_safe(package)
+                            else:
+                                apply_options = {
+                                    "deep_audio": bool(snapshot.get("deep_audio")),
+                                    "rule_codes": safe_rule_codes,
+                                    "source_guard": source_guard,
+                                }
+                                if isinstance(verified_report, dict):
+                                    apply_options["verified_before_report"] = verified_report
+                                safe_result = self._repair_service.apply_selected(
+                                    package, **apply_options
+                                )
                         finally:
                             performance["song_data_repair_seconds"] += max(
                                 0.0, time.monotonic() - operation_started
@@ -1452,21 +2289,23 @@ class BatchRepairManager:
                                 "Creating and validating the current audio preview."
                             )
                         preview_options = {}
-                        if safe_result is None and isinstance(verified_report, dict):
-                            preview_options.update({
-                                "verified_before_report": verified_report,
-                                "source_guard": (
-                                    lambda p=package, s=expected_signature:
-                                    self._scanner.package_matches_signature(p, s)
-                                ),
-                            })
+                        if safe_result is None:
+                            preview_options["source_guard"] = source_guard
+                            if isinstance(verified_report, dict):
+                                preview_options["verified_before_report"] = verified_report
                         operation_started = time.monotonic()
                         try:
-                            preview_result = self._repair_service.apply_automatic_preview(
-                                package,
-                                preview_rule_code,
-                                **preview_options,
-                            )
+                            if pipeline is not None:
+                                preview_result = pipeline.commit_preview(
+                                    package,
+                                    after_safe=safe_result is not None,
+                                )
+                            else:
+                                preview_result = self._repair_service.apply_automatic_preview(
+                                    package,
+                                    preview_rule_code,
+                                    **preview_options,
+                                )
                         finally:
                             performance["preview_repair_seconds"] += max(
                                 0.0, time.monotonic() - operation_started
@@ -1609,6 +2448,12 @@ class BatchRepairManager:
                         "file_state": "repaired",
                     })
                 except self._repair_error_type as exc:
+                    if (
+                        exc.code == "batch_cancelled"
+                        and self._cancel.is_set()
+                        and safe_result is None
+                    ):
+                        break
                     if preview_attempted:
                         preview_failed += 1
                     if safe_result is not None:
@@ -1687,6 +2532,8 @@ class BatchRepairManager:
                         "file_state": getattr(exc, "file_state", "unchanged"),
                     })
                 except Exception as exc:
+                    if self._cancel.is_set() and safe_result is None:
+                        break
                     if preview_attempted:
                         preview_failed += 1
                     if safe_result is not None:
@@ -1757,7 +2604,21 @@ class BatchRepairManager:
                 checkpoint_if_due()
                 self._progress(done=len(outcomes), total=total, started=started)
 
-            cancelled = self._cancel.is_set() and len(outcomes) < total
+            if pipeline is not None:
+                pipeline.close()
+                pipeline = None
+            backend_fault = copy.deepcopy(
+                self._state.get("repair_backend_fault")
+            )
+            cancelled = self._cancel.is_set() and (
+                len(outcomes) < total
+                or isinstance(backend_fault, dict)
+                or any(
+                    item.get("code") == "batch_cancelled"
+                    for item in outcomes
+                    if isinstance(item, dict)
+                )
+            )
             result = self._build_apply_result(
                 result_id=result_id,
                 batch_plan_id=batch_plan_id,
@@ -1778,13 +2639,14 @@ class BatchRepairManager:
                 completed_at=time.time(),
                 performance=performance_payload(),
             )
-            self._write_last_result(result)
-            self._delete_checkpoint()
+            self._persist_latest_result(result)
             with self._lock:
                 self._state.update({
                     "phase": "cancelled" if cancelled else "completed",
                     "running": False,
                     "message": (
+                        backend_fault["message"]
+                        if isinstance(backend_fault, dict) else
                         "Batch repair stopped between Feedpaks. Completed repairs were kept."
                         if cancelled else
                         "Batch repair finished. Review the package outcomes below."
@@ -1798,7 +2660,13 @@ class BatchRepairManager:
                 })
         except Exception as exc:
             if outcomes:
-                checkpoint_if_due(force=True)
+                try:
+                    checkpoint_if_due(force=True)
+                except Exception as checkpoint_exc:
+                    self._log.error(
+                        "Library Doctor could not preserve the emergency batch checkpoint: %s",
+                        type(checkpoint_exc).__name__,
+                    )
             self._log.exception("Library Doctor batch execution failed: %s", exc)
             with self._lock:
                 self._state.update({
@@ -1811,7 +2679,26 @@ class BatchRepairManager:
                     "completed_at": time.time(),
                 })
         finally:
-            self._scanner.finish_repair()
+            try:
+                if pipeline is not None:
+                    pipeline.close()
+            except Exception as close_exc:
+                self._log.exception(
+                    "Library Doctor repair pipeline cleanup failed: %s",
+                    close_exc,
+                )
+                with self._lock:
+                    self._state.update({
+                        "phase": "error",
+                        "running": False,
+                        "message": (
+                            "Batch processing stopped unexpectedly. Completed package receipts and backups were kept."
+                        ),
+                        "current": "",
+                        "completed_at": time.time(),
+                    })
+            finally:
+                self._scanner.finish_repair()
 
     def _run_undo_preview(self, source: dict, candidates: list[dict]) -> None:
         total = len(candidates)
@@ -2151,7 +3038,7 @@ class BatchRepairManager:
                     "undo_result": undo_result,
                 })
             if latest is not None:
-                self._write_last_result(latest)
+                self._persist_latest_result(latest)
         except Exception as exc:
             self._log.exception("Library Doctor batch Undo execution failed: %s", exc)
             with self._lock:
@@ -2527,7 +3414,7 @@ class BatchRepairManager:
                     "finalize_result": finalize_result,
                 }
             if latest is not None:
-                self._write_last_result(latest)
+                self._persist_latest_result(latest)
         except Exception as exc:
             self._log.exception(
                 "Library Doctor batch finalization execution failed: %s", exc
@@ -2570,7 +3457,33 @@ class BatchRepairManager:
         except (OSError, AttributeError, UnicodeDecodeError, json.JSONDecodeError):
             return None
 
-    def _write_last_result(self, result: dict) -> None:
+    @staticmethod
+    def _result_freshness(result, *, fallback=None) -> float:
+        if not isinstance(result, dict):
+            return 0.0
+        try:
+            return float(
+                result.get("receipt_updated_at")
+                or fallback
+                or result.get("completed_at")
+                or 0
+            )
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _persist_latest_result(self, result: dict) -> bool:
+        """Keep the newest aggregate receipt in either durable result slot."""
+        result["receipt_updated_at"] = time.time()
+        if not self._write_last_result(result):
+            return self._write_checkpoint(result)
+        if self._checkpoint_path.exists():
+            # If unlink fails, the checkpoint must be equally fresh so it
+            # cannot resurrect pre-Undo/finalize state on the next startup.
+            self._write_checkpoint(result)
+            self._delete_checkpoint()
+        return True
+
+    def _write_last_result(self, result: dict) -> bool:
         path = self._last_result_path
         temporary = None
         try:
@@ -2589,10 +3502,15 @@ class BatchRepairManager:
                 stream.flush()
                 os.fsync(stream.fileno())
             os.replace(temporary, path)
-        except OSError as exc:
+            return True
+        except (OSError, TypeError, ValueError) as exc:
             if temporary is not None:
-                temporary.unlink(missing_ok=True)
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError:
+                    pass
             self._log.warning("Library Doctor could not save the batch result: %s", exc)
+            return False
 
     @property
     def _checkpoint_path(self) -> Path:
@@ -2627,7 +3545,7 @@ class BatchRepairManager:
         except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             return None
 
-    def _write_checkpoint(self, result: dict) -> None:
+    def _write_checkpoint(self, result: dict) -> bool:
         path = self._checkpoint_path
         temporary = None
         payload = {
@@ -2651,18 +3569,25 @@ class BatchRepairManager:
                 stream.flush()
                 os.fsync(stream.fileno())
             os.replace(temporary, path)
-        except OSError as exc:
+            return True
+        except (OSError, TypeError, ValueError) as exc:
             if temporary is not None:
-                temporary.unlink(missing_ok=True)
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError:
+                    pass
             self._log.warning(
                 "Library Doctor could not save a batch checkpoint: %s", exc
             )
+            return False
 
-    def _delete_checkpoint(self) -> None:
+    def _delete_checkpoint(self) -> bool:
         try:
             self._checkpoint_path.unlink(missing_ok=True)
+            return True
         except OSError as exc:
             self._log.warning(
                 "Library Doctor could not remove a completed batch checkpoint: %s",
                 exc,
             )
+            return False

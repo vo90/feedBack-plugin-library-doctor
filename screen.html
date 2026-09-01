@@ -227,6 +227,28 @@
               <small>Create a standard 30-second preview only when one is missing, too short, or too long. Valid previews are untouched.</small>
             </span>
           </label>
+          <details class="lh-worker-settings">
+            <summary>Repair performance <span id="lh-repair-worker-summary">Automatic</span></summary>
+            <p>
+              Automatic prepares and validates several temporary Feedpaks in parallel when the
+              computer has enough CPU, memory, and source-drive headroom. Final package saving remains
+              coordinated so Undo and crash recovery stay reliable.
+            </p>
+            <div class="lh-worker-controls">
+              <label>
+                <span>Worker mode</span>
+                <select id="lh-repair-worker-mode">
+                  <option value="automatic">Automatic (recommended)</option>
+                  <option value="custom">Custom maximum</option>
+                </select>
+              </label>
+              <label id="lh-repair-worker-limit-wrap" hidden>
+                <span>Maximum repair workers</span>
+                <input id="lh-repair-worker-limit" type="number" min="1" max="4" step="1" inputmode="numeric" value="2">
+              </label>
+            </div>
+            <small>A custom value is only a ceiling. Library Doctor can lower it for available memory, drive type, free space, audio work, or a small batch.</small>
+          </details>
           <div id="lh-batch-progress" class="lh-batch-progress" hidden>
             <div>
               <strong id="lh-batch-status" role="status" aria-live="polite" aria-atomic="true">Preparing preview...</strong>

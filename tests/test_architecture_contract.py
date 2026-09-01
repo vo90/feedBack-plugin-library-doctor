@@ -30,9 +30,11 @@ def test_backend_module_ownership_and_size_boundaries_are_explicit():
         "scanner.py",
         "library_doctor_report_cache.py",
         "library_doctor_scan_policy.py",
+        "library_doctor_repair_policy.py",
         "repair.py",
         "repair_catalog.py",
         "repair_actions.py",
+        "repair_preparation.py",
         "measure_marker_repair.py",
         "terminal_beat_repair.py",
         "repair_workspace.py",
@@ -58,11 +60,14 @@ def test_extracted_backend_boundaries_remain_wired_through_stable_seams():
     repair = (ROOT / "repair.py").read_text(encoding="utf-8")
 
     assert 'load_sibling("route_support")' in routes
+    assert 'load_sibling("library_doctor_repair_policy")' in routes
     assert 'with_name("library_doctor_scan_policy.py")' in scanner
     assert "choose_worker_policy = _scan_policy.choose_worker_policy" in scanner
     assert 'with_name("library_doctor_report_cache.py")' in scanner
     assert "_ReportCache = _report_cache.ReportCache" in scanner
     assert 'with_name("repair_actions.py")' in repair
+    assert 'with_name("repair_preparation.py")' in repair
+    assert "_PreparedRepair = _preparation.PreparedRepair" in repair
     assert "RepairDefinition = _actions.RepairDefinition" in repair
     assert 'with_name("measure_marker_repair.py")' in repair
     assert "_measure_marker.apply_operation" in repair

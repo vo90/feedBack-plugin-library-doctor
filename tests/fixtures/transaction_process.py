@@ -43,6 +43,10 @@ class _BatchScanner:
         return not cancel_event.is_set()
 
     @staticmethod
+    def package_matches_signature(package, expected):
+        return expected == f"signature-{package}"
+
+    @staticmethod
     def record_repair_result(_package, _report, *, deep_audio=False):
         del deep_audio
 
@@ -132,6 +136,7 @@ def main() -> None:
             "candidates": [
                 {
                     "package": package,
+                    "scan_signature": f"signature-{package}",
                     "title": package,
                     "artist": "Synthetic",
                     "rule_codes": ["chart.duplicate-anchor"],

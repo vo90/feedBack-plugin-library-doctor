@@ -4405,3 +4405,127 @@ def test_retired_source_tools_do_not_load_dependencies_or_resume_saved_work(tmp_
             response = client.request(method, f"/api/plugins/library_doctor/source-recovery/{path}")
             assert response.status_code == 404
         assert saved.read_bytes() == original
+
+
+def test_quarantined_validator_blocks_direct_mutations_but_allows_replay_and_preview(
+    tmp_path,
+):
+    client, library = _client(tmp_path)
+    package = _valid_package(library)
+    note = {"t": 2.0, "s": 1, "f": 5}
+    arrangement = package / "arrangements" / "lead.json"
+    arrangement.write_text(
+        json.dumps({"notes": [note, dict(note)], "chords": []}),
+        encoding="utf-8",
+    )
+    other = _valid_package(library, "Artist/Other.feedpak")
+    (other / "arrangements" / "lead.json").write_text(
+        json.dumps({"notes": [note, dict(note)], "chords": []}),
+        encoding="utf-8",
+    )
+    plan = client.post(
+        "/api/plugins/library_doctor/repair/preview",
+        json={
+            "package": "Artist/Song.feedpak",
+            "rule_code": "chart.duplicate-note",
+        },
+    ).json()
+    apply_body = {
+        "package": "Artist/Song.feedpak",
+        "rule_code": "chart.duplicate-note",
+        "plan_id": plan["plan_id"],
+        "request_id": "quarantine-route-replay-0001",
+    }
+    applied = client.post(
+        "/api/plugins/library_doctor/repair/apply", json=apply_body
+    )
+    assert applied.status_code == 200
+    backup_id = applied.json()["backup_id"]
+
+    included_router = next(
+        route.original_router for route in client.app.routes
+        if hasattr(route, "original_router")
+    )
+    status_route = next(
+        route for route in included_router.routes
+        if getattr(route, "name", "") == "get_batch_status"
+    )
+    closure = dict(zip(
+        status_route.endpoint.__code__.co_freevars,
+        (cell.cell_contents for cell in status_route.endpoint.__closure__),
+    ))
+    manager = closure["batch_manager"]
+    retained_pool = object()
+    manager._quarantine_prepare_process_pool(
+        retained_pool, error_type="PersistentWorkerFailure"
+    )
+
+    replay = client.post(
+        "/api/plugins/library_doctor/repair/apply", json=apply_body
+    )
+    read_only_preview = client.post(
+        "/api/plugins/library_doctor/repair/preview",
+        json={
+            "package": "Artist/Other.feedpak",
+            "rule_code": "chart.duplicate-note",
+        },
+    )
+    package_before = {
+        path.relative_to(package).as_posix(): path.read_bytes()
+        for path in package.rglob("*") if path.is_file()
+    }
+    backup = (
+        tmp_path / "config" / "library_doctor" / "repair_backups"
+        / f"{backup_id}.zip"
+    )
+    backup_before = backup.read_bytes()
+    blocked_requests = [
+        client.post(
+            "/api/plugins/library_doctor/repair/apply",
+            json={**apply_body, "request_id": "quarantine-route-new-0001"},
+        ),
+        client.post(
+            "/api/plugins/library_doctor/repair/media/automatic",
+            json={
+                "package": "Artist/Song.feedpak",
+                "rule_code": "media.preview-missing",
+                "request_id": "quarantine-route-media-0001",
+            },
+        ),
+        client.post(
+            "/api/plugins/library_doctor/repair/restore",
+            json={
+                "package": "Artist/Song.feedpak",
+                "backup_id": backup_id,
+                "request_id": "quarantine-route-restore-0001",
+            },
+        ),
+        client.post(
+            "/api/plugins/library_doctor/repair/recovery/finalize",
+            json={
+                "package": "Artist/Song.feedpak",
+                "backup_id": backup_id,
+                "request_id": "quarantine-route-finalize-0001",
+            },
+        ),
+    ]
+
+    assert replay.status_code == 200
+    assert replay.json()["idempotent_replay"] is True
+    assert read_only_preview.status_code == 200
+    for response in blocked_requests:
+        assert response.status_code == 409
+        assert response.json()["detail"] == {
+            "code": "validation_pool_stop_unconfirmed",
+            "message": manager.status()["repair_backend_fault"]["message"],
+            "file_state": "unchanged",
+            "retryable": False,
+            "next_action": "restart_library_doctor",
+        }
+    assert manager._quarantined_prepare_process_pool is retained_pool
+    assert {
+        path.relative_to(package).as_posix(): path.read_bytes()
+        for path in package.rglob("*") if path.is_file()
+    } == package_before
+    assert backup.read_bytes() == backup_before
+    client.close()

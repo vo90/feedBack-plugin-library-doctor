@@ -102,8 +102,9 @@ If Git is already installed on your computer:
 3. Select **Install**, then restart FeedBack when prompted.
 
 If FeedBack says Git is missing, use the release ZIP instructions above.
-FeedBack installs Library Doctor's small Python dependency automatically when
-the plugin starts.
+FeedBack installs Library Doctor's Python dependencies automatically when
+the plugin starts. These include a portable audio converter used when FeedBack
+or the computer does not already provide a working FFmpeg executable.
 
 ## Your first scan
 
@@ -234,6 +235,10 @@ those paths, and song file contents.
 - **A Python dependency failed to install:** restart FeedBack once while
   connected to the internet. If it still fails, open FeedBack's plugin
   diagnostics and keep the displayed error for a bug report.
+- **Preview repair says the audio converter is unavailable:** update or
+  reinstall Library Doctor while connected to the internet, then restart
+  FeedBack so its portable FFmpeg dependency can be installed. An advanced
+  setup can instead point `FEEDBACK_FFMPEG` at a working FFmpeg executable.
 - **The scan seems slow:** finish a normal scan before enabling Deep audio.
   Scanning also pauses while a song is open.
 - **A repair button is missing:** the finding is intentionally report-only, the
@@ -572,14 +577,21 @@ Preview repair remains separate from the per-song **Fix all safe issues** chart
 repair because it creates audio and follows different recovery rules. It can be
 included explicitly in **Fix several songs** after reviewing the multi-song
 scope and confirming that flagged previews should be generated automatically.
-The read-only batch review performs no encoding; generation happens for one
-Feedpak at a time during the confirmed run. During replacement, temporary
-recovery contains the original preview and any manifest state required to
-protect the transaction. During creation, it records the exact original manifest
-and absence of the new member. After the candidate passes complete validation
-and is committed, this temporary recovery is removed automatically. If cleanup
-exceptionally fails, the result clearly reports that the preview is repaired but
-cleanup remains and offers an explicit recovery-copy removal action.
+The read-only batch review performs no encoding. During the confirmed run,
+Library Doctor can prepare and validate independent Feedpaks concurrently when
+the computer has sufficient CPU, memory, and source-drive headroom. Automatic mode
+uses a conservative hardware-aware limit; Custom maximum can request more but
+cannot override the calculated safety ceiling. Final package saving remains
+coordinated one Feedpak at a time so source checks, Undo backups, recovery
+journals, and result order stay reliable.
+
+During preview replacement, temporary recovery contains the original preview
+and any manifest state required to protect the transaction. During creation, it
+records the exact original manifest and absence of the new member. After the
+candidate passes complete validation and is committed, this temporary recovery
+is removed automatically. If cleanup exceptionally fails, the result clearly
+reports that the preview is repaired but cleanup remains and offers an explicit
+recovery-copy removal action.
 
 Song Tools reads the selectable song list from FeedBack's public local-library
 endpoint and checks Preview Creator eligibility directly against the selected
@@ -762,12 +774,15 @@ normal in-game workflow focused on package outcomes.
   cached rule/summary queries.
 - `library_doctor_scan_policy.py` owns the independently testable CPU, memory,
   platform, and user ceilings used to select validation worker counts.
+- `library_doctor_repair_policy.py` owns the conservative CPU, memory, workload,
+  drive-type, free-space, and user ceilings used to select repair-preparation workers.
 - `library_doctor_scan_worker.py` is the spawn-safe, side-effect-free process
   worker. It can only read and validate a package; SQLite and every file change
   remain in the parent process.
-- `repair.py` owns source-bound previews, candidate construction, full
-  archive-integrity and validation gates, recovery backups, bounded repair
+- `repair.py` owns source-bound previews, recovery backups, bounded repair
   receipts, undo, and transactional package writes.
+- `repair_preparation.py` separates temporary candidate preparation from the
+  serialized, source-rechecked commit boundary without owning orchestration.
 - `repair_actions.py` owns the immutable action values shared by repair
   planning and application. It has no filesystem, validation, or service state.
 - `repair_catalog.py` owns the closed declarative metadata allowlists for safe
@@ -777,6 +792,9 @@ normal in-game workflow focused on package outcomes.
 - `preview_repair.py` generates bounded, listenable Ogg candidates in private
   temporary storage. It never writes to the song library; `repair.py` remains
   the only package transaction and recovery authority.
+- `batch_repair.py` coordinates bounded concurrent preparation and validation,
+  while preserving one-at-a-time commits, ordered receipts, cancellation, and
+  crash-recovery checkpoints.
 - `migration.py` performs the one-time, fail-closed move from the retired
   pre-0.15 identity while preserving scan history and recovery artifacts.
 - `privacy.py` is the support-log boundary. It replaces package identities with
@@ -822,9 +840,9 @@ the test dependencies and run:
 python -m pip install -r requirements-test.txt
 python -m pip check
 python -m pip_audit -r requirements.txt
-python -m ruff check validator.py scanner.py library_doctor_report_cache.py library_doctor_scan_policy.py library_doctor_scan_worker.py repair.py repair_actions.py repair_catalog.py repair_eligibility.py measure_marker_repair.py repair_recovery.py repair_transaction.py repair_workspace.py repair_yaml.py reviewed_repair.py preview_repair.py batch_repair.py migration.py privacy.py diagnostics.py api_contracts.py mutation_receipts.py routes.py route_support.py tools tests
+python -m ruff check validator.py scanner.py library_doctor_report_cache.py library_doctor_scan_policy.py library_doctor_repair_policy.py library_doctor_scan_worker.py repair.py repair_actions.py repair_catalog.py repair_eligibility.py repair_preparation.py measure_marker_repair.py repair_recovery.py repair_transaction.py repair_workspace.py repair_yaml.py reviewed_repair.py preview_repair.py batch_repair.py migration.py privacy.py diagnostics.py api_contracts.py mutation_receipts.py routes.py route_support.py tools tests
 python -m pytest --cov --cov-report=term
-python -m py_compile validator.py scanner.py library_doctor_report_cache.py library_doctor_scan_policy.py library_doctor_scan_worker.py repair.py repair_actions.py repair_catalog.py repair_eligibility.py measure_marker_repair.py repair_recovery.py repair_transaction.py repair_workspace.py repair_yaml.py reviewed_repair.py preview_repair.py batch_repair.py migration.py privacy.py diagnostics.py api_contracts.py mutation_receipts.py routes.py route_support.py tools/verify_host_contract.py
+python -m py_compile validator.py scanner.py library_doctor_report_cache.py library_doctor_scan_policy.py library_doctor_repair_policy.py library_doctor_scan_worker.py repair.py repair_actions.py repair_catalog.py repair_eligibility.py repair_preparation.py measure_marker_repair.py repair_recovery.py repair_transaction.py repair_workspace.py repair_yaml.py reviewed_repair.py preview_repair.py batch_repair.py migration.py privacy.py diagnostics.py api_contracts.py mutation_receipts.py routes.py route_support.py tools/verify_host_contract.py
 npm ci
 npm run audit:dependencies
 npm run check:frontend

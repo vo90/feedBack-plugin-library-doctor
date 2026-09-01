@@ -21,6 +21,8 @@ def test_release_zip_is_deterministic_allowlisted_and_installable(tmp_path):
         names = archive.namelist()
         assert names == sorted(names)
         assert f"{build_release.ARCHIVE_ROOT}/plugin.json" in names
+        assert f"{build_release.ARCHIVE_ROOT}/library_doctor_repair_policy.py" in names
+        assert f"{build_release.ARCHIVE_ROOT}/repair_preparation.py" in names
         assert not any("tests/" in name or "node_modules/" in name or "__pycache__/" in name for name in names)
         assert not any(name.endswith("release-signoff.json") for name in names)
         assert not any("/source_" in name or "/source-recovery-" in name for name in names)

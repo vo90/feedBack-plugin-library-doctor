@@ -146,6 +146,18 @@ if _workspace is None:
     sys.modules[_workspace_name] = _workspace
     _workspace_spec.loader.exec_module(_workspace)
 
+_preparation_name = "_library_doctor_repair_preparation"
+_preparation = sys.modules.get(_preparation_name)
+if _preparation is None:
+    _preparation_spec = importlib.util.spec_from_file_location(
+        _preparation_name,
+        Path(__file__).resolve().with_name("repair_preparation.py"),
+    )
+    _preparation = importlib.util.module_from_spec(_preparation_spec)
+    sys.modules[_preparation_name] = _preparation
+    _preparation_spec.loader.exec_module(_preparation)
+_PreparedRepair = _preparation.PreparedRepair
+
 _recovery_name = "_library_doctor_repair_recovery"
 _recovery = sys.modules.get(_recovery_name)
 if _recovery is None:
@@ -506,6 +518,7 @@ class RepairService:
             if isinstance(item, str)
         )
         self._lock = threading.Lock()
+        self._prepared_owner = object()
         self._recovery_policy = _recovery.RecoveryPolicy(
             backup_size=self._backup_size,
             error_type=RepairPlanningError,
@@ -561,6 +574,10 @@ class RepairService:
                 type(exc).__name__,
             )
         self._reconcile_transactions()
+
+    @property
+    def validator_version(self) -> str:
+        return self._validator_version
 
     def preview(
         self,
@@ -1077,69 +1094,136 @@ class RepairService:
         request_id: str | None = None,
         request_fingerprint: str | None = None,
     ) -> dict:
-        """Select, validate, and apply one temporary-recovery-protected preview."""
+        """Prepare and commit one preview through the synchronous mutation lane."""
+        self._assert_preview_repair_supported(rule_code)
+        transaction_started = time.monotonic()
+        with self._lock:
+            _root, package_path, package_name = self._resolve_package(package)
+            self._assert_package_mutation_allowed(package_name, operation="repair")
+            prepared = self._prepare_automatic_preview_internal(
+                package_path,
+                package_name,
+                rule_code,
+                verified_before_report=verified_before_report,
+                source_guard=source_guard,
+                validation_runner=None,
+                transaction_started=transaction_started,
+                request_id=request_id,
+                request_fingerprint=request_fingerprint,
+            )
+            try:
+                return self._commit_prepared_internal(prepared)
+            finally:
+                prepared.discard()
+
+    def prepare_automatic_preview(
+        self,
+        package: str,
+        rule_code: str,
+        *,
+        verified_before_report: dict | None = None,
+        source_guard=None,
+        validation_runner=None,
+        request_id: str | None = None,
+        request_fingerprint: str | None = None,
+    ) -> _PreparedRepair:
+        """Generate and validate a private audio candidate without committing it."""
+        self._assert_preview_repair_supported(rule_code)
+        transaction_started = time.monotonic()
+        with self._lock:
+            _root, package_path, package_name = self._resolve_package(package)
+            self._assert_package_mutation_allowed(package_name, operation="repair")
+        return self._prepare_automatic_preview_internal(
+            package_path,
+            package_name,
+            rule_code,
+            verified_before_report=verified_before_report,
+            source_guard=source_guard,
+            validation_runner=validation_runner,
+            transaction_started=transaction_started,
+            request_id=request_id,
+            request_fingerprint=request_fingerprint,
+        )
+
+    def _assert_preview_repair_supported(self, rule_code: str) -> None:
         if not self._is_preview_repair(rule_code):
             raise RepairPlanningError(
                 "unsupported_repair",
                 "This finding does not have automatic preview generation.",
             )
-        transaction_started = time.monotonic()
-        with self._lock:
-            _root, package_path, package_name = self._resolve_package(package)
-            self._assert_package_mutation_allowed(package_name, operation="repair")
-            use_verified_report = bool(
-                package_path.is_file()
-                and self._can_reuse_verified_before_report(
-                    verified_before_report,
-                    source_guard,
-                )
+
+    def _prepare_automatic_preview_internal(
+        self,
+        package_path: Path,
+        package_name: str,
+        rule_code: str,
+        *,
+        verified_before_report: dict | None,
+        source_guard,
+        validation_runner,
+        transaction_started: float,
+        request_id: str | None,
+        request_fingerprint: str | None,
+    ) -> _PreparedRepair:
+        use_verified_report = bool(
+            package_path.is_file()
+            and self._can_reuse_verified_before_report(
+                verified_before_report,
+                source_guard,
             )
-            if use_verified_report and not source_guard():
+        )
+        if callable(source_guard):
+            try:
+                source_unchanged = bool(source_guard())
+            except Exception:
+                source_unchanged = False
+            if not source_unchanged:
                 raise RepairPlanningError(
                     "source_changed",
-                    "This Feedpak changed after its completed Deep Audio scan. Scan it again before repairing it.",
+                    "This Feedpak changed after its completed scan. Scan it again before repairing it.",
                 )
-            internal = self._preview_repair.preview(
+        internal = self._preview_repair.preview(
+            package_path,
+            package_name,
+            rule_code,
+            lambda member_path, limit: self._read_member(
+                package_path, member_path, limit
+            ),
+            catalog_version=REPAIR_CATALOG_VERSION,
+            validator_version=self._validator_version,
+            verified_before_report=(
+                verified_before_report if use_verified_report else None
+            ),
+        )
+        plan_id = internal["plan_id"]
+        try:
+            claimed = self._preview_repair.claim(
                 package_path,
                 package_name,
                 rule_code,
+                plan_id,
                 lambda member_path, limit: self._read_member(
                     package_path, member_path, limit
                 ),
-                catalog_version=REPAIR_CATALOG_VERSION,
-                validator_version=self._validator_version,
+            )
+            return self._prepare_internal(
+                package_path,
+                package_name,
+                claimed,
+                deep_audio=True,
+                retain_recovery=False,
                 verified_before_report=(
                     verified_before_report if use_verified_report else None
                 ),
+                source_guard=source_guard,
+                validation_runner=validation_runner,
+                transaction_started=transaction_started,
+                request_id=request_id,
+                request_operation="repair.automatic",
+                request_fingerprint=request_fingerprint,
             )
-            plan_id = internal["plan_id"]
-            try:
-                claimed = self._preview_repair.claim(
-                    package_path,
-                    package_name,
-                    rule_code,
-                    plan_id,
-                    lambda member_path, limit: self._read_member(
-                        package_path, member_path, limit
-                    ),
-                )
-                return self._apply_internal(
-                    package_path,
-                    package_name,
-                    claimed,
-                    deep_audio=True,
-                    retain_recovery=False,
-                    verified_before_report=(
-                        verified_before_report if use_verified_report else None
-                    ),
-                    source_guard=source_guard if use_verified_report else None,
-                    transaction_started=transaction_started,
-                    request_id=request_id,
-                    request_operation="repair.automatic",
-                    request_fingerprint=request_fingerprint,
-                )
-            finally:
-                self._preview_repair.discard(plan_id)
+        finally:
+            self._preview_repair.discard(plan_id)
 
     def _is_preview_repair(self, rule_code: str) -> bool:
         return bool(
@@ -1209,42 +1293,163 @@ class RepairService:
         """Plan and immediately apply scan-selected safe rules.
 
         Batch review is bound to a completed scan signature and a fixed rule
-        set. Rebuilding that same selected plan inside the mutation lock keeps
-        the authoritative source-byte, blocker, candidate-validation, backup,
-        and atomic-commit checks without doing the expensive work twice.
+        set. Synchronous callers keep the historical single-package mutation
+        lock while the split prepare/commit API lets the batch coordinator
+        validate distinct private candidates in parallel.
         """
         transaction_started = time.monotonic()
         with self._lock:
             _root, package_path, package_name = self._resolve_package(package)
             self._assert_package_mutation_allowed(package_name, operation="repair")
-            internal = self._plan_all_package(
+            prepared = self._prepare_selected_internal(
                 package_path,
                 package_name,
-                rule_codes=rule_codes,
-            )
-            blockers = internal.get("blockers") or []
-            if blockers:
-                first = blockers[0]
-                raise RepairPlanningError(
-                    str(first.get("code") or "repair_blocked"),
-                    str(first.get("message") or (
-                        "A referenced song-data file cannot be changed safely."
-                    )),
-                )
-            if not internal["available"]:
-                raise RepairPlanningError(
-                    "nothing_to_repair",
-                    "No scan-selected safe repairs are currently available in this package.",
-                )
-            return self._apply_internal(
-                package_path,
-                package_name,
-                internal,
+                rule_codes,
                 deep_audio=deep_audio,
                 verified_before_report=verified_before_report,
                 source_guard=source_guard,
+                validation_runner=None,
                 transaction_started=transaction_started,
             )
+            try:
+                return self._commit_prepared_internal(prepared)
+            finally:
+                prepared.discard()
+
+    def prepare_selected(
+        self,
+        package: str,
+        rule_codes: Iterable[str],
+        *,
+        deep_audio: bool = False,
+        verified_before_report: dict | None = None,
+        source_guard=None,
+        validation_runner=None,
+    ) -> _PreparedRepair:
+        """Build and fully validate a private candidate without starting a transaction.
+
+        This method intentionally creates no backup, journal, history receipt,
+        or package mutation. ``commit_prepared`` repeats the recovery and source
+        guards while holding the single mutation lock.
+        """
+        transaction_started = time.monotonic()
+        with self._lock:
+            _root, package_path, package_name = self._resolve_package(package)
+            self._assert_package_mutation_allowed(package_name, operation="repair")
+        return self._prepare_selected_internal(
+            package_path,
+            package_name,
+            rule_codes,
+            deep_audio=deep_audio,
+            verified_before_report=verified_before_report,
+            source_guard=source_guard,
+            validation_runner=validation_runner,
+            transaction_started=transaction_started,
+        )
+
+    def _prepare_selected_internal(
+        self,
+        package_path: Path,
+        package_name: str,
+        rule_codes: Iterable[str],
+        *,
+        deep_audio: bool,
+        verified_before_report: dict | None,
+        source_guard,
+        validation_runner,
+        transaction_started: float,
+    ) -> _PreparedRepair:
+        internal = self._plan_all_package(
+            package_path,
+            package_name,
+            rule_codes=rule_codes,
+        )
+        blockers = internal.get("blockers") or []
+        if blockers:
+            first = blockers[0]
+            raise RepairPlanningError(
+                str(first.get("code") or "repair_blocked"),
+                str(first.get("message") or (
+                    "A referenced song-data file cannot be changed safely."
+                )),
+            )
+        if not internal["available"]:
+            raise RepairPlanningError(
+                "nothing_to_repair",
+                "No scan-selected safe repairs are currently available in this package.",
+            )
+        return self._prepare_internal(
+            package_path,
+            package_name,
+            internal,
+            deep_audio=deep_audio,
+            verified_before_report=verified_before_report,
+            source_guard=source_guard,
+            validation_runner=validation_runner,
+            transaction_started=transaction_started,
+        )
+
+    def commit_prepared(self, prepared: _PreparedRepair) -> dict:
+        """Commit one service-owned candidate through the serialized mutation lane."""
+        if not isinstance(prepared, _PreparedRepair) or prepared.owner is not self._prepared_owner:
+            raise RepairPlanningError(
+                "invalid_prepared_repair",
+                "The prepared repair is not valid for this Library Doctor session.",
+            )
+        try:
+            with self._lock:
+                _root, package_path, package_name = self._resolve_package(
+                    prepared.package_name
+                )
+                if package_path != prepared.package_path or package_name != prepared.package_name:
+                    raise RepairPlanningError(
+                        "source_changed",
+                        "The selected package moved before it could be saved. Nothing was overwritten.",
+                    )
+                self._assert_package_mutation_allowed(package_name, operation="repair")
+                return self._commit_prepared_internal(prepared)
+        finally:
+            prepared.discard()
+
+    def discard_prepared(self, prepared: _PreparedRepair) -> bool:
+        """Discard one uncommitted candidate produced by this service."""
+        if not isinstance(prepared, _PreparedRepair) or prepared.owner is not self._prepared_owner:
+            return False
+        return prepared.discard()
+
+    def _apply_internal(
+        self,
+        package_path: Path,
+        package_name: str,
+        internal: dict,
+        *,
+        deep_audio: bool,
+        retain_recovery: bool = True,
+        verified_before_report: dict | None = None,
+        source_guard=None,
+        transaction_started: float | None = None,
+        request_id: str | None = None,
+        request_operation: str | None = None,
+        request_fingerprint: str | None = None,
+    ) -> dict:
+        """Preserve the synchronous API through the split safe transaction."""
+        prepared = self._prepare_internal(
+            package_path,
+            package_name,
+            internal,
+            deep_audio=deep_audio,
+            retain_recovery=retain_recovery,
+            verified_before_report=verified_before_report,
+            source_guard=source_guard,
+            transaction_started=transaction_started,
+            request_id=request_id,
+            request_operation=request_operation,
+            request_fingerprint=request_fingerprint,
+        )
+        try:
+            return self._commit_prepared_internal(prepared)
+        finally:
+            prepared.discard()
 
     def _validate_reviewed_preview_candidate(
         self,
@@ -1277,7 +1482,7 @@ class RepairService:
         finally:
             cleanup()
 
-    def _apply_internal(
+    def _prepare_internal(
         self,
         package_path: Path,
         package_name: str,
@@ -1287,289 +1492,43 @@ class RepairService:
         retain_recovery: bool = True,
         verified_before_report: dict | None = None,
         source_guard=None,
+        validation_runner=None,
         transaction_started: float | None = None,
         request_id: str | None = None,
         request_operation: str | None = None,
         request_fingerprint: str | None = None,
-    ) -> dict:
-        """Validate and commit one already-recalculated package plan."""
+    ) -> _PreparedRepair:
+        return _preparation.prepare(
+            self,
+            package_path,
+            package_name,
+            internal,
+            apply_json_member=apply_json_member,
+            error_type=RepairPlanningError,
+            deep_audio=deep_audio,
+            retain_recovery=retain_recovery,
+            verified_before_report=verified_before_report,
+            source_guard=source_guard,
+            validate_feedpak=validation_runner,
+            transaction_started=transaction_started,
+            request_id=request_id,
+            request_operation=request_operation,
+            request_fingerprint=request_fingerprint,
+        )
+    def _commit_prepared_internal(self, prepared: _PreparedRepair) -> dict:
         if (
-            not isinstance(transaction_started, (int, float))
-            or not math.isfinite(transaction_started)
+            not isinstance(prepared, _PreparedRepair)
+            or prepared.owner is not self._prepared_owner
         ):
-            transaction_started = time.monotonic()
-        originals = {
-            item["member_path"]: item["raw"] for item in internal["_members"]
-        }
-        replacements = {
-            item["member_path"]: (
-                item["replacement"]
-                if "replacement" in item
-                else apply_json_member(item["raw"], item["plan"])
+            raise RepairPlanningError(
+                "invalid_prepared_repair",
+                "The prepared repair is not valid for this Library Doctor session.",
             )
-            for item in internal["_members"]
-        }
-        source_token = self._capture_package_token(package_path)
-        if internal.get("terminal_evidence"):
-            source_token["terminal_evidence"] = {p: h for p, h in internal["terminal_evidence"].items() if p not in originals}
-            source_token["terminal_inventory"] = internal["terminal_inventory"]
-        self._emit_transaction_barrier(
-            "source_captured", package=package_name, operation="repair"
+        return _preparation.commit(
+            self,
+            prepared,
+            error_type=RepairPlanningError,
         )
-        if internal.get("terminal_evidence"):
-            self._assert_package_identity(package_name, package_path, source_token)
-        song_data_only = all(
-            item.get("source_kind") in {
-                "arrangement", "timeline", "lyrics", "drum_tab"
-            }
-            for item in internal["_members"]
-        )
-        reuse_verified_before = bool(
-            package_path.is_file()
-            and self._can_reuse_verified_before_report(
-                verified_before_report,
-                source_guard,
-            )
-        )
-        reuse_deep_audio = bool(
-            deep_audio
-            and song_data_only
-            # Archived Feedpaks receive a complete candidate CRC pass below.
-            # Unpacked directory packages have no equivalent archive checksum,
-            # so keep the conservative full Deep Audio validation for them.
-            and package_path.is_file()
-            and reuse_verified_before
-        )
-        if reuse_verified_before:
-            if not source_guard():
-                raise RepairPlanningError(
-                    "source_changed",
-                    "This Feedpak changed after its completed Deep Audio scan. Scan it again before repairing it.",
-                )
-            before = copy.deepcopy(verified_before_report)
-        else:
-            before = self._validate_feedpak(
-                package_path, package_name, deep_audio=bool(deep_audio)
-            )
-        candidate, cleanup = self._candidate(package_path, replacements)
-        try:
-            after = self._validate_feedpak(
-                candidate,
-                package_name,
-                deep_audio=bool(deep_audio and not reuse_deep_audio),
-            )
-            if reuse_deep_audio:
-                after = self._reuse_unchanged_deep_audio(before, after)
-            rule_codes = internal.get("rule_codes")
-            if not isinstance(rule_codes, list) or not rule_codes:
-                rule_codes = [internal["rule_code"]]
-            verification = internal.get("_verification")
-            if (
-                isinstance(verification, dict)
-                and verification.get("mode") == "reviewed"
-            ):
-                self._verify_reviewed_validation(
-                    before,
-                    after,
-                    set(internal.get("rule_codes") or ()),
-                )
-            else:
-                self._verify_validation(before, after, rule_codes)
-            self._emit_transaction_barrier(
-                "candidate_validated", package=package_name, operation="repair"
-            )
-            if reuse_verified_before and not source_guard():
-                raise RepairPlanningError(
-                    "source_changed",
-                    "This Feedpak changed while its repaired candidate was being checked. Nothing was saved.",
-                )
-            backup_id = self._create_backup(
-                package_name,
-                package_path,
-                originals,
-                replacements,
-                internal["plan_id"],
-                internal["rule_code"],
-                self._public_plan(internal),
-            )
-            transaction = None
-            try:
-                if package_path.is_dir():
-                    transaction = self._begin_transaction(
-                        package_name,
-                        backup_id,
-                        operation="repair",
-                        target_state="repaired",
-                    )
-                self._emit_transaction_barrier(
-                    "backup_durable",
-                    package=package_name,
-                    operation="repair",
-                    backup_id=backup_id,
-                )
-                try:
-                    self._verify_backup_durable(
-                        backup_id,
-                        package_name,
-                        originals,
-                    )
-                except RepairPlanningError as verify_exc:
-                    raise RepairPlanningError(
-                        "backup_failed",
-                        "The recovery backup could not be verified, so nothing was changed.",
-                    ) from verify_exc
-                self._assert_source_state(
-                    package_name,
-                    package_path,
-                    originals,
-                    source_token,
-                )
-                self._emit_transaction_barrier(
-                    "source_guarded",
-                    package=package_name,
-                    operation="repair",
-                    backup_id=backup_id,
-                )
-                self._commit(
-                    package_name,
-                    package_path,
-                    candidate,
-                    replacements,
-                    originals,
-                    source_token=source_token,
-                    transaction=transaction,
-                )
-            except RepairPlanningError as exc:
-                if exc.file_state == "unchanged":
-                    if transaction is not None:
-                        self._finish_transaction(transaction)
-                    try:
-                        self._delete_backup(backup_id)
-                    except RepairPlanningError as cleanup_exc:
-                        self._log.warning(
-                            "Library Doctor could not remove an unused recovery backup %s: %s",
-                            backup_id,
-                            cleanup_exc,
-                        )
-                raise
-        finally:
-            cleanup()
-
-        backup_removed = False
-        recovery_bytes_freed = 0
-        backup_cleanup_error = ""
-        if not retain_recovery:
-            try:
-                recovery_bytes_freed = self._delete_backup(backup_id)
-                backup_removed = True
-            except RepairPlanningError as exc:
-                # The validated repair is already committed. Report the rare
-                # cleanup failure accurately without pretending the Feedpak
-                # transaction failed or deleting anything else.
-                backup_cleanup_error = str(exc)
-                self._log.warning(
-                    "Library Doctor completed preview repair for %s but could not remove temporary recovery backup %s: %s",
-                    package_name,
-                    backup_id,
-                    exc,
-                )
-
-        file_handling = dict(internal.get("file_handling") or {})
-        if file_handling:
-            file_handling.update({
-                "backup_created": True,
-                "backup_id": backup_id,
-                "undo_available": bool(retain_recovery or not backup_removed),
-                "backup_retained": not backup_removed,
-                "backup_removed": backup_removed,
-                "backup_cleanup_required": bool(backup_cleanup_error),
-                "backup_cleanup_error": backup_cleanup_error,
-                "backup_size_bytes": self._backup_size(backup_id) or 0,
-                "recovery_bytes_freed": recovery_bytes_freed,
-            })
-            if not retain_recovery:
-                file_handling["summary"] = (
-                    "Library Doctor checked the complete repaired song before replacing the Feedpak at the same location. "
-                    "Its temporary recovery copy was then removed automatically, so no duplicate song or pending preview backup remains."
-                    if backup_removed else
-                    "The validated preview repair completed at the same Feedpak path, but Library Doctor could not remove its temporary recovery copy automatically. "
-                    "The repaired Feedpak remains active and the recovery copy is available for explicit cleanup."
-                )
-        else:
-            file_handling = self._file_handling(backup_id)
-            file_handling["backup_size_bytes"] = self._backup_size(backup_id) or 0
-        performance = {
-            "elapsed_seconds": round(
-                max(0.0, time.monotonic() - transaction_started), 6
-            ),
-            "deep_audio_requested": bool(deep_audio),
-            "verified_scan_report_reused": reuse_verified_before,
-            "deep_audio_reused": reuse_deep_audio,
-        }
-        result = {
-            **self._public_plan(internal),
-            "applied": True,
-            "outcome": "success",
-            "backup_id": backup_id,
-            "undo_available": bool(retain_recovery or not backup_removed),
-            "report": after,
-            "deep_audio": bool(deep_audio),
-            "deep_audio_reused": reuse_deep_audio,
-            "verified_scan_report_reused": reuse_verified_before,
-            "performance": performance,
-            "file_handling": file_handling,
-            **self._request_metadata(
-                request_id,
-                request_operation,
-                request_fingerprint,
-            ),
-        }
-        result["receipt_saved"] = self._record_history({
-            "id": uuid.uuid4().hex,
-            "action": "repair",
-            "outcome": "success",
-            "completed_at": time.time(),
-            "package": package_name,
-            "title": after.get("title") or package_name,
-            "artist": after.get("artist") or "",
-            "rule_code": internal["rule_code"],
-            "rule_codes": internal.get("rule_codes", [internal["rule_code"]]),
-            "repair_summaries": internal.get("repair_summaries", []),
-            **(
-                {
-                    key: internal.get(key)
-                    for key in (
-                        "selected_count",
-                        "changing_count",
-                        "skipped_count",
-                        "blocked_count",
-                        "unresolved_count",
-                        "remaining_review_count",
-                        "decision_counts",
-                    )
-                }
-                if internal.get("change_kind") == "reviewed_decisions"
-                else {}
-            ),
-            "backup_id": backup_id,
-            "change_kind": internal.get("change_kind", "remove_duplicates"),
-            "change_count": internal.get("change_count", internal["removed_count"]),
-            "removed_count": internal["removed_count"],
-            "musical_positions": internal["musical_positions"],
-            "item_name": internal["item_name"],
-            "player_result": internal["player_result"],
-            "user_value": internal["user_value"],
-            "media": internal.get("media"),
-            "performance": performance,
-            "file_handling": result["file_handling"],
-            **self._request_metadata(
-                request_id,
-                request_operation,
-                request_fingerprint,
-            ),
-        })
-        return result
-
     def _can_reuse_verified_before_report(
         self,
         report: dict | None,
@@ -2119,7 +2078,7 @@ class RepairService:
             package_path, package_name, deep_audio=bool(deep_audio)
         )
         candidate, cleanup = self._candidate(package_path, originals)
-        source_token = self._capture_package_token(package_path)
+        source_token = self._capture_package_token(package_path, originals)
         try:
             after = self._validate_feedpak(
                 candidate, package_name, deep_audio=bool(deep_audio)
@@ -2242,7 +2201,7 @@ class RepairService:
             self._transaction_barrier(name, dict(context))
 
     @staticmethod
-    def _capture_package_token(package_path: Path) -> dict:
+    def _capture_package_token(package_path: Path, mutable_paths=()) -> dict:
         """Bind a commit to the same package object and, for archives, bytes."""
         try:
             stat = package_path.stat()
@@ -2257,8 +2216,13 @@ class RepairService:
                     for chunk in iter(lambda: stream.read(1024 * 1024), b""):
                         digest.update(chunk)
                 token["sha256"] = digest.hexdigest()
+            else:
+                token["mutable_paths"] = sorted(mutable_paths)
+                token["unchanged_tree_sha256"] = (
+                    _workspace.directory_snapshot_digest(package_path, mutable_paths)
+                )
             return token
-        except OSError as exc:
+        except (OSError, _workspace.WorkspaceError) as exc:
             raise RepairPlanningError(
                 "source_changed",
                 "The selected package changed before it could be saved. Nothing was overwritten.",
@@ -2291,14 +2255,29 @@ class RepairService:
         if source_token is not None:
             if "terminal_inventory" in source_token:
                 try:
-                    if _terminal.package_inventory(package_path) != source_token["terminal_inventory"]:
+                    if (
+                        _terminal.package_inventory(package_path)
+                        != source_token["terminal_inventory"]
+                    ):
                         raise ValueError("Package members changed.")
                 except (ValueError, OSError, zipfile.BadZipFile) as exc:
-                    raise RepairPlanningError("source_changed", "The terminal repair package inventory changed.") from exc
+                    raise RepairPlanningError(
+                        "source_changed",
+                        "The terminal repair package inventory changed.",
+                    ) from exc
             for member, digest in source_token.get("terminal_evidence", {}).items():
-                if hashlib.sha256(self._read_member(package_path, member, MAX_REPAIR_TEXT_BYTES)).hexdigest() != digest:
-                    raise RepairPlanningError("source_changed", "A terminal beat repair input changed; nothing was overwritten.")
-            current_token = self._capture_package_token(package_path)
+                current = self._read_member(
+                    package_path,
+                    member,
+                    MAX_REPAIR_TEXT_BYTES,
+                )
+                if hashlib.sha256(current).hexdigest() != digest:
+                    raise RepairPlanningError(
+                        "source_changed",
+                        "A terminal beat repair input changed; nothing was overwritten.",
+                    )
+            mutable_paths = source_token.get("mutable_paths") or ()
+            current_token = self._capture_package_token(package_path, mutable_paths)
             expected_identity = (
                 source_token.get("kind"),
                 source_token.get("device"),
@@ -2309,10 +2288,13 @@ class RepairService:
                 current_token.get("device"),
                 current_token.get("inode"),
             )
-            if expected_identity != current_identity or (
-                source_token.get("kind") == "archive"
-                and source_token.get("sha256") != current_token.get("sha256")
-            ):
+            bytes_changed = (
+                source_token.get("sha256") != current_token.get("sha256")
+                if source_token.get("kind") == "archive"
+                else source_token.get("unchanged_tree_sha256")
+                != current_token.get("unchanged_tree_sha256")
+            )
+            if expected_identity != current_identity or bytes_changed:
                 raise RepairPlanningError(
                     "source_changed",
                     "The selected package changed while its candidate was being checked. Nothing was overwritten.",
@@ -4163,6 +4145,8 @@ class RepairService:
         member presented to the validator survived candidate creation.
         """
 
+        normalize = str.casefold if os.name == "nt" else str
+
         def entries(root: Path) -> dict[str, tuple[str, Path]]:
             found: dict[str, tuple[str, Path]] = {}
             pending = [root]
@@ -4185,7 +4169,13 @@ class RepairService:
                             kind = "file"
                         else:
                             kind = "unsupported"
-                        found[relative] = (kind, path)
+                        key = normalize(relative)
+                        if key in found:
+                            raise RepairPlanningError(
+                                "candidate_integrity_failed",
+                                "The directory package contains ambiguous member names.",
+                            )
+                        found[key] = (kind, path)
                         if len(found) > MAX_DIRECTORY_CANDIDATE_ENTRIES:
                             raise RepairPlanningError(
                                 "candidate_integrity_failed",
@@ -4207,14 +4197,17 @@ class RepairService:
             source = entries(source_path)
             candidate = entries(candidate_path)
             expected_kinds = {name: value[0] for name, value in source.items()}
-            for member_path, raw in replacements.items():
-                safe_path = _validate_member_path(member_path)
+            normalized_replacements = {
+                normalize(_validate_member_path(path)): raw
+                for path, raw in replacements.items()
+            }
+            for safe_path, raw in normalized_replacements.items():
                 if raw is None:
                     expected_kinds.pop(safe_path, None)
                     continue
                 parent = PurePosixPath(safe_path).parent
                 while parent != PurePosixPath("."):
-                    parent_name = parent.as_posix()
+                    parent_name = normalize(parent.as_posix())
                     existing = expected_kinds.get(parent_name)
                     if existing not in {None, "directory"}:
                         fail(
@@ -4240,7 +4233,7 @@ class RepairService:
                 candidate_kind, candidate_member = candidate[name]
                 if candidate_kind != expected_kind or expected_kind == "directory":
                     continue
-                replacement = replacements.get(name, ...)
+                replacement = normalized_replacements.get(name, ...)
                 if replacement is not ...:
                     if replacement is None:
                         fail("A deleted repair member remained in the directory candidate.")

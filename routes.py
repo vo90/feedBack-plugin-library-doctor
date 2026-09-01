@@ -27,6 +27,7 @@ def setup(app, context):
     repair_module = load_sibling("repair")
     preview_module = load_sibling("preview_repair")
     batch_module = load_sibling("batch_repair")
+    repair_policy_module = load_sibling("library_doctor_repair_policy")
     contracts = load_sibling("api_contracts")
     receipt_module = load_sibling("mutation_receipts")
     route_support = load_sibling("route_support")
@@ -71,6 +72,12 @@ def setup(app, context):
         preview_repair=preview_repair,
         validate_reviewed_arrangement=validator.validate_reviewed_arrangement,
     )
+
+    def repair_worker_policy(pending_packages, **options):
+        root = scanner.current_repair_root()
+        options["storage_kind"] = repair_policy_module.detect_storage_kind(root)
+        return repair_policy_module.choose_repair_worker_policy(pending_packages, **options)
+
     batch_manager = batch_module.BatchRepairManager(
         config_dir=Path(context["config_dir"]),
         scanner=scanner,
@@ -78,6 +85,13 @@ def setup(app, context):
         repair_error_type=repair_module.RepairPlanningError,
         log=log,
         legacy_schemas=migration.LEGACY_SCHEMAS,
+        prepare_worker_policy=repair_worker_policy,
+        prepare_process_pool_factory=lambda max_workers, validator_version: (
+            scan_worker_module.ValidationProcessPool(
+                max_workers=max_workers,
+                validator_version=validator_version,
+            )
+        ),
     )
     mutation_receipts = receipt_module.MutationReceiptStore(
         Path(context["config_dir"]),
@@ -287,7 +301,10 @@ def setup(app, context):
     @router.post("/repair/batch/apply", status_code=202)
     def apply_batch_repairs(payload: contracts.BatchApplyRequestContract):
         try:
-            return batch_manager.start_apply(payload.batch_plan_id)
+            return batch_manager.start_apply(
+                payload.batch_plan_id,
+                max_workers=payload.max_workers,
+            )
         except batch_module.BatchRepairError as exc:
             raise HTTPException(
                 status_code=409,
@@ -418,6 +435,8 @@ def setup(app, context):
                 "Library Doctor could not release a failed mutation reservation: %s",
                 exc.code,
             )
+
+    require_repair_backend = route_support.repair_backend_gate(errors, batch_manager, batch_module.BatchRepairError, abandon_idempotent_mutation)
 
     def complete_idempotent_mutation(ticket: dict | None, result: dict) -> dict:
         if ticket is None:
@@ -628,6 +647,7 @@ def setup(app, context):
     ):
         if ticket is not None and ticket.get("replay") is not None:
             return ticket["replay"]
+        require_repair_backend(ticket)
         reserved, reason = scanner.begin_repair()
         if not reserved:
             abandon_idempotent_mutation(ticket)
@@ -784,6 +804,7 @@ def setup(app, context):
         )
         if ticket is not None and ticket.get("replay") is not None:
             return ticket["replay"]
+        require_repair_backend(ticket)
         reserved, reason = scanner.begin_repair()
         if not reserved:
             abandon_idempotent_mutation(ticket)
@@ -873,6 +894,7 @@ def setup(app, context):
         )
         if ticket is not None and ticket.get("replay") is not None:
             return ticket["replay"]
+        require_repair_backend(ticket)
         reserved, reason = scanner.begin_repair()
         if not reserved:
             abandon_idempotent_mutation(ticket)
@@ -950,6 +972,7 @@ def setup(app, context):
         )
         if ticket is not None and ticket.get("replay") is not None:
             return ticket["replay"]
+        require_repair_backend(ticket)
         reserved, reason = scanner.begin_repair()
         if not reserved:
             abandon_idempotent_mutation(ticket)

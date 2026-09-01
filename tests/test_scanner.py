@@ -87,6 +87,107 @@ def _run(instance, *, force=False, **target):
     return status
 
 
+def _disk_usage(total, free):
+    return type("DiskUsage", (), {"total": total, "free": free})()
+
+
+def test_repair_storage_evidence_is_path_free_and_uses_largest_package(
+    scanner_module, tmp_path, monkeypatch
+):
+    instance, library = _make_scanner(
+        scanner_module, tmp_path, lambda _path, package: _report(package)
+    )
+    (library / "small.feedpak").write_bytes(b"123")
+    (library / "large.feedpak").write_bytes(b"1234567")
+    _run(instance)
+    monkeypatch.setattr(
+        scanner_module.shutil, "disk_usage", lambda _root: _disk_usage(1_000, 400)
+    )
+
+    evidence = instance.repair_storage_evidence(
+        ["small.feedpak", "large.feedpak"]
+    )
+
+    assert evidence == {
+        "storage_total_bytes": 1_000,
+        "storage_free_bytes": 400,
+        "largest_source_package_bytes": 7,
+    }
+    assert str(library) not in json.dumps(evidence)
+
+
+def test_repair_storage_evidence_sums_directory_package_members(
+    scanner_module, tmp_path, monkeypatch
+):
+    instance, library = _make_scanner(
+        scanner_module, tmp_path, lambda _path, package: _report(package)
+    )
+    package = library / "directory.feedpak"
+    (package / "nested").mkdir(parents=True)
+    (package / "first.bin").write_bytes(b"12345")
+    (package / "nested" / "second.bin").write_bytes(b"1234567890")
+    _run(instance)
+    monkeypatch.setattr(
+        scanner_module.shutil, "disk_usage", lambda _root: _disk_usage(2_000, 900)
+    )
+
+    assert instance.repair_storage_evidence(["directory.feedpak"]) == {
+        "storage_total_bytes": 2_000,
+        "storage_free_bytes": 900,
+        "largest_source_package_bytes": 15,
+    }
+
+
+def test_repair_storage_evidence_rejects_unsafe_or_missing_packages(
+    scanner_module, tmp_path
+):
+    instance, library = _make_scanner(
+        scanner_module, tmp_path, lambda _path, package: _report(package)
+    )
+    (library / "song.feedpak").write_bytes(b"song")
+    _run(instance)
+    unavailable = {
+        "storage_total_bytes": None,
+        "storage_free_bytes": None,
+        "largest_source_package_bytes": None,
+    }
+
+    assert instance.repair_storage_evidence(["../outside.feedpak"]) == unavailable
+    assert instance.repair_storage_evidence(["missing.feedpak"]) == unavailable
+
+
+def test_repair_storage_evidence_contains_disk_and_directory_read_failures(
+    scanner_module, tmp_path, monkeypatch
+):
+    instance, library = _make_scanner(
+        scanner_module, tmp_path, lambda _path, package: _report(package)
+    )
+    package = library / "directory.feedpak"
+    package.mkdir()
+    (package / "member.bin").write_bytes(b"member")
+    _run(instance)
+    unavailable = {
+        "storage_total_bytes": None,
+        "storage_free_bytes": None,
+        "largest_source_package_bytes": None,
+    }
+
+    def disk_failure(_root):
+        raise OSError("disk usage unavailable")
+
+    monkeypatch.setattr(scanner_module.shutil, "disk_usage", disk_failure)
+    assert instance.repair_storage_evidence(["directory.feedpak"]) == unavailable
+    monkeypatch.setattr(
+        scanner_module.shutil, "disk_usage", lambda _root: _disk_usage(2_000, 900)
+    )
+
+    def walk_failure(*_args, **_kwargs):
+        raise OSError("directory unreadable")
+
+    monkeypatch.setattr(scanner_module.os, "walk", walk_failure)
+    assert instance.repair_storage_evidence(["directory.feedpak"]) == unavailable
+
+
 def test_completed_scan_exposes_aggregate_performance_telemetry(
     scanner_module, tmp_path,
 ):

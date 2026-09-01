@@ -49,6 +49,10 @@ class _Scanner:
     def wait_for_playback(cancel_event):
         return not cancel_event.is_set()
 
+    @staticmethod
+    def package_matches_signature(package, expected):
+        return expected == f"signature-{package}"
+
     def record_repair_result(self, package, report, *, deep_audio=False):
         self.cached.append((package, report, deep_audio))
 
@@ -135,7 +139,9 @@ class _BlockingRepairService:
         *,
         deep_audio=False,
         rule_codes=None,
+        source_guard=None,
     ):
+        assert callable(source_guard) and source_guard()
         self.apply_calls.append(
             (package, deep_audio, tuple(rule_codes or ()))
         )
@@ -208,7 +214,7 @@ class _PreviewFailureAfterSafeRepair(_BlockingRepairService):
         }
 
     @staticmethod
-    def apply_automatic_preview(_package, _rule_code):
+    def apply_automatic_preview(_package, _rule_code, **_options):
         raise _RepairError(
             "audio_tool_failed",
             "The audio converter could not create this preview.",
@@ -225,7 +231,7 @@ class _PreviewCleanupFailureRepairService:
         }
 
     @staticmethod
-    def apply_automatic_preview(package, rule_code):
+    def apply_automatic_preview(package, rule_code, **_options):
         assert rule_code == "media.preview-missing"
         return {
             "backup_id": "preview-cleanup-backup",
@@ -291,12 +297,14 @@ def test_batch_cancellation_finishes_current_feedpak_and_keeps_its_receipt(tmp_p
             "candidates": [
                 {
                     "package": "one.feedpak",
+                    "scan_signature": "signature-one.feedpak",
                     "title": "One",
                     "artist": "Artist",
                     "rule_codes": ["chart.duplicate-note"],
                 },
                 {
                     "package": "two.feedpak",
+                    "scan_signature": "signature-two.feedpak",
                     "title": "Two",
                     "artist": "Artist",
                     "rule_codes": ["chart.duplicate-note"],
@@ -362,6 +370,7 @@ def test_batch_preview_excludes_packages_with_required_recovery(tmp_path):
             "candidates": [
                 {
                     "package": package,
+                    "scan_signature": f"signature-{package}",
                     "title": package,
                     "artist": "Artist",
                     "rule_codes": ["chart.duplicate-note"],
@@ -406,6 +415,7 @@ def test_batch_keeps_safe_song_data_when_optional_preview_generation_fails(
             "scope_package_count": 1,
             "candidates": [{
                 "package": "one.feedpak",
+                "scan_signature": "signature-one.feedpak",
                 "title": "One",
                 "artist": "Artist",
                 "rule_codes": ["chart.duplicate-note"],
@@ -458,6 +468,7 @@ def test_batch_surfaces_and_can_clear_temporary_preview_recovery_copy(tmp_path):
             "scope_package_count": 1,
             "candidates": [{
                 "package": "one.feedpak",
+                "scan_signature": "signature-one.feedpak",
                 "title": "One",
                 "artist": "Artist",
                 "rule_codes": [],
@@ -533,6 +544,7 @@ def test_interrupted_batch_checkpoint_becomes_a_recoverable_result(tmp_path):
             "removed_count": 1,
             "outcomes": [{
                 "package": "one.feedpak",
+                "scan_signature": "signature-one.feedpak",
                 "outcome": "success",
                 "backup_id": "backup-one",
                 "change_count": 1,
@@ -585,6 +597,7 @@ def test_running_batch_checkpoints_only_after_complete_package_transactions(
             "scope_package_count": 1,
             "candidates": [{
                 "package": "one.feedpak",
+                "scan_signature": "signature-one.feedpak",
                 "title": "One",
                 "artist": "Artist",
                 "rule_codes": ["chart.duplicate-note"],
@@ -625,12 +638,14 @@ def test_batch_undo_cancellation_finishes_current_restore_and_keeps_later_packag
             "candidates": [
                 {
                     "package": "one.feedpak",
+                    "scan_signature": "signature-one.feedpak",
                     "title": "One",
                     "artist": "Artist",
                     "rule_codes": ["chart.duplicate-note"],
                 },
                 {
                     "package": "two.feedpak",
+                    "scan_signature": "signature-two.feedpak",
                     "title": "Two",
                     "artist": "Artist",
                     "rule_codes": ["chart.duplicate-note"],
@@ -713,12 +728,14 @@ def test_batch_finalizes_all_verified_recovery_copies_and_updates_receipt(
             "candidates": [
                 {
                     "package": "one.feedpak",
+                    "scan_signature": "signature-one.feedpak",
                     "title": "One",
                     "artist": "Artist",
                     "rule_codes": ["chart.duplicate-note"],
                 },
                 {
                     "package": "two.feedpak",
+                    "scan_signature": "signature-two.feedpak",
                     "title": "Two",
                     "artist": "Artist",
                     "rule_codes": ["chart.duplicate-note"],

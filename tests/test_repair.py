@@ -2278,7 +2278,9 @@ def test_song_data_repair_reuses_signature_bound_deep_audio_findings(
         repaired = json.loads(archive.read("arrangements/lead.json"))
     assert len(repaired["anchors"]) == 1
     assert validated == [False]
-    assert len(guard_calls) == 2
+    # Candidate validation and serialized commit each guard both sides of
+    # their potentially expensive/durable work.
+    assert len(guard_calls) == 4
     assert result["deep_audio_reused"] is True
     assert result["verified_scan_report_reused"] is True
     assert result["performance"] == {
@@ -2701,6 +2703,120 @@ def test_final_source_guard_preserves_an_external_edit_after_backup(
         tmp_path / "config" / "library_doctor" / "repair_transactions"
     )
     assert not list(transaction_dir.glob("*.json"))
+
+
+@pytest.mark.parametrize("edit_barrier", ("source_guarded", "before_member_replace"))
+def test_directory_commit_rechecks_every_untouched_member_at_the_write_boundary(
+    repair, tmp_path, edit_barrier
+):
+    edited = b"external cover edit after candidate validation"
+    package_holder = {}
+    changed = False
+
+    def barrier(name, context):
+        nonlocal changed
+        if name != edit_barrier or changed:
+            return
+        if name == "before_member_replace" and context["member_index"] != 1:
+            return
+        changed = True
+        (package_holder["path"] / "cover.bin").write_bytes(edited)
+
+    service, package, original, _validate = _phase0_directory_service(
+        repair, tmp_path, barrier=barrier
+    )
+    package_holder["path"] = package
+    cover = package / "cover.bin"
+    cover.write_bytes(b"original cover bytes")
+    plan = service.preview_all("Song.feedpak")
+
+    with pytest.raises(repair.RepairPlanningError) as raised:
+        service.apply_all("Song.feedpak", plan["plan_id"])
+
+    assert raised.value.code == "source_changed"
+    assert changed is True
+    assert cover.read_bytes() == edited
+    assert (package / "arrangements" / "lead.json").read_bytes() == original
+    assert (package / "arrangements" / "rhythm.json").read_bytes() == original
+    assert service.history()["items"] == []
+    assert not list(
+        (tmp_path / "config" / "library_doctor" / "repair_backups").glob("*.zip")
+    )
+    assert not list(
+        (tmp_path / "config" / "library_doctor" / "repair_transactions").glob("*.json")
+    )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows path matching is case-insensitive")
+def test_directory_snapshot_uses_windows_case_semantics_for_planned_members(
+    repair, tmp_path
+):
+    service, package, _original, _validate = _phase0_directory_service(
+        repair, tmp_path
+    )
+    manifest = package / "manifest.yaml"
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8").replace(
+            "arrangements/lead.json", "Arrangements/Lead.json"
+        ),
+        encoding="utf-8",
+    )
+    rhythm = json.loads(
+        (package / "arrangements" / "rhythm.json").read_text(encoding="utf-8")
+    )
+    rhythm["anchors"] = rhythm["anchors"][:1]
+    (package / "arrangements" / "rhythm.json").write_text(
+        json.dumps(rhythm), encoding="utf-8"
+    )
+    plan = service.preview_all("Song.feedpak")
+
+    result = service.apply_all("Song.feedpak", plan["plan_id"])
+
+    lead = json.loads(
+        (package / "arrangements" / "lead.json").read_text(encoding="utf-8")
+    )
+    assert result["outcome"] == "success"
+    assert len(lead["anchors"]) == 1
+    assert not list(
+        (tmp_path / "config" / "library_doctor" / "repair_transactions").glob("*.json")
+    )
+
+
+def test_directory_snapshot_preserves_an_unchanged_link_but_never_a_mutable_one(
+    repair, tmp_path, monkeypatch
+):
+    service, package, _original, _validate = _phase0_directory_service(
+        repair, tmp_path
+    )
+    linked_member = package / "linked-cover.bin"
+    linked_member.write_bytes(b"external linked cover")
+    real_link_check = repair._workspace._is_link_or_junction
+    real_readlink = repair._workspace.os.readlink
+    monkeypatch.setattr(
+        repair._workspace,
+        "_is_link_or_junction",
+        lambda path: Path(path) == linked_member or real_link_check(path),
+    )
+    monkeypatch.setattr(
+        repair._workspace.os,
+        "readlink",
+        lambda path: "external-cover-target"
+        if Path(path) == linked_member
+        else real_readlink(path),
+    )
+
+    with pytest.raises(repair.RepairPlanningError) as linked_repair:
+        service._capture_package_token(package, ["linked-cover.bin"])
+    assert linked_repair.value.code == "source_changed"
+
+    plan = service.preview_all("Song.feedpak")
+    result = service.apply_all("Song.feedpak", plan["plan_id"])
+
+    assert result["outcome"] == "success"
+    assert linked_member.read_bytes() == b"external linked cover"
+    assert not list(
+        (tmp_path / "config" / "library_doctor" / "repair_transactions").glob("*.json")
+    )
 
 
 def test_repair_reopens_and_rejects_a_corrupted_durable_backup(

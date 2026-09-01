@@ -36,6 +36,11 @@
       "responsibility": "Choose bounded validation worker resources from host constraints.",
       "forbiddenImports": ["scanner", "validator", "fastapi"]
     },
+    "library_doctor_repair_policy.py": {
+      "maxLines": 500,
+      "responsibility": "Classify bounded source storage and choose conservative repair-preparation workers from host constraints.",
+      "forbiddenImports": ["scanner", "validator", "repair", "fastapi"]
+    },
     "repair.py": {
       "maxLines": 7550,
       "responsibility": "Plan, validate, commit, recover, and audit package mutations.",
@@ -54,6 +59,11 @@
     "terminal_beat_repair.py": {
       "maxLines": 400,
       "responsibility": "Assess terminal beat tails, references, event coverage and package corroboration.",
+      "forbiddenImports": ["repair", "scanner", "fastapi"]
+    },
+    "repair_preparation.py": {
+      "maxLines": 425,
+      "responsibility": "Own temporary repair-candidate preparation and the serialized source-rechecked commit seam.",
       "forbiddenImports": ["repair", "scanner", "fastapi"]
     },
     "measure_marker_repair.py": {

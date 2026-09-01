@@ -26,6 +26,16 @@
   chart, including non-1 starts, skips, regressions, unsupported markers, and
   repeated downbeats that do not meet the existing Safe Fix requirements.
 
+- Prepare and validate independent Feedpak repairs concurrently, using a
+  conservative CPU, memory, workload, drive-type, and free-space worker policy. Package
+  commits, Undo backups, recovery journals, and result ordering remain
+  coordinated one at a time.
+- Add Automatic and Custom maximum repair-worker controls. Custom values remain
+  safety ceilings and cannot override the runtime's hardware limits.
+- Add a plugin-owned portable FFmpeg fallback for preview repair, verify the
+  selected executable before use, and allow preview preparation for independent
+  Feedpaks to overlap.
+
 - Add the origin-agnostic `timeline.repeated-measure-markers` Safe Fix for the
   strict repeated-positive-marker pattern produced by older FeedForge versions
   and equivalent sources. It repairs all declared beat copies atomically while

@@ -27,6 +27,8 @@ function initialState() {
     targetPaths: { folder: '', file: '' },
     workerMode: 'automatic',
     workerLimit: 1,
+    repairWorkerMode: 'automatic',
+    repairWorkerLimit: 2,
     reviewDifficultyDefaultScope: 'full_only',
     reviewDifficultyScope: 'full_only',
     workspace: 'health',
