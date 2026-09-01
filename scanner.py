@@ -10,6 +10,7 @@ import inspect
 import io
 import json
 import os
+import shutil
 import sys
 import threading
 import time
@@ -353,6 +354,52 @@ class LibraryScanner:
     def repairs_available(self) -> bool:
         """Return whether package IDs are bound to an available scan root."""
         return self.current_repair_root() is not None
+
+    def repair_storage_evidence(self, packages) -> dict:
+        """Return path-free source-volume capacity evidence for repair policy."""
+        empty = {
+            "storage_total_bytes": None,
+            "storage_free_bytes": None,
+            "largest_source_package_bytes": None,
+        }
+        try:
+            root = self.current_repair_root()
+            if root is None:
+                return empty
+            usage = shutil.disk_usage(root)
+            largest = 0
+            is_junction = getattr(os.path, "isjunction", lambda _path: False)
+
+            def raise_walk_error(error):
+                raise error
+
+            for package in packages:
+                package_path, _name = self._current_package_path(package)
+                package_path.relative_to(root)
+                if package_path.is_dir():
+                    size = 0
+                    for dirpath, dirnames, filenames in os.walk(
+                        package_path, onerror=raise_walk_error, followlinks=False
+                    ):
+                        parent = Path(dirpath)
+                        dirnames[:] = [
+                            name for name in dirnames
+                            if not (parent / name).is_symlink()
+                            and not is_junction(parent / name)
+                        ]
+                        size += sum(
+                            (parent / name).lstat().st_size for name in filenames
+                        )
+                else:
+                    size = package_path.stat().st_size
+                largest = max(largest, int(size))
+            return {
+                "storage_total_bytes": int(usage.total),
+                "storage_free_bytes": int(usage.free),
+                "largest_source_package_bytes": largest,
+            }
+        except Exception:
+            return empty
 
     def _current_package_path(self, package: str) -> tuple[Path, str]:
         """Resolve one public package id inside the current private scan scope."""

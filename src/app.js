@@ -5,6 +5,7 @@ import {
   LEGACY_LAYOUT_QUERY,
   PAGE_SIZE,
   PLAYER_REVIEW_LAYOUT_KEY,
+  REPAIR_WORKER_LIMIT_KEY, REPAIR_WORKER_MODE_KEY,
   REVIEW_DIFFICULTY_SCOPE_KEY,
   SONG_TOOL_PAGE_SIZE,
   WORKER_LIMIT_KEY,
@@ -18,6 +19,7 @@ import { subscribePlayerReviewPlaybackEvents } from './player-review-playback-ev
 import { createPlayerReviewController } from './player-review-controller.js';
 import { createPreviewController } from './preview-controller.js';
 import { createRepairController } from './repair-controller.js';
+import { createRepairWorkerSettings } from './repair-worker-settings.js';
 import { createReviewDifficultyState } from './review-difficulty-state.js';
 import { createReviewedRepairController } from './reviewed-repair-controller.js';
 import { createResultsController } from './results-controller.js';
@@ -64,10 +66,8 @@ export function bootLibraryDoctor(hostWindow = window) {
     repairChangeCount,
   } = createFormatters({ number });
   let el = null;
-  const actions = {};
-  const unsubscribers = [];
-  let wired = false;
-  let waitingForCapabilities = false;
+  const actions = {}, unsubscribers = [];
+  let wired = false, waitingForCapabilities = false;
   const statusView = createStatusView({
     actions,
     duration,
@@ -81,6 +81,7 @@ export function bootLibraryDoctor(hostWindow = window) {
     text,
     window,
   });
+  const repairWorkerSettings = createRepairWorkerSettings({ document, localStorage, state, number, modeKey: REPAIR_WORKER_MODE_KEY, limitKey: REPAIR_WORKER_LIMIT_KEY });
   const batchController = createBatchController({
     actions,
     badge,
@@ -92,8 +93,7 @@ export function bootLibraryDoctor(hostWindow = window) {
     make,
     number,
     pluralSongs,
-    repairChangeCount,
-    request,
+    repairChangeCount, repairWorkerSettings, request,
     setHidden,
     state,
     text,
@@ -296,6 +296,7 @@ export function bootLibraryDoctor(hostWindow = window) {
     if (el.root.dataset.libraryDoctorBound === '1') return;
     el.root.dataset.libraryDoctorBound = '1';
     scanController.loadWorkerSettings();
+    repairWorkerSettings.bind();
     el.reviewDifficultyScope.value = getReviewDifficultyScope();
     el.workspaceTabs.addEventListener('click', (event) => {
       const button = event.target.closest('button[data-workspace]');

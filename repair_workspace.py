@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import secrets
@@ -9,7 +10,7 @@ import shutil
 import tempfile
 import time
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 
 WORKSPACE_PREFIX = ".library-doctor-work-"
@@ -28,11 +29,52 @@ class WorkspaceError(RuntimeError):
     """A candidate workspace could not be created or reconciled safely."""
 
 
+def directory_snapshot_digest(root: Path, mutable_paths=()) -> str:
+    """Hash every directory-package entry a prepared repair will not replace."""
+    root, normalize, ignored = Path(root), str.casefold if os.name == "nt" else str, set()
+    for value in mutable_paths:
+        parts = PurePosixPath(value).parts
+        for index in range(1, len(parts) + 1):
+            ignored.add(normalize(PurePosixPath(*parts[:index]).as_posix()))
+    entries, pending = [], [root]
+    try:
+        while pending:
+            current = pending.pop()
+            for path in current.iterdir():
+                relative = path.relative_to(root).as_posix()
+                if _is_link_or_junction(path):
+                    if normalize(relative) in ignored:
+                        raise WorkspaceError("A planned package member is an unsafe link.")
+                    kind = b"L"
+                elif path.is_dir():
+                    pending.append(path)
+                    kind = b"D"
+                elif path.is_file():
+                    kind = b"F"
+                else:
+                    raise WorkspaceError("The package contains an unsupported entry.")
+                if normalize(relative) not in ignored:
+                    entries.append((relative, kind, path))
+        snapshot = hashlib.sha256()
+        for relative, kind, path in sorted(entries):
+            name = relative.encode("utf-8")
+            snapshot.update(kind + len(name).to_bytes(8, "big") + name)
+            if kind == b"F":
+                content = hashlib.sha256()
+                with path.open("rb") as stream:
+                    for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                        content.update(chunk)
+                snapshot.update(content.digest())
+            elif kind == b"L":
+                snapshot.update(hashlib.sha256(os.fsencode(os.readlink(path))).digest())
+        return snapshot.hexdigest()
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise WorkspaceError("The package changed while it was being checked.") from exc
+
+
 def _is_link_or_junction(path: Path) -> bool:
     try:
-        return path.is_symlink() or bool(
-            getattr(os.path, "isjunction", lambda _path: False)(path)
-        )
+        return path.is_symlink() or bool(getattr(os.path, "isjunction", lambda _path: False)(path))
     except OSError:
         return True
 

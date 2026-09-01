@@ -901,6 +901,140 @@ def test_valid_preview_regeneration_rejects_an_identical_candidate(
     assert unchanged.value.code == "preview_unchanged"
 
 
+def _mixed_directory_repair_service(tmp_path, preview_repair, repair):
+    library = tmp_path / "library"
+    package = library / "Artist" / "Mixed.feedpak"
+    (package / "arrangements").mkdir(parents=True)
+    (package / "stems").mkdir()
+    source = b"OggS" + b"full-song-audio" * 500
+    candidate = b"OggS" + b"replacement-preview" * 200
+    arrangement = (
+        '{"notes":[],"chords":[],"anchors":['
+        '{"time":0.0,"fret":1,"width":4},'
+        '{"time":0.0,"fret":1,"width":4}]}'
+    ).encode()
+    manifest = {
+        "feedpak_version": "1.19.0",
+        "title": "Mixed",
+        "artist": "Artist",
+        "duration": 180,
+        "preview": "preview.ogg",
+        "arrangements": [{"id": "lead", "file": "arrangements/lead.json"}],
+        "stems": [{"id": "full", "file": "stems/full.ogg"}],
+    }
+    (package / "manifest.yaml").write_bytes(
+        yaml.safe_dump(manifest, sort_keys=False).encode()
+    )
+    (package / "arrangements" / "lead.json").write_bytes(arrangement)
+    (package / "preview.ogg").write_bytes(source)
+    (package / "stems" / "full.ogg").write_bytes(source)
+    (package / "cover.bin").write_bytes(b"original cover")
+
+    def validate(path, package_name, *, deep_audio=False):
+        root = Path(path)
+        preview = (root / "preview.ogg").read_bytes()
+        chart = yaml.safe_load(
+            (root / "arrangements" / "lead.json").read_text(encoding="utf-8")
+        )
+        findings = []
+        if len(chart["anchors"]) > 1:
+            findings.append({"code": "chart.duplicate-anchor", "severity": "warning"})
+        if preview == source:
+            findings.append({"code": "media.preview-too-long", "severity": "warning"})
+        return {
+            "package": package_name,
+            "title": "Mixed",
+            "artist": "Artist",
+            "findings": findings,
+            "features": {
+                "deep_audio_checked": bool(deep_audio),
+                "preview_declared": True,
+                "preview_available": True,
+            },
+        }
+
+    engine = preview_repair.PreviewRepairEngine(
+        validate_feedpak=validate,
+        error_type=repair.RepairPlanningError,
+        log=logging.getLogger("mixed-directory-preview-test"),
+        probe_duration=lambda raw: 180.0 if raw == source else 30.0,
+        render_preview=lambda raw, _start, _duration: (
+            candidate if raw == source else b""
+        ),
+    )
+    service = repair.RepairService(
+        config_dir=tmp_path / "config",
+        get_dlc_dir=lambda: library,
+        validate_feedpak=validate,
+        validator_version="rules-test",
+        log=logging.getLogger("mixed-directory-preview-test"),
+        preview_repair=engine,
+    )
+    return service, package, source
+
+
+def test_preview_preparation_keeps_a_scan_guard_without_report_reuse(
+    tmp_path, preview_repair, repair
+):
+    service, package, source = _mixed_directory_repair_service(
+        tmp_path, preview_repair, repair
+    )
+    guard_calls = 0
+
+    def source_guard():
+        nonlocal guard_calls
+        guard_calls += 1
+        return guard_calls == 1
+
+    with pytest.raises(repair.RepairPlanningError) as raised:
+        service.prepare_automatic_preview(
+            "Artist/Mixed.feedpak",
+            "media.preview-too-long",
+            source_guard=source_guard,
+        )
+
+    assert raised.value.code == "source_changed"
+    assert guard_calls == 2
+    assert (package / "preview.ogg").read_bytes() == source
+    assert service.history()["items"] == []
+    assert not list(
+        (tmp_path / "config" / "library_doctor" / "repair_backups").glob("*.zip")
+    )
+
+
+def test_mixed_directory_preview_rechecks_unrelated_members_after_validation(
+    tmp_path, preview_repair, repair
+):
+    service, package, source = _mixed_directory_repair_service(
+        tmp_path, preview_repair, repair
+    )
+    prepared_safe = service.prepare_selected(
+        "Artist/Mixed.feedpak", ["chart.duplicate-anchor"]
+    )
+    service.commit_prepared(prepared_safe)
+    backups = tmp_path / "config" / "library_doctor" / "repair_backups"
+    backup_ids_before = sorted(path.name for path in backups.glob("*.zip"))
+
+    prepared_preview = service.prepare_automatic_preview(
+        "Artist/Mixed.feedpak", "media.preview-too-long"
+    )
+    external = b"external edit after preview validation"
+    (package / "cover.bin").write_bytes(external)
+
+    with pytest.raises(repair.RepairPlanningError) as raised:
+        service.commit_prepared(prepared_preview)
+
+    assert raised.value.code == "source_changed"
+    assert (package / "cover.bin").read_bytes() == external
+    assert (package / "preview.ogg").read_bytes() == source
+    chart = yaml.safe_load(
+        (package / "arrangements" / "lead.json").read_text(encoding="utf-8")
+    )
+    assert len(chart["anchors"]) == 1
+    assert sorted(path.name for path in backups.glob("*.zip")) == backup_ids_before
+    assert len(service.history()["items"]) == 1
+
+
 def test_repair_service_reports_cleanup_failure_without_hiding_success(
     tmp_path, monkeypatch, preview_repair, repair
 ):
@@ -1276,7 +1410,9 @@ def test_automatic_archive_preview_reuses_verified_before_report(
     )
 
     assert validated == [True]
-    assert len(guard_calls) == 3
+    # Preview selection, both candidate-validation boundaries, and both
+    # serialized commit boundaries remain bound to the completed scan.
+    assert len(guard_calls) == 5
     assert result["verified_scan_report_reused"] is True
     assert result["deep_audio_reused"] is False
     assert result["performance"]["deep_audio_requested"] is True

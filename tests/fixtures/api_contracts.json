@@ -17,6 +17,10 @@
     },
     "batch_preview": {
       "include_preview_repairs": false
+    },
+    "batch_apply": {
+      "batch_plan_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "max_workers": 4
     }
   },
   "responses": {

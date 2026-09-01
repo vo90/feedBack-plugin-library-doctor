@@ -1,3 +1,6 @@
-# FeedBack already provides FastAPI and PyYAML. JSON Schema validation is the
-# only runtime dependency beyond the documented host environment.
+# FeedBack already provides FastAPI and PyYAML. Keep plugin-owned runtime
+# dependencies bounded so Plugin Manager can install them reproducibly.
 jsonschema>=4.18,<5
+# Portable FFmpeg fallback for development runtimes and installations whose
+# FeedBack desktop bundle does not expose its audio tools to plugins.
+imageio-ffmpeg>=0.6,<0.7
