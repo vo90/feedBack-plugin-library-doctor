@@ -1036,11 +1036,11 @@ def assess_repeated_measure_markers(beats) -> dict:
     """Classify the strict repeated-measure signature without changing it.
 
     A safe candidate contains an optional leading run of ``-1`` markers,
-    followed only by positive measure runs whose values advance by exactly
-    one.  At least two positive runs must repeat their measure number.  That
-    threshold distinguishes the known converter-shaped defect from a chart
-    that may intentionally contain one multi-beat measure among one-beat
-    measures.
+    followed by measure 1 and only positive measure runs whose values advance
+    by exactly one. At least two positive runs must repeat their measure
+    number. That threshold distinguishes the known converter-shaped defect
+    from a chart that may intentionally contain one multi-beat measure among
+    one-beat measures.
 
     ``changes`` is an immutable, JSON-serializable tuple of
     ``(index, expected_measure, replacement_measure)`` triples.  It is empty
@@ -1056,19 +1056,33 @@ def assess_repeated_measure_markers(beats) -> dict:
         repeated_run_count: int = 0,
         changes: tuple[tuple[int, int, int], ...] = (),
         first_time: float | None = None,
+        issues: tuple[tuple[int, float, int | str, int], ...] = (),
     ) -> dict:
-        first_index = changes[0][0] if changes else None
-        return {
+        first_issue = issues[0] if issues else None
+        first_index = (
+            changes[0][0]
+            if changes
+            else first_issue[0] if first_issue is not None else None
+        )
+        result_data = {
             "status": status,
             "eligible": status == "eligible",
-            "affected_count": len(changes),
+            "affected_count": len(changes) if changes else len(issues),
             "repeated_run_count": repeated_run_count,
             "first_index": first_index,
-            "first_time": first_time if first_index is not None else None,
+            "first_time": (
+                first_time
+                if changes and first_index is not None
+                else first_issue[1] if first_issue is not None else None
+            ),
             "changes": changes,
             "blocker_code": blocker_code,
             "message": message,
         }
+        if first_issue is not None:
+            result_data["expected_measure"] = first_issue[2]
+            result_data["actual_measure"] = first_issue[3]
+        return result_data
 
     if not isinstance(beats, list):
         return result(
@@ -1082,10 +1096,15 @@ def assess_repeated_measure_markers(beats) -> dict:
     measures: list[int] = []
     times: list[float] = []
     previous_time: float | None = None
-    for beat in beats:
+    has_decreasing_time = False
+    has_equal_time = False
+    seen_identities: set[bytes] = set()
+    exact_duplicate_indices: set[int] = set()
+    for index, beat in enumerate(beats):
+        identity = complete_json_identity(beat)
         if (
             not isinstance(beat, dict)
-            or complete_json_identity(beat) is None
+            or identity is None
             or not _finite_number(beat.get("time"))
             or not _integer(beat.get("measure"))
         ):
@@ -1098,19 +1117,67 @@ def assess_repeated_measure_markers(beats) -> dict:
                 ),
             )
         event_time = float(beat["time"])
-        if previous_time is not None and event_time <= previous_time:
-            return result(
-                "malformed",
-                blocker_code="non_increasing_beat_times",
-                message=(
-                    "Beat marker times are not strictly increasing, so their "
-                    "measure progression cannot be normalized safely."
-                ),
-            )
+        if previous_time is not None and event_time < previous_time:
+            has_decreasing_time = True
+        if previous_time is not None and event_time == previous_time:
+            has_equal_time = True
+        if identity in seen_identities:
+            exact_duplicate_indices.add(index)
+        else:
+            seen_identities.add(identity)
         previous_time = event_time
         times.append(event_time)
         measures.append(beat["measure"])
 
+    progression_issues: list[tuple[int, float, int | str, int]] = []
+    previous_positive: int | None = None
+    for index, measure in enumerate(measures):
+        if index in exact_duplicate_indices:
+            continue
+        if measure == -1:
+            continue
+        if measure < 1:
+            progression_issues.append(
+                (
+                    index,
+                    times[index],
+                    "-1 or the next positive measure number",
+                    measure,
+                )
+            )
+            continue
+        expected_measure = (
+            1 if previous_positive is None else previous_positive + 1
+        )
+        if measure != expected_measure:
+            progression_issues.append(
+                (index, times[index], expected_measure, measure)
+            )
+        previous_positive = measure
+
+    issue_details = tuple(progression_issues)
+    filtered_previous_time: float | None = None
+    has_nonduplicate_decrease = False
+    for index, event_time in enumerate(times):
+        if index in exact_duplicate_indices:
+            continue
+        if (
+            filtered_previous_time is not None
+            and event_time < filtered_previous_time
+        ):
+            has_nonduplicate_decrease = True
+            break
+        filtered_previous_time = event_time
+    if has_decreasing_time or has_equal_time:
+        return result(
+            "malformed",
+            blocker_code="non_increasing_beat_times",
+            message=(
+                "Beat marker times are not strictly increasing, so their "
+                "measure progression cannot be normalized safely."
+            ),
+            issues=() if has_nonduplicate_decrease else issue_details,
+        )
     if any(measure == 0 or measure < -1 for measure in measures):
         return result(
             "ambiguous",
@@ -1119,6 +1186,7 @@ def assess_repeated_measure_markers(beats) -> dict:
                 "Measure markers contain zero or a value below -1. Library "
                 "Doctor will not infer measure boundaries from that pattern."
             ),
+            issues=issue_details,
         )
 
     first_positive = next(
@@ -1127,6 +1195,16 @@ def assess_repeated_measure_markers(beats) -> dict:
     )
     if first_positive is None:
         return result("no_defect")
+    if measures[first_positive] != 1:
+        return result(
+            "ambiguous",
+            blocker_code="first_measure_not_one",
+            message=(
+                "The first positive downbeat marker is not measure 1. Library "
+                "Doctor will not renumber an ambiguous measure grid."
+            ),
+            issues=issue_details,
+        )
 
     positive_markers = [
         (index, measure)
@@ -1154,6 +1232,7 @@ def assess_repeated_measure_markers(beats) -> dict:
                 "or non-consecutive pattern. Library Doctor will not guess "
                 "which markers are real measure boundaries."
             ),
+            issues=issue_details,
         )
 
     # At this point only an optional leading -1 run can precede an all-positive
@@ -1175,6 +1254,7 @@ def assess_repeated_measure_markers(beats) -> dict:
                     "to advance by exactly one. Library Doctor will not infer "
                     "the intended measure progression."
                 ),
+                issues=issue_details,
             )
         group_start = index
         group_measure = measure
@@ -1195,6 +1275,7 @@ def assess_repeated_measure_markers(beats) -> dict:
                 "runs before offering an automatic repair."
             ),
             repeated_run_count=len(repeated_groups),
+            issues=issue_details,
         )
 
     changes = tuple(

@@ -704,7 +704,7 @@ def test_link_next_continuation_does_not_create_same_fret_hopo_finding(
     )
 
     assert "review.same-fret-hopo" not in _codes(report)
-    assert report["validator_version"].startswith("rules-37:")
+    assert report["validator_version"].startswith("rules-38:")
 
 
 def test_targeted_reviewed_arrangement_validation_is_read_only(validator):
@@ -1497,7 +1497,7 @@ def test_negative_preroll_and_equal_timeline_times_are_allowed(tmp_path, validat
     timeline = {
         "version": 1,
         "beats": [
-            {"time": -2.0, "measure": 0},
+            {"time": -2.0, "measure": -1},
             {"time": 0.0, "measure": 1},
             {"time": 0.0, "measure": -1},
         ],
@@ -1550,6 +1550,7 @@ def test_repeated_measure_markers_are_a_safe_timeline_finding(
     assert finding["time"] == 0.5
     assert finding["rule"]["repairability"] == "safe_candidate"
     assert "change only" in finding["rule"]["guidance"]
+    assert "timeline.invalid-measure-progression" not in _codes(report)
     assert report["features"]["repair_eligibility"][
         "timeline.repeated-measure-markers"
     ] == {
@@ -1585,9 +1586,292 @@ def test_correct_subbeat_measure_markers_do_not_produce_a_finding(
     ))
 
     assert "timeline.repeated-measure-markers" not in _codes(report)
+    assert "timeline.invalid-measure-progression" not in _codes(report)
     assert "timeline.repeated-measure-markers" not in report[
         "features"
     ]["repair_eligibility"]
+
+
+@pytest.mark.parametrize(
+    ("measures", "first_index", "expected", "actual", "affected_count"),
+    [
+        ([2, -1, 3], 0, 1, 2, 1),
+        ([1, -1, 3], 2, 2, 3, 1),
+        ([1, -1, 2, -1, 1], 4, 3, 1, 1),
+        ([1, 1, 2, 3], 1, 2, 1, 1),
+        ([1, -1, 1, 2], 2, 2, 1, 1),
+        ([1, 0, 2], 1, "-1 or the next positive measure number", 0, 1),
+        ([1, -2, 2], 1, "-1 or the next positive measure number", -2, 1),
+        ([1, 1, 3, 3], 1, 2, 1, 3),
+    ],
+)
+def test_invalid_measure_progression_is_precise_and_report_only(
+    tmp_path,
+    validator,
+    measures,
+    first_index,
+    expected,
+    actual,
+    affected_count,
+):
+    timeline = {
+        "version": 1,
+        "beats": [
+            {"time": index * 0.5, "measure": measure}
+            for index, measure in enumerate(measures)
+        ],
+        "sections": [],
+    }
+
+    report = validator.validate_feedpak(_package(
+        tmp_path,
+        manifest=_manifest(song_timeline="song_timeline.json"),
+        files={"song_timeline.json": json.dumps(timeline)},
+    ))
+    finding = next(
+        item for item in report["findings"]
+        if item["code"] == "timeline.invalid-measure-progression"
+    )
+
+    assert finding["severity"] == "warning"
+    assert finding["affected_count"] == affected_count
+    assert finding["location"] == (
+        f"song_timeline.json:beats[{first_index}].measure"
+    )
+    assert finding["time"] == first_index * 0.5
+    assert f"expected {expected}" in finding["message"]
+    assert f"found {actual}" in finding["message"]
+    assert finding["rule"]["repairability"] == "manual"
+    assert "will not renumber" in finding["rule"]["guidance"]
+    assert "still load and play" in finding["rule"]["player_impact"]
+    assert "timeline.repeated-measure-markers" not in _codes(report)
+    assert "timeline.invalid-measure-progression" not in report[
+        "features"
+    ]["repair_eligibility"]
+
+
+def test_invalid_measure_progression_is_reported_from_jsonc(
+    tmp_path, validator,
+):
+    timeline = {
+        "version": 1,
+        "beats": [
+            {"time": 0.0, "measure": 1},
+            {"time": 0.5, "measure": -1},
+            {"time": 1.0, "measure": 3},
+        ],
+        "sections": [],
+    }
+
+    report = validator.validate_feedpak(_package(
+        tmp_path,
+        manifest=_manifest(song_timeline="song_timeline.jsonc"),
+        files={"song_timeline.jsonc": json.dumps(timeline)},
+    ))
+    finding = next(
+        item for item in report["findings"]
+        if item["code"] == "timeline.invalid-measure-progression"
+    )
+
+    assert finding["location"] == "song_timeline.jsonc:beats[2].measure"
+    assert finding["rule"]["repairability"] == "manual"
+    assert "timeline.invalid-measure-progression" not in report[
+        "features"
+    ]["repair_eligibility"]
+
+
+def test_invalid_measure_progression_uses_legacy_active_timeline(
+    tmp_path, validator,
+):
+    arrangement = {
+        "notes": [],
+        "chords": [],
+        "beats": [
+            {"time": 0.0, "measure": 1},
+            {"time": 0.5, "measure": -1},
+            {"time": 1.0, "measure": 3},
+        ],
+        "sections": [],
+    }
+
+    report = validator.validate_feedpak(_package(
+        tmp_path, arrangement=arrangement,
+    ))
+    finding = next(
+        item for item in report["findings"]
+        if item["code"] == "timeline.invalid-measure-progression"
+    )
+
+    assert finding["location"] == "arrangements/lead.json:beats[2].measure"
+    assert finding["arrangement_id"] == "lead"
+
+
+def test_incomplete_sidecar_keeps_embedded_measure_progression_active(
+    tmp_path, validator,
+):
+    arrangement = {
+        "notes": [],
+        "chords": [],
+        "beats": [
+            {"time": 0.0, "measure": 1},
+            {"time": 0.5, "measure": 1},
+            {"time": 1.0, "measure": 2},
+        ],
+        "sections": [],
+    }
+    incomplete_timeline = {
+        "version": 1,
+        "tempos": [{"time": 0.0, "bpm": 120.0}],
+    }
+
+    report = validator.validate_feedpak(_package(
+        tmp_path,
+        manifest=_manifest(song_timeline="song_timeline.json"),
+        arrangement=arrangement,
+        files={"song_timeline.json": json.dumps(incomplete_timeline)},
+    ))
+    finding = next(
+        item for item in report["findings"]
+        if item["code"] == "timeline.invalid-measure-progression"
+    )
+
+    assert finding["location"] == "arrangements/lead.json:beats[1].measure"
+    assert finding["arrangement_id"] == "lead"
+
+
+def test_complete_sidecar_suppresses_inactive_embedded_measure_progression(
+    tmp_path, validator,
+):
+    arrangement = {
+        "notes": [],
+        "chords": [],
+        "beats": [
+            {"time": 0.0, "measure": 1},
+            {"time": 0.5, "measure": 1},
+            {"time": 1.0, "measure": 2},
+        ],
+        "sections": [],
+    }
+    active_timeline = {
+        "version": 1,
+        "beats": [
+            {"time": 0.0, "measure": 1},
+            {"time": 0.5, "measure": -1},
+            {"time": 1.0, "measure": 2},
+        ],
+        "sections": [],
+    }
+
+    report = validator.validate_feedpak(_package(
+        tmp_path,
+        manifest=_manifest(song_timeline="song_timeline.json"),
+        arrangement=arrangement,
+        files={"song_timeline.json": json.dumps(active_timeline)},
+    ))
+
+    assert "timeline.invalid-measure-progression" not in _codes(report)
+    assert "timeline.repeated-measure-markers" not in _codes(report)
+
+
+def test_malformed_beat_order_does_not_add_speculative_progression_finding(
+    tmp_path, validator,
+):
+    timeline = {
+        "version": 1,
+        "beats": [
+            {"time": 1.0, "measure": 1},
+            {"time": 0.0, "measure": 3},
+        ],
+        "sections": [],
+    }
+
+    report = validator.validate_feedpak(_package(
+        tmp_path,
+        manifest=_manifest(song_timeline="song_timeline.json"),
+        files={"song_timeline.json": json.dumps(timeline)},
+    ))
+
+    assert "timeline.beats-out-of-order" in _codes(report)
+    assert "timeline.invalid-measure-progression" not in _codes(report)
+
+
+def test_equal_beat_times_still_report_invalid_measure_progression(
+    tmp_path, validator,
+):
+    timeline = {
+        "version": 1,
+        "beats": [
+            {"time": 0.0, "measure": 1},
+            {"time": 0.0, "measure": 3},
+        ],
+        "sections": [],
+    }
+
+    report = validator.validate_feedpak(_package(
+        tmp_path,
+        manifest=_manifest(song_timeline="song_timeline.json"),
+        files={"song_timeline.json": json.dumps(timeline)},
+    ))
+    finding = next(
+        item for item in report["findings"]
+        if item["code"] == "timeline.invalid-measure-progression"
+    )
+
+    assert finding["location"] == "song_timeline.json:beats[1].measure"
+    assert finding["time"] == 0.0
+    assert "expected 2 but found 3" in finding["message"]
+    assert finding["rule"]["repairability"] == "manual"
+
+
+def test_exact_duplicate_beat_does_not_create_a_progression_warning(
+    tmp_path, validator,
+):
+    timeline = {
+        "version": 1,
+        "beats": [
+            {"time": 0.0, "measure": 1},
+            {"time": 0.0, "measure": 1},
+            {"time": 1.0, "measure": 2},
+        ],
+        "sections": [],
+    }
+
+    report = validator.validate_feedpak(_package(
+        tmp_path,
+        manifest=_manifest(song_timeline="song_timeline.json"),
+        files={"song_timeline.json": json.dumps(timeline)},
+    ))
+
+    assert "timeline.duplicate-beat" in _codes(report)
+    assert "timeline.invalid-measure-progression" not in _codes(report)
+
+
+def test_progression_warning_survives_an_unrelated_exact_duplicate(
+    tmp_path, validator,
+):
+    timeline = {
+        "version": 1,
+        "beats": [
+            {"time": 0.0, "measure": 1},
+            {"time": 0.0, "measure": 1},
+            {"time": 1.0, "measure": 3},
+        ],
+        "sections": [],
+    }
+
+    report = validator.validate_feedpak(_package(
+        tmp_path,
+        manifest=_manifest(song_timeline="song_timeline.json"),
+        files={"song_timeline.json": json.dumps(timeline)},
+    ))
+    finding = next(
+        item for item in report["findings"]
+        if item["code"] == "timeline.invalid-measure-progression"
+    )
+
+    assert "timeline.duplicate-beat" in _codes(report)
+    assert finding["location"] == "song_timeline.json:beats[2].measure"
+    assert "expected 2 but found 3" in finding["message"]
 
 
 def test_repeated_measure_marker_finding_uses_legacy_active_timeline(
@@ -1597,10 +1881,10 @@ def test_repeated_measure_marker_finding_uses_legacy_active_timeline(
         "notes": [],
         "chords": [],
         "beats": [
-            {"time": 0.0, "measure": 8},
-            {"time": 0.5, "measure": 8},
-            {"time": 1.0, "measure": 9},
-            {"time": 1.5, "measure": 9},
+            {"time": 0.0, "measure": 1},
+            {"time": 0.5, "measure": 1},
+            {"time": 1.0, "measure": 2},
+            {"time": 1.5, "measure": 2},
         ],
         "sections": [],
     }
@@ -1615,6 +1899,7 @@ def test_repeated_measure_marker_finding_uses_legacy_active_timeline(
 
     assert finding["location"] == "arrangements/lead.json:beats[1]"
     assert finding["arrangement_id"] == "lead"
+    assert "timeline.invalid-measure-progression" not in _codes(report)
     assert report["features"]["repair_eligibility"][
         "timeline.repeated-measure-markers"
     ]["status"] == "automatic"
@@ -3246,7 +3531,7 @@ def test_mixed_inline_and_manifest_tone_issues_block_the_package_rule(
 
 
 def test_validator_rule_version_is_bumped_for_structural_findings(validator):
-    assert validator.VALIDATOR_VERSION.startswith("rules-37:")
+    assert validator.VALIDATOR_VERSION.startswith("rules-38:")
 
 
 def test_ambiguous_bend_advice_requires_reconversion_or_original_chart_review(validator, tmp_path):

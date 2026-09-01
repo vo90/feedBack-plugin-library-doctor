@@ -22,6 +22,10 @@
   package contents and event ends pass conservative checks. Preserve every
   retained beat and musical event; keep verified recovery and Undo.
 
+- Report invalid or ambiguous measure-number progression without changing the
+  chart, including non-1 starts, skips, regressions, unsupported markers, and
+  repeated downbeats that do not meet the existing Safe Fix requirements.
+
 - Add the origin-agnostic `timeline.repeated-measure-markers` Safe Fix for the
   strict repeated-positive-marker pattern produced by older FeedForge versions
   and equivalent sources. It repairs all declared beat copies atomically while

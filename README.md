@@ -317,15 +317,22 @@ chosen between or deleted by the ordering repair.
 
 The `timeline.repeated-measure-markers` repair instead covers every declared
 beat-bearing copy in one atomic package change. It recognizes only the strict,
-high-confidence signature in which consecutive positive measure runs advance
-normally and at least two measure numbers repeat across later beats. The first
-positive marker is retained and each later repeat in that run becomes `-1`.
+high-confidence signature that begins at measure 1, in which consecutive
+positive measure runs advance normally and at least two measure numbers repeat
+across later beats. The first positive marker is retained and each later repeat
+in that run becomes `-1`.
 Beat times, array lengths, ordering, unknown properties, and every other stored
 value remain unchanged. Every relevant copy must independently be eligible or
 already correct; malformed, contradictory, or ambiguous data blocks the
 complete repair rather than producing a partial result. Older FeedForge
 conversions are the primary known source of this defect, but the rule is
 provenance-independent and can repair the same proven pattern from any producer.
+
+Other invalid measure progressions are report-only. Library Doctor identifies
+the first unexpected downbeat and how many markers are affected, including
+non-1 starts, skipped or regressing numbers, zero or values below `-1`, and
+ambiguous repeats. These charts can still load and play, but Library Doctor does
+not renumber them because the intended musical boundaries cannot be proved.
 
 An empty root arrangement `phrases: []` property is omitted because absence is
 the format's representation for no phrase ladder. An empty root arrangement

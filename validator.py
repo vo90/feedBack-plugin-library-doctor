@@ -85,7 +85,7 @@ if _terminal is None:
     _terminal_spec.loader.exec_module(_terminal)
 
 SPEC_REVISION = "52548b742f64c2a35052a141976ea1b7889f4b1a"
-VALIDATOR_VERSION = f"rules-37:feedpak-{SPEC_REVISION}"
+VALIDATOR_VERSION = f"rules-38:feedpak-{SPEC_REVISION}"
 SUPPORTED_MAJOR = 1
 SCHEMA_DIR = Path(__file__).resolve().parent / "schemas"
 MAX_TEXT_BYTES = 64 * 1024 * 1024
@@ -168,6 +168,7 @@ _RULE_TITLES = {
     "timeline.repeated-measure-markers": "Measure number repeated across beats",
     "timeline.terminal-duplicate-beats": "Repeated terminal beat tail",
     "timeline.stored-beats-invalid": "Stored beat grid is not strictly increasing",
+    "timeline.invalid-measure-progression": "Measure numbers do not progress correctly",
     "timeline.repeated-beat-time": "Repeated beat time has conflicting data",
     "timeline.duplicate-section": "Identical duplicate section marker",
     "timeline.repeated-section-time": "Repeated section time has conflicting data",
@@ -332,6 +333,10 @@ _RULE_EXPERIENCE = {
     "timeline.repeated-measure-markers": (
         "FeedBack can draw a numbered fret row at every beat instead of only at real measure boundaries, crowding an otherwise empty highway with fret numbers.",
         "Keeping each real measure number once and marking only its repeated interior beats as sub-beats restores normal highway spacing without changing the beat times.",
+    ),
+    "timeline.invalid-measure-progression": (
+        "The song can still load and play, but its rhythm grid can show incorrect measure numbers or jump backward or forward during playback.",
+        "Reviewing the intended downbeats restores predictable measure rows and navigation without Library Doctor guessing at the musical structure.",
     ),
     "timeline.repeated-beat-time": (
         "A beat time reappears after the grid has already advanced, but its stored measure data disagrees with the earlier marker.",
@@ -607,6 +612,13 @@ def rule_metadata(code: str, severity: str = "warning", category: str = "validat
             "Keep the first marker in each proven consecutive measure run and "
             "change only its later repeated positive measure numbers to -1. "
             "Preserve every beat time, marker, order, and unrelated property."
+        )
+    elif code == "timeline.invalid-measure-progression":
+        repairability = "manual"
+        guidance = (
+            "Review the intended measure boundaries in an authoring tool. Use -1 "
+            "for interior beats and consecutive positive numbers beginning at 1 "
+            "for downbeats; Library Doctor will not renumber an ambiguous grid."
         )
     elif code == "timeline.duplicate-section":
         repairability = "safe_candidate"
@@ -4387,6 +4399,41 @@ def _validate_song_timeline_semantics(
                 affected_count=len(repeated_time_conflicts),
             )
         if (
+            measure_assessment is not None
+            and (
+                measure_assessment.get("status") == "ambiguous"
+                or (
+                    measure_assessment.get("status") == "malformed"
+                    and measure_assessment.get("blocker_code")
+                    == "non_increasing_beat_times"
+                )
+            )
+            and measure_assessment.get("first_index") is not None
+        ):
+            first_index = int(measure_assessment["first_index"])
+            first_time = float(measure_assessment["first_time"])
+            affected_count = int(measure_assessment["affected_count"])
+            expected_measure = measure_assessment.get("expected_measure")
+            actual_measure = measure_assessment.get("actual_measure")
+            marker_label = "marker" if affected_count == 1 else "markers"
+            progression_verb = "does" if affected_count == 1 else "do"
+            findings.add(
+                "warning",
+                "timeline.invalid-measure-progression",
+                (
+                    f"{affected_count} beat {marker_label} {progression_verb} not "
+                    "form a valid measure "
+                    f"progression; at the first affected beat, expected "
+                    f"{expected_measure} but found {actual_measure}. Interior "
+                    "beats use -1 and positive downbeats begin at 1 and advance "
+                    "by exactly one."
+                ),
+                location=f"{relpath}:beats[{first_index}].measure",
+                arrangement_id=arrangement_id,
+                time=first_time,
+                affected_count=affected_count,
+            )
+        elif (
             measure_assessment is not None
             and measure_assessment.get("status") == "eligible"
         ):

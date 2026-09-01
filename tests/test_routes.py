@@ -2991,6 +2991,7 @@ def test_undo_restores_exact_original_when_related_timeline_findings_return(
     assert {
         "timeline.duplicate-beat",
         "timeline.beats-out-of-order",
+        "timeline.invalid-measure-progression",
     } <= original_codes
 
     plan = client.post(
@@ -3009,7 +3010,10 @@ def test_undo_restores_exact_original_when_related_timeline_findings_return(
         },
     )
     assert applied.status_code == 200
-    assert applied.json()["report"]["findings"] == []
+    assert {
+        finding["code"]
+        for finding in applied.json()["report"]["findings"]
+    } == {"timeline.invalid-measure-progression"}
 
     restored = client.post(
         "/api/plugins/library_doctor/repair/restore",

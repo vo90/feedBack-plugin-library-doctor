@@ -204,6 +204,7 @@ def test_measure_marker_plan_is_a_no_op_for_correct_or_unaffected_grids(
     (
         ({"beats": _beats([1, 1, 2, 3])}, "insufficient_repeated_measure_runs"),
         ({"beats": _beats([1, 1, 3, 3])}, "non_consecutive_measure_runs"),
+        ({"beats": _beats([2, 2, 3, 3])}, "first_measure_not_one"),
         ({"beats": _beats([1, 1, -1, 2, 2])}, "mixed_measure_marker_pattern"),
         ({"beats": _beats([0, 0, 1, 1])}, "unsupported_measure_marker"),
         ({"beats": [{"time": 0.0, "measure": "1"}]}, "malformed_beat_marker"),
