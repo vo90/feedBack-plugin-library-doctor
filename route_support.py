@@ -170,6 +170,25 @@ class RouteErrors:
         return 409
 
 
+def repair_backend_gate(errors, batch_manager, batch_error_type, abandon):
+    """Build the shared fail-closed gate for direct mutation routes."""
+    def require(ticket) -> None:
+        try:
+            batch_manager.raise_if_repair_backend_faulted()
+        except batch_error_type as exc:
+            abandon(ticket)
+            raise errors.http_error(
+                409,
+                exc.code,
+                str(exc),
+                file_state="unchanged",
+                retryable=False,
+                next_action="restart_library_doctor",
+            ) from exc
+
+    return require
+
+
 def audio_response(content: bytes, range_header: str | None = None) -> Response:
     """Return in-memory Ogg audio with the single byte ranges browsers require."""
     total = len(content)

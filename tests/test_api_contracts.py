@@ -5,6 +5,7 @@ import pytest
 from pydantic import ValidationError
 
 from api_contracts import (
+    BatchApplyRequestContract,
     BatchPreviewRequestContract,
     ErrorEnvelopeContract,
     RepairApplyRequestContract,
@@ -56,6 +57,9 @@ def test_canonical_mutation_requests_match_strict_contracts(contracts):
     assert BatchPreviewRequestContract.model_validate(
         requests["batch_preview"]
     ).include_preview_repairs is False
+    assert BatchApplyRequestContract.model_validate(
+        requests["batch_apply"]
+    ).max_workers == 4
 
 
 def test_mutation_contracts_reject_unknown_or_unsafe_shapes(contracts):
@@ -64,3 +68,13 @@ def test_mutation_contracts_reject_unknown_or_unsafe_shapes(contracts):
         ScanRequestContract.model_validate(invalid)
     with pytest.raises(ValidationError):
         ScanRequestContract.model_validate({"scope": "file", "max_workers": 0})
+    with pytest.raises(ValidationError):
+        BatchApplyRequestContract.model_validate({
+            "batch_plan_id": "a" * 64,
+            "max_workers": 0,
+        })
+    with pytest.raises(ValidationError):
+        BatchApplyRequestContract.model_validate({
+            "batch_plan_id": "a" * 64,
+            "max_workers": True,
+        })

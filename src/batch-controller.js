@@ -12,6 +12,7 @@ export function createBatchController({
   number,
   pluralSongs,
   repairChangeCount,
+  repairWorkerSettings,
   request,
   setHidden,
   state,
@@ -61,6 +62,7 @@ export function createBatchController({
       + Number(recoveryResult?.preview_cleanup_required_count || 0);
     const hasPendingRecovery = pendingRecoveryCount > 0;
     state.batch = batch || null;
+    repairWorkerSettings.render(batch);
     setHidden(el.batchSection, !hasReports);
     if (!hasReports) {
       state.batchAttentionKey = '';
@@ -141,7 +143,7 @@ export function createBatchController({
       const eta = batch.eta_seconds == null || phase === 'paused'
         ? ''
         : ` | about ${duration(batch.eta_seconds)} left`;
-      text(el.batchCount, `${number(done)} of ${number(total)}${eta}`);
+      text(el.batchCount, `${number(done)} of ${number(total)}${eta}${repairWorkerSettings.progressCopy(batch)}`);
       el.batchProgressBar.max = Math.max(1, total);
       el.batchProgressBar.value = Math.min(done, Math.max(1, total));
       el.batchProgressBar.setAttribute(
@@ -372,7 +374,7 @@ export function createBatchController({
       const batch = await request('/repair/batch/apply', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ batch_plan_id: preview.batch_plan_id }),
+        body: JSON.stringify(repairWorkerSettings.applyRequest(preview.batch_plan_id)),
       });
       actions.renderStatus({ ...(state.status || {}), repairing: true, batch });
       actions.schedulePoll(200);

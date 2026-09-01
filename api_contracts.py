@@ -268,6 +268,7 @@ class BatchPreviewRequestContract(_RequestContract):
 
 class BatchApplyRequestContract(_RequestContract):
     batch_plan_id: str
+    max_workers: int | None = Field(default=None, ge=1)
 
 
 class BatchUndoApplyRequestContract(_RequestContract):

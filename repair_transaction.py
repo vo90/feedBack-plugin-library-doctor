@@ -225,7 +225,7 @@ class TransactionJournal:
         candidate, cleanup = self._candidate(package_path, originals)
         try:
             self._validate_feedpak(candidate, package_name, deep_audio=False)
-            source_token = self._capture_package_token(package_path)
+            source_token = self._capture_package_token(package_path, originals)
             self._commit(
                 package_name,
                 package_path,

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import array
 import hashlib
+import importlib
 import importlib.util
 import json
 import math
@@ -68,6 +69,17 @@ _DURATION_RE = re.compile(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)")
 _BORING_SECTION_NAMES = frozenset({
     "intro", "outro", "silence", "count", "countin", "noguitar",
 })
+_FFMPEG_ENV = "FEEDBACK_FFMPEG"
+_IMAGEIO_FFMPEG_ENV = "IMAGEIO_FFMPEG_EXE"
+_VALIDATED_FFMPEG = set()
+_FFMPEG_VALIDATION_LOCK = threading.Lock()
+_FFMPEG_SOURCE_LABELS = {
+    "feedback_override": f"the {_FFMPEG_ENV} override",
+    "feedback_bundle": "FeedBack's bundled converter",
+    "portable_dependency": "Library Doctor's portable converter",
+    "system_path": "the system FFmpeg command",
+    "selected": "the selected converter",
+}
 
 
 class _UniqueSafeLoader(yaml.SafeLoader):
@@ -153,27 +165,197 @@ def _format_bytes(size: int) -> str:
     return f"{value:.0f} {unit}" if unit in {"bytes", "KB"} else f"{value:.1f} {unit}"
 
 
-def _resolve_ffmpeg() -> str | None:
-    explicit = os.environ.get("FEEDBACK_FFMPEG")
-    if explicit:
-        candidate = Path(explicit).expanduser()
+def _executable_candidate(value: object) -> str | None:
+    """Normalize an explicit executable path or command name.
+
+    ``imageio-ffmpeg`` also honors an environment override and may return a
+    command name rather than an absolute path. Resolve both forms here so a
+    stale override never shadows a later, working fallback.
+    """
+    if not isinstance(value, (str, os.PathLike)):
+        return None
+    raw = os.fspath(value).strip()
+    if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in {'"', "'"}:
+        raw = raw[1:-1].strip()
+    if not raw or "\0" in raw:
+        return None
+    candidate = Path(raw).expanduser()
+    try:
         if candidate.is_file():
             return str(candidate.resolve())
+    except OSError:
+        return None
+    # Only bare command names may use PATH. An invalid explicit path must not
+    # accidentally resolve a different executable with the same basename.
+    if candidate.name != raw:
+        return None
+    located = shutil.which(raw)
+    if not located:
+        return None
+    try:
+        located_path = Path(located)
+        return str(located_path.resolve()) if located_path.is_file() else None
+    except OSError:
+        return None
 
-    roots = [Path(sys.executable).resolve().parent.parent]
-    roots.extend(Path(__file__).resolve().parents[:6])
+
+def _resolve_bundled_ffmpeg() -> str | None:
+    """Find FFmpeg in a packaged FeedBack ``resources/bin`` directory."""
+    roots = []
+    try:
+        roots.append(Path(sys.executable).resolve().parent.parent)
+    except OSError:
+        pass
+    try:
+        roots.extend(Path(__file__).resolve().parents[:6])
+    except OSError:
+        pass
+    seen = set()
     for root in roots:
         bundled = root / "bin"
-        if not any(
-            (bundled / name).is_file()
-            for name in ("vgmstream-cli", "vgmstream-cli.exe")
-        ):
+        key = os.path.normcase(str(bundled))
+        if key in seen:
+            continue
+        seen.add(key)
+        try:
+            is_feedback_bundle = any(
+                (bundled / name).is_file()
+                for name in ("vgmstream-cli", "vgmstream-cli.exe")
+            )
+        except OSError:
+            continue
+        if not is_feedback_bundle:
             continue
         for name in ("ffmpeg", "ffmpeg.exe"):
-            candidate = bundled / name
-            if candidate.is_file():
-                return str(candidate)
-    return shutil.which("ffmpeg")
+            candidate = _executable_candidate(bundled / name)
+            if candidate:
+                return candidate
+    return None
+
+
+def _resolve_imageio_ffmpeg() -> str | None:
+    """Resolve the plugin-owned portable FFmpeg dependency when installed.
+
+    Import lazily so a failed optional-dependency installation does not stop
+    Library Doctor itself from loading. ``get_ffmpeg_exe`` validates the
+    wheel's bundled executable with ``ffmpeg -version`` before returning it.
+    We additionally normalize its result because an explicit
+    ``IMAGEIO_FFMPEG_EXE`` override is intentionally not validated upstream.
+    """
+    try:
+        imageio_ffmpeg = importlib.import_module("imageio_ffmpeg")
+        getter = getattr(imageio_ffmpeg, "get_ffmpeg_exe")
+        return _executable_candidate(getter())
+    except Exception:
+        # A partially installed or platform-incompatible wheel may fail while
+        # identifying its bundled binary. Treat it like any other unavailable
+        # candidate so a working system FFmpeg can still be used.
+        return None
+
+
+def _ffmpeg_candidate_key(value: str) -> str:
+    try:
+        return os.path.normcase(str(Path(value).resolve(strict=False)))
+    except (OSError, RuntimeError, ValueError):
+        return os.path.normcase(value)
+
+
+def _iter_ffmpeg_candidates():
+    """Yield existing converter candidates lazily in stable priority order."""
+    suppliers = (
+        ("feedback_override", lambda: _executable_candidate(os.environ.get(_FFMPEG_ENV))),
+        ("feedback_bundle", _resolve_bundled_ffmpeg),
+        ("portable_dependency", _resolve_imageio_ffmpeg),
+        ("system_path", lambda: _executable_candidate("ffmpeg")),
+    )
+    seen = set()
+    for source, supplier in suppliers:
+        candidate = supplier()
+        if not candidate:
+            continue
+        key = _ffmpeg_candidate_key(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+        yield source, candidate
+
+
+def _ffmpeg_candidates() -> tuple[tuple[str, str], ...]:
+    """Return every existing converter candidate in stable priority order."""
+    return tuple(_iter_ffmpeg_candidates())
+
+
+def _resolve_ffmpeg() -> str | None:
+    """Return the best available FFmpeg without depending on one PC layout.
+
+    A user override wins, followed by FeedBack's release bundle, Library
+    Doctor's platform-specific dependency, and finally a system installation.
+    Invalid overrides fall through instead of disabling a working converter.
+    """
+    first = next(_iter_ffmpeg_candidates(), None)
+    return first[1] if first else None
+
+
+def _missing_ffmpeg_message() -> str:
+    details = []
+    if os.environ.get(_FFMPEG_ENV):
+        details.append(
+            f"{_FFMPEG_ENV} is set but does not point to an existing FFmpeg "
+            "executable or command."
+        )
+    if os.environ.get(_IMAGEIO_FFMPEG_ENV):
+        details.append(
+            f"{_IMAGEIO_FFMPEG_ENV} is set but does not point to an existing "
+            "FFmpeg executable or command."
+        )
+    details.append(
+        "Update or reinstall Library Doctor and restart FeedBack so its portable "
+        "audio converter dependency can be installed. You can also set "
+        f"{_FFMPEG_ENV} to a working FFmpeg executable, then restart FeedBack."
+    )
+    return "Library Doctor could not find a working FFmpeg audio converter. " + " ".join(details)
+
+
+def _ffmpeg_launch_error(ffmpeg: str, action: str) -> str:
+    prefix = f"FFmpeg could not {action} because "
+    explicit = _executable_candidate(os.environ.get(_FFMPEG_ENV))
+    if explicit and os.path.normcase(explicit) == os.path.normcase(ffmpeg):
+        return (
+            f"{prefix}{_FFMPEG_ENV} points to an executable that could not start. "
+            "Check that it matches this computer and is allowed to run, then restart FeedBack."
+        )
+    return (
+        f"{prefix}the selected executable could not start. Update or "
+        "reinstall Library Doctor (or repair FeedBack if using its bundled converter), "
+        "then restart FeedBack."
+    )
+
+
+def _ffmpeg_candidates_failed_message(
+    action: str,
+    failures: list[tuple[str, str]],
+) -> str:
+    labels = []
+    for source, _message in failures:
+        label = _FFMPEG_SOURCE_LABELS.get(source, _FFMPEG_SOURCE_LABELS["selected"])
+        if label not in labels:
+            labels.append(label)
+    attempted = ", ".join(labels)
+    checked = (
+        f" Library Doctor checked {attempted}; the available candidates did not pass "
+        "FFmpeg's startup check."
+        if attempted else ""
+    )
+    override = (
+        f" Check or clear {_FFMPEG_ENV}, then restart FeedBack."
+        if any(source == "feedback_override" for source, _message in failures)
+        else ""
+    )
+    return (
+        f"Library Doctor could not find a working FFmpeg audio converter to {action}."
+        f"{checked}{override} Update or reinstall Library Doctor while connected to "
+        "the internet, then restart FeedBack so its portable converter can be installed."
+    )
 
 
 def _hidden_subprocess_kwargs() -> dict:
@@ -182,13 +364,72 @@ def _hidden_subprocess_kwargs() -> dict:
     return {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)}
 
 
+def _verify_ffmpeg_candidate(ffmpeg: str, action: str) -> str:
+    """Verify one FFmpeg candidate once per executable file revision."""
+    path = Path(ffmpeg)
+    # Production resolution normalizes paths. Keeping command names usable is
+    # helpful for injected/test hosts that provide their own validated runner.
+    if not path.is_absolute():
+        return ffmpeg
+    try:
+        stat = path.stat()
+    except OSError as exc:
+        raise RuntimeError(_ffmpeg_launch_error(ffmpeg, action)) from exc
+    token = (
+        os.path.normcase(str(path)),
+        getattr(stat, "st_dev", 0),
+        getattr(stat, "st_ino", 0),
+        stat.st_size,
+        stat.st_mtime_ns,
+    )
+    with _FFMPEG_VALIDATION_LOCK:
+        if token in _VALIDATED_FFMPEG:
+            return ffmpeg
+        try:
+            result = subprocess.run(
+                [ffmpeg, "-hide_banner", "-version"],
+                capture_output=True,
+                timeout=10,
+                **_hidden_subprocess_kwargs(),
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise RuntimeError(_ffmpeg_launch_error(ffmpeg, action)) from exc
+        identity = (result.stdout or b"") + (result.stderr or b"")
+        if result.returncode != 0 or b"ffmpeg version" not in identity.lower():
+            raise RuntimeError(
+                "Library Doctor found an audio converter file, but it did not pass "
+                "FFmpeg's startup check. Update or reinstall Library Doctor (or repair "
+                "FeedBack if using its bundled converter), then restart FeedBack."
+            )
+        _VALIDATED_FFMPEG.add(token)
+    return ffmpeg
+
+
+def _require_ffmpeg(action: str) -> str:
+    """Resolve and verify the first working FFmpeg in priority order."""
+    preferred = _resolve_ffmpeg()
+    if not preferred:
+        raise RuntimeError(_missing_ffmpeg_message())
+
+    preferred_key = _ffmpeg_candidate_key(preferred)
+    try:
+        return _verify_ffmpeg_candidate(preferred, action)
+    except RuntimeError as exc:
+        failures = [("selected", str(exc))]
+
+    for source, candidate in _iter_ffmpeg_candidates():
+        if _ffmpeg_candidate_key(candidate) == preferred_key:
+            failures[0] = (source, failures[0][1])
+            continue
+        try:
+            return _verify_ffmpeg_candidate(candidate, action)
+        except RuntimeError as exc:
+            failures.append((source, str(exc)))
+    raise RuntimeError(_ffmpeg_candidates_failed_message(action, failures))
+
+
 def _probe_with_ffmpeg(source: bytes) -> float:
-    ffmpeg = _resolve_ffmpeg()
-    if not ffmpeg:
-        raise RuntimeError(
-            "Library Doctor could not find FeedBack's audio converter. Repair or reinstall "
-            "FeedBack, or configure FEEDBACK_FFMPEG, then restart the game."
-        )
+    ffmpeg = _require_ffmpeg("inspect the song audio")
     with tempfile.TemporaryDirectory(prefix="library-doctor-preview-") as raw_dir:
         source_path = Path(raw_dir) / "source.ogg"
         source_path.write_bytes(source)
@@ -199,7 +440,11 @@ def _probe_with_ffmpeg(source: bytes) -> float:
                 timeout=30,
                 **_hidden_subprocess_kwargs(),
             )
-        except (OSError, subprocess.TimeoutExpired) as exc:
+        except OSError as exc:
+            raise RuntimeError(
+                _ffmpeg_launch_error(ffmpeg, "inspect the song audio")
+            ) from exc
+        except subprocess.TimeoutExpired as exc:
             raise RuntimeError("FFmpeg could not inspect the song audio.") from exc
     match = _DURATION_RE.search(result.stderr.decode(errors="replace"))
     if not match:
@@ -213,12 +458,7 @@ def _render_with_ffmpeg(
     start: float,
     target_duration: float,
 ) -> bytes:
-    ffmpeg = _resolve_ffmpeg()
-    if not ffmpeg:
-        raise RuntimeError(
-            "Library Doctor could not find FeedBack's audio converter. Repair or reinstall "
-            "FeedBack, or configure FEEDBACK_FFMPEG, then restart the game."
-        )
+    ffmpeg = _require_ffmpeg("generate the proposed preview")
     with tempfile.TemporaryDirectory(prefix="library-doctor-preview-") as raw_dir:
         root = Path(raw_dir)
         source_path = root / "source.ogg"
@@ -250,7 +490,11 @@ def _render_with_ffmpeg(
                     timeout=180,
                     **_hidden_subprocess_kwargs(),
                 )
-            except (OSError, subprocess.TimeoutExpired) as exc:
+            except OSError as exc:
+                raise RuntimeError(
+                    _ffmpeg_launch_error(ffmpeg, "generate the proposed preview")
+                ) from exc
+            except subprocess.TimeoutExpired as exc:
                 raise RuntimeError("FFmpeg could not generate the proposed preview.") from exc
             if result.returncode == 0 and output_path.is_file():
                 candidate = output_path.read_bytes()
@@ -268,11 +512,14 @@ def _loudest_start_with_ffmpeg(
     target_duration: float,
 ) -> float | None:
     """Choose the loudest contiguous target-duration window from bounded PCM."""
-    ffmpeg = _resolve_ffmpeg()
-    if not ffmpeg or duration <= target_duration:
+    if duration <= target_duration:
         return 0.0
     if duration > MAX_LOUDNESS_ANALYSIS_SECONDS:
         return None
+    try:
+        ffmpeg = _require_ffmpeg("analyze the song audio")
+    except RuntimeError:
+        return 0.0
     with tempfile.TemporaryDirectory(prefix="library-doctor-preview-analysis-") as raw_dir:
         source_path = Path(raw_dir) / "source.ogg"
         pcm_path = Path(raw_dir) / "analysis.pcm"
@@ -487,6 +734,11 @@ class PreviewRepairEngine:
             )
         with self._lock:
             self._prune()
+
+        # Candidate construction performs complete validation plus several
+        # FFmpeg calls. It is package-local work, so keeping it under the plan
+        # cache lock needlessly serialized repairs for unrelated Feedpaks.
+        def build_plan() -> dict:
             before = (
                 verified_before_report
                 if isinstance(verified_before_report, dict)
@@ -724,10 +976,20 @@ class PreviewRepairEngine:
                 "_created_at": time.monotonic(),
                 "_candidate": candidate,
             }
+            return plan
+
+        plan = build_plan()
+        plan_id = plan["plan_id"]
+        with self._lock:
+            self._prune()
+            existing = self._plans.get(plan_id)
+            if isinstance(existing, dict):
+                self._plans.move_to_end(plan_id)
+                return existing
             self._plans[plan_id] = plan
             self._plans.move_to_end(plan_id)
             self._prune()
-            return plan
+        return plan
 
     def _load_manifest(self, read_member) -> tuple[bytes, dict]:
         manifest_raw = read_member("manifest.yaml", MAX_METADATA_MEMBER_BYTES)
