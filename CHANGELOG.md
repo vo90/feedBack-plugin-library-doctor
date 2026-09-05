@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Detect redundant terminal beat tails in every declared arrangement and song
+  timeline, including copies not selected for normal playback. Offer a separate
+  suffix-only repair when a clean stored grid corroborates it and references,
+  package contents and event ends pass conservative checks. Preserve every
+  retained beat and musical event; keep verified recovery and Undo.
+
 - Add the origin-agnostic `timeline.repeated-measure-markers` Safe Fix for the
   strict repeated-positive-marker pattern produced by older FeedForge versions
   and equivalent sources. It repairs all declared beat copies atomically while

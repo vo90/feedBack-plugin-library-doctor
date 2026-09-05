@@ -422,6 +422,17 @@ SAFE_REPAIR_DEFINITIONS = (
         change_kind="reorder",
     ),
     RepairDefinition(
+        rule_code="timeline.terminal-duplicate-beats",
+        action_kind="remove_terminal_duplicate_beats",
+        source_kind="timeline",
+        item_name="terminal beat copy",
+        safety="safe_automatic",
+        title="Remove a verified duplicate beat tail",
+        description="Remove only a short exact terminal repetition, corroborated by an existing clean grid, across every affected stored copy.",
+        player_result="Stored grids become strictly increasing without retiming any beat or musical event.",
+        user_value="Arrangement-based tools can use the same verified grid; ambiguous cases remain for manual review.",
+    ),
+    RepairDefinition(
         rule_code="timeline.repeated-measure-markers",
         action_kind="normalize_repeated_measure_markers",
         source_kind="timeline",

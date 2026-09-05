@@ -115,7 +115,7 @@ def test_measure_marker_plan_applies_only_exact_repetitions_and_preserves_data(
     action = plan["actions"][0]
     operation = action["operations"][0]
 
-    assert plan["catalog_version"] == "repairs-21"
+    assert plan["catalog_version"] == "repairs-22"
     assert action["rule_code"] == RULE_CODE
     assert action["action_kind"] == "normalize_repeated_measure_markers"
     assert action["change_kind"] == "normalize_measure_markers"

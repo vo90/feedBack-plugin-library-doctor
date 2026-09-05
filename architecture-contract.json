@@ -27,7 +27,7 @@
       "forbiddenImports": ["scanner", "validator", "fastapi"]
     },
     "repair.py": {
-      "maxLines": 7400,
+      "maxLines": 7550,
       "responsibility": "Plan, validate, commit, recover, and audit package mutations.",
       "forbiddenImports": ["fastapi", "scanner"]
     },
@@ -39,6 +39,11 @@
     "repair_actions.py": {
       "maxLines": 350,
       "responsibility": "Define immutable repair action and catalog value objects.",
+      "forbiddenImports": ["repair", "scanner", "fastapi"]
+    },
+    "terminal_beat_repair.py": {
+      "maxLines": 400,
+      "responsibility": "Assess terminal beat tails, references, event coverage and package corroboration.",
       "forbiddenImports": ["repair", "scanner", "fastapi"]
     },
     "measure_marker_repair.py": {

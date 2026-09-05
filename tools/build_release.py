@@ -26,6 +26,7 @@ ROOT_FILES = (
     "library_doctor_scan_worker.py",
     "migration.py",
     "measure_marker_repair.py",
+    "terminal_beat_repair.py",
     "mutation_receipts.py",
     "plugin.json",
     "preview_repair.py",

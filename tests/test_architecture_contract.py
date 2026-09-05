@@ -32,6 +32,7 @@ def test_backend_module_ownership_and_size_boundaries_are_explicit():
         "repair_catalog.py",
         "repair_actions.py",
         "measure_marker_repair.py",
+        "terminal_beat_repair.py",
         "repair_workspace.py",
         "repair_recovery.py",
         "repair_transaction.py",

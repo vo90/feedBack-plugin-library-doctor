@@ -36,6 +36,13 @@ It can:
 - repair several eligible songs through one reviewed batch; and
 - keep repair history, recovery information, and available Undo actions visible.
 
+A repeated terminal beat tail can be reported even when another stored grid
+allows normal playback. Its optional repair removes only one to three exact
+trailing copies, requires an existing matching clean grid, and checks event
+ends and supported package data first. Unknown references, extra files, and
+other timing defects require manual review. It does not infer the meaning of
+flags in the original conversion source.
+
 It deliberately does not:
 
 - guess how a chart was supposed to be authored;

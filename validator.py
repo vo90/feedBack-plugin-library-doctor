@@ -69,8 +69,19 @@ except ModuleNotFoundError:  # Tests and some plugin hosts load files by path.
     )
 
 
+
+_terminal_name = "_library_doctor_terminal_beat_repair"
+_terminal = sys.modules.get(_terminal_name)
+if _terminal is None:
+    _terminal_spec = importlib.util.spec_from_file_location(
+        _terminal_name, Path(__file__).resolve().with_name("terminal_beat_repair.py")
+    )
+    _terminal = importlib.util.module_from_spec(_terminal_spec)
+    sys.modules[_terminal_name] = _terminal
+    _terminal_spec.loader.exec_module(_terminal)
+
 SPEC_REVISION = "52548b742f64c2a35052a141976ea1b7889f4b1a"
-VALIDATOR_VERSION = f"rules-33:feedpak-{SPEC_REVISION}"
+VALIDATOR_VERSION = f"rules-34:feedpak-{SPEC_REVISION}"
 SUPPORTED_MAJOR = 1
 SCHEMA_DIR = Path(__file__).resolve().parent / "schemas"
 MAX_TEXT_BYTES = 64 * 1024 * 1024
@@ -149,6 +160,8 @@ _RULE_TITLES = {
     "lyrics.out-of-order": "Lyric cues out of order",
     "timeline.duplicate-beat": "Identical duplicate beat marker",
     "timeline.repeated-measure-markers": "Measure number repeated across beats",
+    "timeline.terminal-duplicate-beats": "Repeated terminal beat tail",
+    "timeline.stored-beats-invalid": "Stored beat grid is not strictly increasing",
     "timeline.repeated-beat-time": "Repeated beat time has conflicting data",
     "timeline.duplicate-section": "Identical duplicate section marker",
     "timeline.repeated-section-time": "Repeated section time has conflicting data",
@@ -299,6 +312,14 @@ _RULE_EXPERIENCE = {
     "timeline.duplicate-beat": (
         "FeedBack can receive the same rhythm-grid instruction more than once, creating a repeated or zero-length beat interval.",
         "Keeping one identical beat marker produces a clean timing grid without changing its intended position or measure.",
+    ),
+    "timeline.terminal-duplicate-beats": (
+        "Tools that select this stored arrangement grid may reject its backward terminal jump even if normal playback uses another grid.",
+        "A verified suffix-only repair preserves distinct beats and musical events while making the stored grid strictly increasing.",
+    ),
+    "timeline.stored-beats-invalid": (
+        "Tools that select this stored grid may reject it or interpret its timing inconsistently.",
+        "Manual review can determine the intended timing without guessing from the stored order.",
     ),
     "timeline.repeated-measure-markers": (
         "FeedBack can draw a numbered fret row at every beat instead of only at real measure boundaries, crowding an otherwise empty highway with fret numbers.",
@@ -566,6 +587,12 @@ def rule_metadata(code: str, severity: str = "warning", category: str = "validat
             "The stored beat markers are identical. Keep the first marker and "
             "remove only later exact copies; leave conflicting beat data for review."
         )
+    elif code == _terminal.RULE_CODE:
+        repairability = "safe_candidate"
+        guidance = "Review a suffix-only repair after all stored grids, references and event ends have been checked."
+    elif code == "timeline.stored-beats-invalid":
+        repairability = "manual"
+        guidance = "Review this stored arrangement grid; do not sort or remove arbitrary beats."
     elif code == "timeline.repeated-measure-markers":
         repairability = "safe_candidate"
         guidance = (
@@ -4178,6 +4205,8 @@ def _validate_song_timeline_semantics(
         items = data.get(field)
         if not isinstance(items, list):
             continue
+        if field == "beats" and _terminal.tail_start(items) is not None:
+            continue  # Reported once by the all-stored-grid pass below.
 
         measure_assessment = (
             assess_repeated_measure_markers(items)
@@ -5525,6 +5554,30 @@ def validate_feedpak(
                         arrangement_id=arrangement_id,
                         fields=(field,),
                         repair_eligibility=features["repair_eligibility"],
+                    )
+
+            # Inspect stored copies as well as the host's effective timeline.
+            seen_grids = set()
+            active_beat_path = manifest.get("song_timeline") if song_timeline_overrides_legacy else legacy_timeline_sources.get("beats", (None,))[0]
+            for (grid_path, schema_name), document in loaded_json.items():
+                if schema_name not in {"arrangement.schema.json", "song-timeline.schema.json"} or grid_path in seen_grids:
+                    continue
+                seen_grids.add(grid_path)
+                beats = document.get("beats") if isinstance(document, dict) else None
+                cut = _terminal.tail_start(beats)
+                if cut is not None:
+                    findings.add(
+                        "warning", _terminal.RULE_CODE,
+                        "A stored beat grid repeats its last two beats in a short terminal tail. A package-wide safety review is required before removing it.",
+                        location=f"{grid_path}:beats[{cut}]",
+                        arrangement_id=next((e.get("id") for e in manifest.get("arrangements", []) if isinstance(e, dict) and e.get("file") == grid_path), None),
+                        time=beats[cut]["time"], affected_count=len(beats) - cut,
+                    )
+                elif grid_path != active_beat_path and _terminal.non_strict(beats):
+                    findings.add(
+                        "warning", "timeline.stored-beats-invalid",
+                        "A stored beat grid is not strictly increasing. This may affect tools that use this arrangement even when the active song grid is valid.",
+                        location=f"{grid_path}:beats",
                     )
 
             cover = manifest.get("cover")
