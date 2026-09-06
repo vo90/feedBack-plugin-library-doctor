@@ -1287,6 +1287,7 @@ class RepairService:
         retain_recovery: bool = True,
         verified_before_report: dict | None = None,
         source_guard=None,
+        additional_source_guard=None,
         transaction_started: float | None = None,
         request_id: str | None = None,
         request_operation: str | None = None,
@@ -1378,6 +1379,8 @@ class RepairService:
             self._emit_transaction_barrier(
                 "candidate_validated", package=package_name, operation="repair"
             )
+            if additional_source_guard is not None and not additional_source_guard():
+                raise RepairPlanningError("source_changed", "An original-source recovery input changed during validation.")
             if reuse_verified_before and not source_guard():
                 raise RepairPlanningError(
                     "source_changed",
@@ -1430,6 +1433,8 @@ class RepairService:
                     operation="repair",
                     backup_id=backup_id,
                 )
+                if additional_source_guard is not None and not additional_source_guard():
+                    raise RepairPlanningError("source_changed", "An original-source recovery input changed before commit.")
                 self._commit(
                     package_name,
                     package_path,

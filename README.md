@@ -102,7 +102,7 @@ If Git is already installed on your computer:
 3. Select **Install**, then restart FeedBack when prompted.
 
 If FeedBack says Git is missing, use the release ZIP instructions above.
-FeedBack installs Library Doctor's small Python dependency automatically when
+FeedBack installs Library Doctor's Python dependencies automatically when
 the plugin starts.
 
 ## Your first scan
@@ -181,6 +181,19 @@ yourself. Library Doctor does not decide the musical answer for you. More
 review-assisted repair types may be added in future versions.
 
 ### Song Tools and previews
+
+**Recover source bends** compares a selected original PSARC with all playable
+arrangements and stored difficulties. Choose the original file, inspect the
+exact proposed bend fields, then use **Apply reviewed source recovery**. A
+missing curve is recovered only from matching authored source points; a scalar
+bend alone is insufficient. Existing or ambiguous curves and related copies are
+excluded. Unmatched arrangements or malformed declarations block the package.
+The complete candidate is validated before the change, audio is preserved, and
+the original chart bytes remain available through **Undo**.
+
+Imported fret-127 pitchless mutes and unambiguous absolute bend times also have
+separate safe repairs in scan results. Source exceptions such as pre-onset bend
+points require source recovery, whose preview identifies boundary adjustments.
 
 Open **Song tools** to search FeedBack's indexed library and select a song
 directly. **Preview Creator** can add a missing preview or replace an existing

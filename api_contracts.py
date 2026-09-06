@@ -154,6 +154,16 @@ class RepairPreviewRequestContract(_RequestContract):
     start_seconds: float | None = Field(default=None, ge=0)
 
 
+class SourceRecoveryPreviewRequestContract(_RequestContract):
+    package: str
+    source_path: str = Field(min_length=1, max_length=4096)
+
+
+class SourceRecoveryApplyRequestContract(SourceRecoveryPreviewRequestContract):
+    plan_id: str = Field(min_length=64, max_length=64)
+    request_id: RequestId | None = None
+
+
 class RepairApplyRequestContract(_RequestContract):
     package: str
     rule_code: str

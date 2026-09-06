@@ -1,6 +1,21 @@
 {
   "schema": "library_doctor.architecture_contract.v1",
   "modules": {
+    "source_archive.py": {
+      "maxLines": 150,
+      "responsibility": "Read bounded original PSARC chart members with explicit dependency diagnostics.",
+      "forbiddenImports": ["repair", "scanner", "fastapi"]
+    },
+    "source_chart.py": {
+      "maxLines": 275,
+      "responsibility": "Match full source event topology and construct field-limited bend recovery patches.",
+      "forbiddenImports": ["repair", "scanner", "fastapi"]
+    },
+    "source_recovery.py": {
+      "maxLines": 175,
+      "responsibility": "Compose selected-source evidence with existing preview, transaction and Undo services.",
+      "forbiddenImports": ["scanner", "fastapi"]
+    },
     "bend_time_repair.py": {
       "maxLines": 100,
       "responsibility": "Plan and verify retained bend-time coordinate normalization.",
@@ -12,7 +27,7 @@
       "forbiddenImports": ["repair", "scanner", "fastapi"]
     },
     "routes.py": {
-      "maxLines": 1050,
+      "maxLines": 1100,
       "responsibility": "Compose plugin services and map HTTP endpoints to domain operations.",
       "forbiddenImports": ["sqlite3", "zipfile"]
     },

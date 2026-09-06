@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Add Recover source bends in Song Tools. Match an explicitly selected original
+  PSARC against complete arrangement/difficulty topology, preview exact source
+  recovery, preserve excluded existing curves, and reuse complete-candidate
+  validation, source hashes, durable backups, transaction recovery and Undo.
+  Source readers are standalone and bounded; declared dependencies use the
+  host's existing profile-local plugin dependency mechanism.
+
 - Normalize retained bend timestamps only when absolute timing is unambiguous.
   Keep every point value and unknown property; block pre-onset, mixed, unordered
   and exceptional curves for source-assisted review across all difficulties.
