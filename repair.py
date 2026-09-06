@@ -42,6 +42,7 @@ except ModuleNotFoundError:  # Tests and some plugin hosts load files by path.
         _eligibility_spec.loader.exec_module(_eligibility)
 assess_redundant_handshapes = _eligibility.assess_redundant_handshapes
 assess_repeated_measure_markers = _eligibility.assess_repeated_measure_markers
+assess_muted_fret_sentinels = _eligibility.assess_muted_fret_sentinels
 complete_json_identity = _eligibility.complete_json_identity
 effective_tones_source = _eligibility.effective_tones_source
 repairable_tempo_event = _eligibility.repairable_tempo_event
@@ -179,7 +180,17 @@ if _transaction is None:
     _transaction_spec.loader.exec_module(_transaction)
 
 
-REPAIR_CATALOG_VERSION = "repairs-22"
+_muted_name = "_library_doctor_muted_fret_repair"
+_muted = sys.modules.get(_muted_name)
+if _muted is None:
+    _muted_spec = importlib.util.spec_from_file_location(
+        _muted_name, Path(__file__).resolve().with_name("muted_fret_repair.py")
+    )
+    _muted = importlib.util.module_from_spec(_muted_spec)
+    sys.modules[_muted_name] = _muted
+    _muted_spec.loader.exec_module(_muted)
+
+REPAIR_CATALOG_VERSION = "repairs-23"
 REPAIR_PLAN_SCHEMA = "library_doctor.repair_plan.v1"
 REVIEWED_PACKAGE_PLAN_SCHEMA = "library_doctor.reviewed_repair_plan.v1"
 REVIEWED_INSPECTION_SCHEMA = "library_doctor.reviewed_repair_inspection.v1"
@@ -241,6 +252,7 @@ _ALL_SAFE_RULE_ORDER = (
     "tones.duplicate-change",
     "tones.changes-out-of-order",
     "chart.negative-muted-fret",
+    "chart.muted-fret-sentinel",
     "chart.bend-points-out-of-order",
     "chart.duplicate-chord-note",
     "chart.duplicate-chord",
@@ -261,6 +273,7 @@ _ALL_SAFE_RULE_ORDER = (
 )
 
 _CONDITIONAL_STRUCTURAL_RULES = frozenset({
+    "chart.muted-fret-sentinel",
     "chart.empty-phrases-key",
     "timeline.empty-arrangement-tempos-key",
     "timeline.duplicate-tempo",
@@ -5353,7 +5366,13 @@ def _plan_json_document(
 ) -> dict:
     """Plan one rule against an already parsed and structure-checked document."""
 
-    if definition.rule_code == "chart.negative-muted-fret":
+    if definition.rule_code == _muted.RULE_CODE:
+        operation = _muted.plan_operation(
+            document, assess=assess_muted_fret_sentinels,
+            error_type=RepairPlanningError,
+        )
+        operations = [operation] if operation else []
+    elif definition.rule_code == "chart.negative-muted-fret":
         operations = _plan_muted_negative_frets(document)
     elif definition.rule_code == "chart.empty-phrases-key":
         operations = _plan_empty_root_array(document, "phrases")
@@ -5492,7 +5511,7 @@ def _plan_json_document(
         removed_count = sum(len(operation.remove_indices) for operation in operations)
         if definition.change_kind in {"reorder", "omit_empty"}:
             change_count = len(operations)
-        elif definition.change_kind in {"normalize", "normalize_measure_markers"}:
+        elif definition.change_kind in {"normalize", "normalize_measure_markers", "normalize_values"}:
             change_count = sum(
                 operation.change_count for operation in operations
                 if hasattr(operation, "change_count")
@@ -6383,6 +6402,14 @@ def _apply_operation(
             allowed_fields=frozenset(reviewed_definition.mutable_fields),
         )
         return
+    if operation.get("operation") == _muted.OPERATION:
+        if rule_code != _muted.RULE_CODE:
+            raise RepairPlanningError("invalid_plan", "The repair operation does not match its rule.")
+        _muted.apply_operation(
+            document, operation, assess=assess_muted_fret_sentinels,
+            error_type=RepairPlanningError,
+        )
+        return
     if operation.get("operation") == _measure_marker.OPERATION:
         _measure_marker.apply_operation(
             document,
@@ -7220,7 +7247,10 @@ def _musical_position_count(
 ) -> int:
     positions: set[bytes] = set()
     for operation in operations:
-        if isinstance(operation, NormalizeMutedNegativeFrets):
+        if isinstance(operation, _muted.NormalizeMutedSentinels):
+            for path, _before, _after in operation.changes:
+                positions.add(_canonical_json({"path": path[:-1]}))
+        elif isinstance(operation, NormalizeMutedNegativeFrets):
             notes = _value_at_path(document, operation.note_array_path)
             chord_time = None
             if (
@@ -7447,6 +7477,8 @@ def _summary(
 ) -> str:
     item_label = noun if change_count == 1 else f"{noun}s"
     list_label = "list" if arrays_affected == 1 else "lists"
+    if change_kind == "normalize_values":
+        return f"Normalize {change_count} {item_label}; preserve every other stored property."
     if change_kind == "omit_empty":
         return (
             f"Omit {change_count} empty optional {item_label} across "

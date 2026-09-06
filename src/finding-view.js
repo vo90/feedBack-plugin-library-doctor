@@ -112,6 +112,8 @@ export function createFindingView({ actions, document, make, number, state }) {
     item.appendChild(make('strong', 'lh-finding-title', rule.title || definition.title || 'Safe repair available'));
     const technicalSummary = measureMarkerRepair
       ? `${number(affected)} repeated positive measure ${affected === 1 ? 'marker appears' : 'markers appear'} on later beats across ${scope}. Library Doctor can change only those repeated values to the sub-beat marker -1 while preserving the first measure marker, every beat timestamp, beat order, and all other stored properties.`
+      : definition.change_kind === 'normalize_values'
+      ? `${number(affected)} ${displayItem} across ${scope}. ${definition.description || ''}${blockerCopy ? ' Automatic repair is blocked for ambiguous data.' : ''}`
       : definition.change_kind === 'omit_empty'
       ? `${number(affected)} optional ${displayItem} ${affected === 1 ? 'stores' : 'store'} an explicit empty array across ${scope}. Omitting these empty root properties does not delete a musical event or position.`
       : definition.change_kind === 'normalize'

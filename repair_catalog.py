@@ -20,6 +20,22 @@ RepairDefinition = _actions.RepairDefinition
 
 SAFE_REPAIR_DEFINITIONS = (
     RepairDefinition(
+        rule_code="chart.muted-fret-sentinel",
+        action_kind="normalize_muted_fret_sentinels",
+        source_kind="arrangement",
+        item_name="muted fret sentinel",
+        safety="safe_automatic",
+        title="Normalize imported muted-fret sentinels",
+        description=(
+            "Replace fret 127 with 0 only on exact pitchless string mutes and "
+            "corroborated shared chord templates across every authored difficulty. "
+            "Ambiguous template uses block the entire arrangement repair."
+        ),
+        player_result="The same pitchless muted strikes remain; no physical fret is inferred.",
+        user_value="Chord guides stay within the instrument without changing timing or technique flags.",
+        change_kind="normalize_values",
+    ),
+    RepairDefinition(
         rule_code="chart.negative-muted-fret",
         action_kind="normalize_muted_negative_frets",
         source_kind="arrangement",

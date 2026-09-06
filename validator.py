@@ -29,6 +29,7 @@ from jsonschema import Draft202012Validator
 
 try:
     from repair_eligibility import (
+        assess_muted_fret_sentinels,
         assess_repeated_measure_markers,
         assess_redundant_handshapes,
         complete_json_identity,
@@ -51,6 +52,7 @@ except ModuleNotFoundError:  # Tests and some plugin hosts load files by path.
         _eligibility = importlib.util.module_from_spec(_eligibility_spec)
         sys.modules[_eligibility_name] = _eligibility
         _eligibility_spec.loader.exec_module(_eligibility)
+    assess_muted_fret_sentinels = _eligibility.assess_muted_fret_sentinels
     assess_repeated_measure_markers = (
         _eligibility.assess_repeated_measure_markers
     )
@@ -81,7 +83,7 @@ if _terminal is None:
     _terminal_spec.loader.exec_module(_terminal)
 
 SPEC_REVISION = "52548b742f64c2a35052a141976ea1b7889f4b1a"
-VALIDATOR_VERSION = f"rules-34:feedpak-{SPEC_REVISION}"
+VALIDATOR_VERSION = f"rules-35:feedpak-{SPEC_REVISION}"
 SUPPORTED_MAJOR = 1
 SCHEMA_DIR = Path(__file__).resolve().parent / "schemas"
 MAX_TEXT_BYTES = 64 * 1024 * 1024
@@ -144,6 +146,7 @@ _RULE_TITLES = {
     "chart.note-duplicates-chord": "Standalone note duplicates a chord",
     "chart.bend-points-out-of-order": "Bend points out of order",
     "chart.negative-muted-fret": "Negative fret on a string mute",
+    "chart.muted-fret-sentinel": "Imported muted-fret sentinel",
     "chart.phrases-out-of-order": "Phrase windows out of order",
     "chart.conflicting-duplicate-note": "Conflicting notes on one string",
     "chart.string-conflict": "Overlapping notes on one string",
@@ -210,6 +213,7 @@ _RULE_AREAS = {
 
 _SAFE_REPAIR_CANDIDATES = {
     "chart.negative-muted-fret",
+    "chart.muted-fret-sentinel",
     "chart.duplicate-note",
     "chart.duplicate-chord-note",
     "chart.duplicate-chord",
@@ -3313,6 +3317,24 @@ def _validate_arrangement_semantics(
         check_fretted=check_fretted,
     ).validate()
     if check_fretted:
+        assessment = assess_muted_fret_sentinels(data)
+        if assessment["status"] != "no_defect":
+            code = "chart.muted-fret-sentinel"
+            findings.add(
+                "warning", code,
+                "Fret 127 is an imported mute sentinel, not a playable fret; only exact pitchless mutes with corroborated template uses can be normalized.",
+                location=relpath, arrangement_id=arrangement_id,
+                affected_count=assessment["affected_count"],
+            )
+            automatic, reason_code, message = _ordinary_json_eligibility(relpath)
+            if assessment["status"] != "eligible":
+                automatic = False
+                reason_code = assessment["blocker_code"]
+                message = assessment["message"]
+            _merge_structural_repair_eligibility(
+                repair_eligibility, code, automatic=automatic,
+                reason_code=reason_code, message=message,
+            )
         hopo_candidates = find_hopo_review_candidates(data, member_path=relpath)
         if isinstance(review_difficulty_counts, dict):
             for code in (

@@ -1,6 +1,11 @@
 {
   "schema": "library_doctor.architecture_contract.v1",
   "modules": {
+    "muted_fret_repair.py": {
+      "maxLines": 120,
+      "responsibility": "Plan and verify exact pitchless muted-fret sentinel normalization.",
+      "forbiddenImports": ["repair", "scanner", "fastapi"]
+    },
     "routes.py": {
       "maxLines": 1050,
       "responsibility": "Compose plugin services and map HTTP endpoints to domain operations.",

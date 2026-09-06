@@ -110,7 +110,7 @@ export function createRepairController({
       }
       return `Replaced the ${duration(media.original_duration_seconds)} preview with a new ${duration(media.candidate_duration_seconds || 30)} excerpt selected from the full song mix. The full song mix and all other Feedpak files were preserved.`;
     }
-    if (receipt.change_kind === 'normalize') {
+    if (receipt.change_kind === 'normalize' || receipt.change_kind === 'normalize_values') {
       return `${completedRepairChange(receipt)}${positions ? ` at ${number(positions)} musical ${positions === 1 ? 'position' : 'positions'}` : ''}.`;
     }
     if (receipt.change_kind === 'normalize_measure_markers'

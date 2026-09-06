@@ -15,6 +15,112 @@ from pathlib import PurePosixPath
 from typing import Callable, Iterator
 
 
+def _fidelity_containers(document):
+    """All authored chart copies; malformed ladders are never skipped."""
+    if not isinstance(document, dict):
+        raise ValueError("The arrangement must be a JSON object.")
+    yield (), document
+    phrases = document.get("phrases", [])
+    if not isinstance(phrases, list):
+        raise ValueError("The difficulty ladder is malformed.")
+    for pi, phrase in enumerate(phrases):
+        if not isinstance(phrase, dict) or not isinstance(phrase.get("levels", []), list):
+            raise ValueError("A difficulty phrase is malformed.")
+        for li, level in enumerate(phrase.get("levels", [])):
+            if not isinstance(level, dict):
+                raise ValueError("A difficulty level is malformed.")
+            yield ("phrases", pi, "levels", li), level
+
+
+def assess_muted_fret_sentinels(document):
+    """Normalize only 127 plus exact pitchless mute evidence, including templates.
+
+    `fhm` or `pm` alone is insufficient: those flags can preserve a scored
+    physical fret. Every shared-template use must corroborate the same mute.
+    The assessment is whole-document so an ambiguous lower level cannot leave
+    the shared template or flattened chart partially repaired.
+    """
+    changes = []
+    affected = 0
+    problem = None
+    template_slots = {}
+    references = {}
+    handshapes = []
+    try:
+        containers = list(_fidelity_containers(document))
+        templates = document.get("templates", [])
+        if not isinstance(templates, list):
+            raise ValueError("The shared chord templates are malformed.")
+        for ti, template in enumerate(templates):
+            if not isinstance(template, dict) or not isinstance(template.get("frets", []), list):
+                raise ValueError("A shared chord template is malformed.")
+            slots = [si for si, fret in enumerate(template.get("frets", []))
+                     if type(fret) is int and fret == 127]
+            if slots:
+                template_slots[ti] = slots
+                affected += len(slots)
+                changes.extend({"path": ["templates", ti, "frets", si]} for si in slots)
+        for prefix, container in containers:
+            for field in ("notes", "chords", "handshapes"):
+                if not isinstance(container.get(field, []), list):
+                    raise ValueError("An authored note, chord or handshape list is malformed.")
+            events = [(prefix + ("notes", i), note) for i, note in enumerate(container.get("notes", []))]
+            for ci, chord in enumerate(container.get("chords", [])):
+                if not isinstance(chord, dict):
+                    raise ValueError("An authored chord is malformed.")
+                cid = chord.get("id")
+                if type(cid) is int:
+                    references.setdefault(cid, []).append(chord)
+                members = chord.get("notes", [])
+                if not isinstance(members, list):
+                    raise ValueError("A chord member list is malformed.")
+                events.extend((prefix + ("chords", ci, "notes", ni), note)
+                              for ni, note in enumerate(members))
+            handshapes.extend(container.get("handshapes", []))
+            for path, note in events:
+                if not isinstance(note, dict):
+                    raise ValueError("An authored note is malformed.")
+                if type(note.get("f")) is not int or note["f"] != 127:
+                    continue
+                affected += 1
+                if note.get("mt") is not True:
+                    problem = "A fret-127 note lacks the exact pitchless mute flag mt: true."
+                elif type(note.get("s")) is not int or not 0 <= note["s"] < 8:
+                    problem = "A fret-127 mute has an invalid string."
+                else:
+                    changes.append({"path": list(path + ("f",))})
+        for ti, slots in template_slots.items():
+            uses = references.get(ti, [])
+            if not uses:
+                problem = "A fret-127 template has no explicit chord-note mute evidence."
+            for chord in uses:
+                for si in slots:
+                    members = [n for n in chord.get("notes", []) if n.get("s") == si]
+                    if len(members) != 1 or members[0].get("mt") is not True or (
+                        type(members[0].get("f")) is not int or members[0]["f"] not in (0, 127)
+                    ):
+                        problem = "A shared fret-127 template has an ambiguous or unmuted chord use."
+            for shape in handshapes:
+                if not isinstance(shape, dict):
+                    raise ValueError("An authored handshape is malformed.")
+                if shape.get("chord_id") != ti:
+                    continue
+                start, end = shape.get("start_time"), shape.get("end_time")
+                if not (type(start) in (int, float) and type(end) in (int, float)
+                        and math.isfinite(start) and math.isfinite(end) and end >= start
+                        and any(type(ch.get("t")) in (int, float)
+                                and start - 0.0001 <= ch["t"] <= end + 0.0001 for ch in uses)):
+                    problem = "A fret-127 handshape has no matching explicit muted chord."
+    except (ValueError, TypeError, OverflowError) as exc:
+        problem = str(exc)
+    if not affected:
+        return {"status": "no_defect", "affected_count": 0, "changes": []}
+    if problem:
+        return {"status": "blocked", "affected_count": affected, "changes": [],
+                "blocker_code": "ambiguous_muted_fret_sentinel", "message": problem}
+    return {"status": "eligible", "affected_count": affected, "changes": changes}
+
+
 HANDSHAPE_REVIEW_MESSAGES = {
     "zero_length": (
         "zero_length_handshape_requires_review",

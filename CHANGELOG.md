@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Offer source-bound normalization of imported fret-127 string-mute sentinels,
+  including every difficulty copy and corroborated shared chord template. Mixed
+  or unpitched-flag ambiguity blocks the whole repair. Preserve timing and mute
+  flags, validate the complete candidate, and retain exact Undo.
+
 - Detect redundant terminal beat tails in every declared arrangement and song
   timeline, including copies not selected for normal playback. Offer a separate
   suffix-only repair when a clean stored grid corroborates it and references,

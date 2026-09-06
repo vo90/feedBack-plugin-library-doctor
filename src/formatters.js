@@ -38,6 +38,9 @@ export function createFormatters({ number }) {
   function plannedRepairChange(value) {
     const count = repairChangeCount(value);
     const itemName = value?.item_name || 'item';
+    if (value?.change_kind === 'normalize_values') {
+      return `normalize ${number(count)} ${itemName}${count === 1 ? '' : 's'}`;
+    }
     if (isMeasureMarkerNormalization(value)) {
       return `change ${number(count)} repeated positive measure marker${count === 1 ? '' : 's'} to the sub-beat marker -1`;
     }
@@ -62,6 +65,9 @@ export function createFormatters({ number }) {
   function completedRepairChange(value) {
     const count = repairChangeCount(value);
     const itemName = value?.item_name || 'item';
+    if (value?.change_kind === 'normalize_values') {
+      return `Normalized ${number(count)} ${itemName}${count === 1 ? '' : 's'}${memberScope(value)} while preserving every other stored property`;
+    }
     if (isMeasureMarkerNormalization(value)) {
       return `Changed ${number(count)} repeated positive measure marker${count === 1 ? '' : 's'} to the sub-beat marker -1${memberScope(value)} while preserving every beat timestamp, beat order, and other stored property`;
     }

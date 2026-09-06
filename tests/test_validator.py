@@ -704,7 +704,7 @@ def test_link_next_continuation_does_not_create_same_fret_hopo_finding(
     )
 
     assert "review.same-fret-hopo" not in _codes(report)
-    assert report["validator_version"].startswith("rules-34:")
+    assert report["validator_version"].startswith("rules-35:")
 
 
 def test_targeted_reviewed_arrangement_validation_is_read_only(validator):
@@ -3246,4 +3246,4 @@ def test_mixed_inline_and_manifest_tone_issues_block_the_package_rule(
 
 
 def test_validator_rule_version_is_bumped_for_structural_findings(validator):
-    assert validator.VALIDATOR_VERSION.startswith("rules-34:")
+    assert validator.VALIDATOR_VERSION.startswith("rules-35:")
