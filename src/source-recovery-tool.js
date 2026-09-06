@@ -3,7 +3,7 @@ export function createSourceRecoveryTool({ actions, document, make, request, isC
     region.replaceChildren();
     const title = make('h4', '', 'Recover source bends');
     const intro = make('p', '', 'Choose the original PSARC used to create this song. Library Doctor compares every arrangement and difficulty before showing any recoverable bend trajectories.');
-    const label = make('label', '', 'Original PSARC path');
+    const label = make('label', 'lh-song-tool-search', 'Original PSARC path');
     const input = document.createElement('input');
     input.type = 'text';
     input.autocomplete = 'off';
@@ -11,9 +11,11 @@ export function createSourceRecoveryTool({ actions, document, make, request, isC
     label.appendChild(input);
     const inspect = make('button', 'lh-button', 'Inspect original source');
     inspect.type = 'button';
+    const controls = make('div', 'lh-repair-buttons');
+    controls.appendChild(inspect);
     const result = make('div', 'lh-repair-preview');
     result.setAttribute('aria-live', 'polite');
-    region.append(title, intro, label, inspect, result);
+    region.append(title, intro, label, controls, result);
     let generation = 0;
     const alive = (token) => token === generation && isCurrent() && region.isConnected;
     input.addEventListener('input', () => { generation += 1; result.replaceChildren(); inspect.disabled = false; });
@@ -35,7 +37,7 @@ export function createSourceRecoveryTool({ actions, document, make, request, isC
           if (isCurrent()) result.replaceChildren(make('p', 'lh-inline-error', error.message));
         }
       });
-      region.insertBefore(choose, inspect);
+      controls.insertBefore(choose, inspect);
     }
     inspect.addEventListener('click', async () => {
       const token = ++generation;
