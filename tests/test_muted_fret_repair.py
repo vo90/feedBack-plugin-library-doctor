@@ -61,6 +61,7 @@ def test_repair_all_copies_and_shared_templates(repair):
     lambda d: d["phrases"][0]["levels"][0]["chords"][0]["notes"][0].update(mt=False),
     lambda d: d["phrases"][0]["levels"][0]["chords"][0].update(notes=[]),
     lambda d: d["handshapes"][0].update(start_time=20, end_time=21),
+    lambda d: d["phrases"][0]["levels"][0]["chords"][0]["notes"][0].update(s=3.0, f=0),
 ])
 def test_ambiguous_or_unmuted_use_blocks_whole_document(repair, mutation):
     doc = chart()

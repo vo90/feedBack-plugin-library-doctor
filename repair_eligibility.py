@@ -154,7 +154,8 @@ def assess_muted_fret_sentinels(document):
                 problem = "A fret-127 template has no explicit chord-note mute evidence."
             for chord in uses:
                 for si in slots:
-                    members = [n for n in chord.get("notes", []) if n.get("s") == si]
+                    members = [n for n in chord.get("notes", [])
+                               if type(n.get("s")) is int and n["s"] == si]
                     if len(members) != 1 or members[0].get("mt") is not True or (
                         type(members[0].get("f")) is not int or members[0]["f"] not in (0, 127)
                     ):
