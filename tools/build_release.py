@@ -27,6 +27,7 @@ ROOT_FILES = (
     "migration.py",
     "measure_marker_repair.py",
     "muted_fret_repair.py",
+    "bend_time_repair.py",
     "terminal_beat_repair.py",
     "mutation_receipts.py",
     "plugin.json",

@@ -43,6 +43,7 @@ except ModuleNotFoundError:  # Tests and some plugin hosts load files by path.
 assess_redundant_handshapes = _eligibility.assess_redundant_handshapes
 assess_repeated_measure_markers = _eligibility.assess_repeated_measure_markers
 assess_muted_fret_sentinels = _eligibility.assess_muted_fret_sentinels
+assess_bend_time_coordinates = _eligibility.assess_bend_time_coordinates
 complete_json_identity = _eligibility.complete_json_identity
 effective_tones_source = _eligibility.effective_tones_source
 repairable_tempo_event = _eligibility.repairable_tempo_event
@@ -190,7 +191,17 @@ if _muted is None:
     sys.modules[_muted_name] = _muted
     _muted_spec.loader.exec_module(_muted)
 
-REPAIR_CATALOG_VERSION = "repairs-23"
+_bend_name = "_library_doctor_bend_time_repair"
+_bend = sys.modules.get(_bend_name)
+if _bend is None:
+    _bend_spec = importlib.util.spec_from_file_location(
+        _bend_name, Path(__file__).resolve().with_name("bend_time_repair.py")
+    )
+    _bend = importlib.util.module_from_spec(_bend_spec)
+    sys.modules[_bend_name] = _bend
+    _bend_spec.loader.exec_module(_bend)
+
+REPAIR_CATALOG_VERSION = "repairs-24"
 REPAIR_PLAN_SCHEMA = "library_doctor.repair_plan.v1"
 REVIEWED_PACKAGE_PLAN_SCHEMA = "library_doctor.reviewed_repair_plan.v1"
 REVIEWED_INSPECTION_SCHEMA = "library_doctor.reviewed_repair_inspection.v1"
@@ -253,6 +264,7 @@ _ALL_SAFE_RULE_ORDER = (
     "tones.changes-out-of-order",
     "chart.negative-muted-fret",
     "chart.muted-fret-sentinel",
+    "chart.bend-time-coordinates",
     "chart.bend-points-out-of-order",
     "chart.duplicate-chord-note",
     "chart.duplicate-chord",
@@ -274,6 +286,7 @@ _ALL_SAFE_RULE_ORDER = (
 
 _CONDITIONAL_STRUCTURAL_RULES = frozenset({
     "chart.muted-fret-sentinel",
+    "chart.bend-time-coordinates",
     "chart.empty-phrases-key",
     "timeline.empty-arrangement-tempos-key",
     "timeline.duplicate-tempo",
@@ -5366,7 +5379,13 @@ def _plan_json_document(
 ) -> dict:
     """Plan one rule against an already parsed and structure-checked document."""
 
-    if definition.rule_code == _muted.RULE_CODE:
+    if definition.rule_code == _bend.RULE_CODE:
+        operation = _bend.plan_operation(
+            document, assess=assess_bend_time_coordinates,
+            error_type=RepairPlanningError,
+        )
+        operations = [operation] if operation else []
+    elif definition.rule_code == _muted.RULE_CODE:
         operation = _muted.plan_operation(
             document, assess=assess_muted_fret_sentinels,
             error_type=RepairPlanningError,
@@ -6402,6 +6421,14 @@ def _apply_operation(
             allowed_fields=frozenset(reviewed_definition.mutable_fields),
         )
         return
+    if operation.get("operation") == _bend.OPERATION:
+        if rule_code != _bend.RULE_CODE:
+            raise RepairPlanningError("invalid_plan", "The repair operation does not match its rule.")
+        _bend.apply_operation(
+            document, operation, assess=assess_bend_time_coordinates,
+            error_type=RepairPlanningError,
+        )
+        return
     if operation.get("operation") == _muted.OPERATION:
         if rule_code != _muted.RULE_CODE:
             raise RepairPlanningError("invalid_plan", "The repair operation does not match its rule.")
@@ -7247,7 +7274,10 @@ def _musical_position_count(
 ) -> int:
     positions: set[bytes] = set()
     for operation in operations:
-        if isinstance(operation, _muted.NormalizeMutedSentinels):
+        if isinstance(operation, _bend.NormalizeBendTimes):
+            for path, _before, _after in operation.changes:
+                positions.add(_canonical_json({"path": path[:-3]}))
+        elif isinstance(operation, _muted.NormalizeMutedSentinels):
             for path, _before, _after in operation.changes:
                 positions.add(_canonical_json({"path": path[:-1]}))
         elif isinstance(operation, NormalizeMutedNegativeFrets):

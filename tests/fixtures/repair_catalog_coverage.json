@@ -1,6 +1,7 @@
 {
   "schema": "library_doctor.repair_test_coverage.v1",
   "rules": {
+    "chart.bend-time-coordinates": ["tests/test_bend_time_repair.py::test_retained_curve_normalization_preserves_all_other_data"],
     "chart.muted-fret-sentinel": ["tests/test_muted_fret_repair.py::test_repair_all_copies_and_shared_templates"],
     "chart.negative-muted-fret": ["tests/test_repair.py::test_normalizes_all_negative_exact_string_mutes_and_nothing_else"],
     "chart.empty-phrases-key": ["tests/test_repair.py::test_omits_only_empty_optional_arrangement_keys"],

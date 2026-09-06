@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Normalize retained bend timestamps only when absolute timing is unambiguous.
+  Keep every point value and unknown property; block pre-onset, mixed, unordered
+  and exceptional curves for source-assisted review across all difficulties.
+
 - Offer source-bound normalization of imported fret-127 string-mute sentinels,
   including every difficulty copy and corroborated shared chord template. Mixed
   or unpitched-flag ambiguity blocks the whole repair. Preserve timing and mute
@@ -18,7 +22,7 @@
   and equivalent sources. It repairs all declared beat copies atomically while
   preserving beat timing, array shape, and all unrelated data.
 
-## 0.45.0 — Public beta
+## 0.45.0 â€” Public beta
 
 - Prevent temporary repair candidates from looking like discoverable song packages.
 - Lock further changes when a song has unresolved recovery state.

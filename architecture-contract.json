@@ -1,6 +1,11 @@
 {
   "schema": "library_doctor.architecture_contract.v1",
   "modules": {
+    "bend_time_repair.py": {
+      "maxLines": 100,
+      "responsibility": "Plan and verify retained bend-time coordinate normalization.",
+      "forbiddenImports": ["repair", "scanner", "fastapi"]
+    },
     "muted_fret_repair.py": {
       "maxLines": 120,
       "responsibility": "Plan and verify exact pitchless muted-fret sentinel normalization.",

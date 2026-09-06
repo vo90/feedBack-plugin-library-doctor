@@ -20,6 +20,18 @@ RepairDefinition = _actions.RepairDefinition
 
 SAFE_REPAIR_DEFINITIONS = (
     RepairDefinition(
+        rule_code="chart.bend-time-coordinates",
+        action_kind="normalize_bend_time_coordinates",
+        source_kind="arrangement", item_name="bend point time",
+        safety="safe_automatic", title="Normalize retained bend point times",
+        description=("Subtract the note onset only when every retained point is inside its "
+                     "absolute sounding window and the relative interpretation is impossible. "
+                     "Pre-onset, mixed and exceptional curves block the whole arrangement."),
+        player_result="The retained trajectory follows the existing note; no point or release is invented.",
+        user_value="Bend trajectories use the required note-relative times across every difficulty.",
+        change_kind="normalize_values",
+    ),
+    RepairDefinition(
         rule_code="chart.muted-fret-sentinel",
         action_kind="normalize_muted_fret_sentinels",
         source_kind="arrangement",

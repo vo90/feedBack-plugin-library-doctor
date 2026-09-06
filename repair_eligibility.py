@@ -32,6 +32,65 @@ def _fidelity_containers(document):
             yield ("phrases", pi, "levels", li), level
 
 
+def authored_note_paths(document):
+    """Yield each stored note and its authoritative onset, including chord members."""
+    for prefix, container in _fidelity_containers(document):
+        notes, chords = container.get("notes", []), container.get("chords", [])
+        if not isinstance(notes, list) or not isinstance(chords, list):
+            raise ValueError("An authored note or chord list is malformed.")
+        for ni, note in enumerate(notes):
+            if not isinstance(note, dict):
+                raise ValueError("An authored note is malformed.")
+            yield prefix + ("notes", ni), note, note.get("t")
+        for ci, chord in enumerate(chords):
+            if not isinstance(chord, dict) or not isinstance(chord.get("notes", []), list):
+                raise ValueError("An authored chord is malformed.")
+            for ni, note in enumerate(chord.get("notes", [])):
+                if not isinstance(note, dict):
+                    raise ValueError("An authored chord member is malformed.")
+                yield prefix + ("chords", ci, "notes", ni), note, chord.get("t")
+
+
+def assess_bend_time_coordinates(document):
+    """Shift only curves proven incompatible with relative time but inside onset/sustain.
+
+    A millisecond tolerates existing six-decimal point / three-decimal sustain
+    storage. It does not permit clipping or shifting a pre-onset point. Mixed,
+    unordered and exceptional curves need selected original source evidence.
+    """
+    changes, affected, problem = [], 0, None
+    def finite(value):
+        return type(value) in (int, float) and math.isfinite(value)
+    try:
+        for path, note, onset in authored_note_paths(document):
+            curve, sustain = note.get("bnv"), note.get("sus", 0)
+            if curve is None or curve == []:
+                continue
+            if not isinstance(curve, list) or not all(isinstance(p, dict) and finite(p.get("t")) and finite(p.get("v")) for p in curve):
+                affected += 1
+                problem = "A retained bend curve is malformed."
+                continue
+            times = [p["t"] for p in curve]
+            if finite(sustain) and sustain >= 0 and all(0 <= t <= sustain + 0.001 for t in times):
+                continue
+            affected += len(times)
+            if not (finite(onset) and onset > 0 and finite(sustain) and sustain > 0
+                    and all(onset <= t <= onset + sustain + 0.001 for t in times)
+                    and all(a <= b for a, b in zip(times, times[1:]))):
+                problem = "A retained bend has pre-onset, mixed, unordered or out-of-window times; select its original source for review."
+                continue
+            changes.extend({"path": list(path + ("bnv", i, "t")), "expected": t,
+                            "replacement": round(t - onset, 6)} for i, t in enumerate(times))
+    except (ValueError, TypeError, OverflowError) as exc:
+        problem = str(exc)
+    if not affected:
+        return {"status": "no_defect", "affected_count": 0, "changes": []}
+    if problem:
+        return {"status": "blocked", "affected_count": affected, "changes": [],
+                "blocker_code": "ambiguous_bend_time_coordinates", "message": problem}
+    return {"status": "eligible", "affected_count": affected, "changes": changes}
+
+
 def assess_muted_fret_sentinels(document):
     """Normalize only 127 plus exact pitchless mute evidence, including templates.
 
