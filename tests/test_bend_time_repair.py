@@ -62,6 +62,9 @@ def test_exceptional_or_mixed_lower_curve_blocks_entire_repair(repair, times):
     with pytest.raises(repair.RepairPlanningError) as error:
         plan(repair, doc)
     assert error.value.code == "ambiguous_bend_time_coordinates"
+    assert "Reconvert the original song with an updated converter" in str(error.value)
+    assert "review and correct the original chart" in str(error.value)
+    assert "select its original source" not in str(error.value)
 
 
 @pytest.mark.parametrize("onset,sustain,times", [(0, 2, [0, .5]), (.25, 2, [.5, 1]),

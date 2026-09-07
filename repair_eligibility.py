@@ -56,7 +56,7 @@ def assess_bend_time_coordinates(document):
 
     A millisecond tolerates existing six-decimal point / three-decimal sustain
     storage. It does not permit clipping or shifting a pre-onset point. Mixed,
-    unordered and exceptional curves need selected original source evidence.
+    unordered and exceptional curves need reconversion or original-chart review.
     """
     changes, affected, problem = [], 0, None
     def finite(value):
@@ -77,7 +77,11 @@ def assess_bend_time_coordinates(document):
             if not (finite(onset) and onset > 0 and finite(sustain) and sustain > 0
                     and all(onset <= t <= onset + sustain + 0.001 for t in times)
                     and all(a <= b for a, b in zip(times, times[1:]))):
-                problem = "A retained bend has pre-onset, mixed, unordered or out-of-window times; select its original source for review."
+                problem = (
+                    "A retained bend has pre-onset, mixed, unordered or out-of-window times. "
+                    "Reconvert the original song with an updated converter, or review and "
+                    "correct the original chart; Library Doctor cannot safely infer the trajectory."
+                )
                 continue
             changes.extend({"path": list(path + ("bnv", i, "t")), "expected": t,
                             "replacement": round(t - onset, 6)} for i, t in enumerate(times))

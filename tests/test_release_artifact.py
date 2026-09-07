@@ -23,6 +23,10 @@ def test_release_zip_is_deterministic_allowlisted_and_installable(tmp_path):
         assert f"{build_release.ARCHIVE_ROOT}/plugin.json" in names
         assert not any("tests/" in name or "node_modules/" in name or "__pycache__/" in name for name in names)
         assert not any(name.endswith("release-signoff.json") for name in names)
+        assert not any("/source_" in name or "/source-recovery-" in name for name in names)
+        requirements = archive.read(f"{build_release.ARCHIVE_ROOT}/requirements.txt").decode("utf-8")
+        assert "jsonschema" in requirements
+        assert "construct" not in requirements and "cryptography" not in requirements
 
         plugins_dir = tmp_path / "feedback-desktop" / "plugins"
         archive.extractall(plugins_dir)

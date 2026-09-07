@@ -28,15 +28,6 @@ ROOT_FILES = (
     "measure_marker_repair.py",
     "muted_fret_repair.py",
     "bend_time_repair.py",
-    "source_archive.py",
-    "source_chart.py",
-    "source_recovery.py",
-    "source_recovery_state.py",
-    "source_result_cache.py",
-    "source_folder_index.py",
-    "source_recovery_batch.py",
-    "source_recovery_routes.py",
-    "source_bend_curves.py",
     "terminal_beat_repair.py",
     "mutation_receipts.py",
     "plugin.json",
@@ -60,7 +51,6 @@ ROOT_FILES = (
     "validator.py",
 )
 TREE_RULES = {
-    "source_psarc": {".py", ".md", ""},
     "assets": {".css", ".svg"},
     "schemas": {".json", ".md", ""},
     "src": {".js"},

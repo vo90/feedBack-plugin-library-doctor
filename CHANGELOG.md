@@ -2,30 +2,14 @@
 
 ## Unreleased
 
-- Speed up source-bend recovery by validating changed charts in memory during
-  preview, sharing bounded exact-content matching results between audio variants,
-  and reusing current scan reports with live signature guards during Apply.
-  Preserve completed previews across restarts and recheck previously proposed
-  repairs from their selected originals without repeating a folder-wide search.
-  Full candidate validation, archive integrity checks, backups and Undo remain.
-
-- Add folder-based batch Recover source bends in Song Tools. Recursively index
-  original PSARCs, match all currently scanned packages (including those without
-  bend warnings), review exact changes, and apply through the existing guarded
-  repair engine. Keep ambiguous or unavailable sources visible, preserve audio
-  and existing edited curves, support cancellation and playback pauses, retain
-  interrupted-job results, and offer a separately previewed batch Undo.
-
-- Add Recover source bends in Song Tools. Match an explicitly selected original
-  PSARC against complete arrangement/difficulty topology, preview exact source
-  recovery, preserve excluded existing curves, and reuse complete-candidate
-  validation, source hashes, durable backups, transaction recovery and Undo.
-  Source readers are standalone and bounded; declared dependencies use the
-  host's existing profile-local plugin dependency mechanism.
+- Remove the original-PSARC bend recovery tools, folder batches, and saved-review
+  rechecks. Keep normal scans, safe repairs, Preview Creator, and existing repair
+  history and Undo. Ambiguous bend data now directs users to reconversion or
+  original-chart review; refresh scan results to see the updated advice.
 
 - Normalize retained bend timestamps only when absolute timing is unambiguous.
   Keep every point value and unknown property; block pre-onset, mixed, unordered
-  and exceptional curves for source-assisted review across all difficulties.
+  and exceptional curves across all difficulties instead of guessing a repair.
 
 - Offer source-bound normalization of imported fret-127 string-mute sentinels,
   including every difficulty copy and corroborated shared chord template. Mixed

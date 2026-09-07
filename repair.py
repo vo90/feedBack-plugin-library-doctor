@@ -1287,7 +1287,6 @@ class RepairService:
         retain_recovery: bool = True,
         verified_before_report: dict | None = None,
         source_guard=None,
-        additional_source_guard=None,
         transaction_started: float | None = None,
         request_id: str | None = None,
         request_operation: str | None = None,
@@ -1325,19 +1324,11 @@ class RepairService:
             }
             for item in internal["_members"]
         )
-        reuse_normal_source_before = bool(
-            package_path.is_file()
-            and internal.get("rule_code") == "source.bend-recovery"
-            and not deep_audio
-            and self._can_reuse_normal_source_report(
-                verified_before_report, package_name, source_guard
-            )
-        )
         reuse_verified_before = bool(
             package_path.is_file()
-            and (
-                self._can_reuse_verified_before_report(verified_before_report, source_guard)
-                or reuse_normal_source_before
+            and self._can_reuse_verified_before_report(
+                verified_before_report,
+                source_guard,
             )
         )
         reuse_deep_audio = bool(
@@ -1353,7 +1344,7 @@ class RepairService:
             if not source_guard():
                 raise RepairPlanningError(
                     "source_changed",
-                    "This Feedpak changed after its completed scan. Scan it again before repairing it.",
+                    "This Feedpak changed after its completed Deep Audio scan. Scan it again before repairing it.",
                 )
             before = copy.deepcopy(verified_before_report)
         else:
@@ -1387,8 +1378,6 @@ class RepairService:
             self._emit_transaction_barrier(
                 "candidate_validated", package=package_name, operation="repair"
             )
-            if additional_source_guard is not None and not additional_source_guard():
-                raise RepairPlanningError("source_changed", "An original-source recovery input changed during validation.")
             if reuse_verified_before and not source_guard():
                 raise RepairPlanningError(
                     "source_changed",
@@ -1441,13 +1430,6 @@ class RepairService:
                     operation="repair",
                     backup_id=backup_id,
                 )
-                if additional_source_guard is not None and not additional_source_guard():
-                    raise RepairPlanningError("source_changed", "An original-source recovery input changed before commit.")
-                if reuse_normal_source_before and not source_guard():
-                    raise RepairPlanningError(
-                        "source_changed",
-                        "This Feedpak changed before commit. Nothing was saved.",
-                    )
                 self._commit(
                     package_name,
                     package_path,
@@ -1601,27 +1583,6 @@ class RepairService:
             and report["features"].get("deep_audio_checked") is True
             and callable(source_guard)
         )
-
-    def _can_reuse_normal_source_report(self, report, package_name, source_guard) -> bool:
-        """Accept a complete normal report only for guarded source-bend repair."""
-        if (not isinstance(report, dict) or not callable(source_guard)
-                or report.get("schema") != "library_doctor.package.v1"
-                or report.get("package") != package_name
-                or report.get("validator_version") != self._validator_version
-                or not isinstance(report.get("features"), dict)
-                or report["features"].get("deep_audio_checked") is not False
-                or not isinstance(report.get("findings"), list)
-                or not isinstance(report.get("counts"), dict)):
-            return False
-        counts = {"error": 0, "warning": 0, "info": 0}
-        for finding in report["findings"]:
-            if (not isinstance(finding, dict) or not isinstance(finding.get("severity"), str)
-                    or finding["severity"] not in counts
-                    or not isinstance(finding.get("code"), str) or not finding["code"]):
-                return False
-            counts[finding["severity"]] += 1
-        return all(type(report["counts"].get(key)) is int and report["counts"][key] == value
-                   for key, value in counts.items())
 
     @staticmethod
     def _reuse_unchanged_deep_audio(before: dict, after: dict) -> dict:

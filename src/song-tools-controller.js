@@ -1,6 +1,3 @@
-import { createSourceRecoveryTool } from './source-recovery-tool.js';
-import { createSourceRecoveryBatchTool } from './source-recovery-batch-tool.js';
-
 export function createSongToolsController({
   actions: actionRegistry,
   apiRoot,
@@ -21,10 +18,6 @@ export function createSongToolsController({
   const el = new Proxy({}, {
     get(_target, key) { return getElements()?.[key]; },
   });
-  const sourceBatch = createSourceRecoveryBatchTool({
-    actions: actionRegistry, document, make, request,
-    isCurrent: () => state.active && state.workspace === 'tools',
-  });
 
   function currentPreviewUrl(packageName) {
     return `${apiRoot}/repair/media/current?package=${encodeURIComponent(packageName)}&v=${Date.now()}`;
@@ -39,10 +32,8 @@ export function createSongToolsController({
       button.setAttribute('aria-pressed', String(button.dataset.workspace === next));
     });
     if (next === 'tools') {
-      sourceBatch.mount(document.getElementById('lh-source-recovery-batch'));
-      sourceBatch.resume();
       loadSongTools();
-    } else sourceBatch.pause();
+    }
   }
 
   function songPackage(song) {
@@ -319,27 +310,6 @@ export function createSongToolsController({
     setHidden(region, true);
     preview.addEventListener('click', () => openPreviewCreator(song, preview, region));
     menu.appendChild(preview);
-    const source = make('button', 'lh-song-tool-choice');
-    source.type = 'button';
-    source.setAttribute('aria-expanded', 'false');
-    source.setAttribute('aria-controls', 'lh-song-tool-active');
-    source.appendChild(make('strong', '', 'Recover source bends'));
-    source.appendChild(make('span', '', 'Compare an original PSARC and review recoverable bend timing.'));
-    source.addEventListener('click', () => {
-      source.setAttribute('aria-expanded', 'true');
-      state.songTools.activeTool = 'source';
-      state.songTools.selectionRequest += 1;
-      const token = state.songTools.selectionRequest;
-      setHidden(region, false);
-      preview.setAttribute('aria-expanded', 'false');
-      createSourceRecoveryTool({ actions: actionRegistry, document, make, request,
-        isCurrent: () => state.active && state.workspace === 'tools'
-          && state.songTools.selectionRequest === token
-          && state.songTools.activeTool === 'source',
-      }).open(region, { package: packageName, title: song.title, artist: song.artist });
-    });
-    preview.addEventListener('click', () => source.setAttribute('aria-expanded', 'false'));
-    menu.appendChild(source);
     el.songToolSelection.appendChild(menu);
     el.songToolSelection.appendChild(region);
     setHidden(el.songToolSelection, false);
@@ -398,7 +368,6 @@ export function createSongToolsController({
 
 
   return {
-    leave: sourceBatch.pause,
     closeSongToolSelection,
     loadSongTools,
     refreshSelectedSongTool,

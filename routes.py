@@ -71,19 +71,6 @@ def setup(app, context):
         preview_repair=preview_repair,
         validate_reviewed_arrangement=validator.validate_reviewed_arrangement,
     )
-    source_recovery = load_sibling("source_recovery").SourceRecovery(
-        repair=repair_service, repair_module=repair_module,
-        archive=load_sibling("source_archive"), chart=load_sibling("source_chart"),
-    )
-    source_batch_module = load_sibling("source_recovery_batch")
-    source_index_module = load_sibling("source_folder_index")
-    source_batch = source_batch_module.SourceRecoveryBatchManager(
-        config_dir=Path(context["config_dir"]), scanner=scanner,
-        recovery=source_recovery,
-        index_factory=lambda: source_index_module.SourceFolderIndex(
-            archive=load_sibling("source_archive"), chart=load_sibling("source_chart"),
-        ), log=log,
-    )
     batch_manager = batch_module.BatchRepairManager(
         config_dir=Path(context["config_dir"]),
         scanner=scanner,
@@ -112,10 +99,6 @@ def setup(app, context):
     repair_error = errors.repair_detail
     receipt_error = errors.receipt_detail
     _audio_response = route_support.audio_response
-    load_sibling("source_recovery_routes").register(
-        router, manager=source_batch, scanner=scanner, contracts=contracts,
-        errors=errors, error_type=source_batch_module.SourceRecoveryBatchError,
-    )
 
     @router.get("/status", response_model=contracts.StatusContract)
     def get_status(
@@ -132,7 +115,6 @@ def setup(app, context):
                 next_action="correct_request",
             ) from exc
         status["batch"] = batch_manager.status()
-        status["source_batch"] = source_batch.status()
         return status
 
     @router.put("/playback")
@@ -159,9 +141,6 @@ def setup(app, context):
             if started:
                 batch_manager.invalidate_ready(
                     "A new scan started. Review the batch again after it finishes."
-                )
-                source_batch.invalidate_ready(
-                    "A new scan started. Preview source recovery again after it finishes."
                 )
         except ValueError as exc:
             raise http_error(
@@ -493,24 +472,6 @@ def setup(app, context):
         except repair_module.RepairPlanningError as exc:
             raise HTTPException(status_code=400, detail=repair_error(exc)) from exc
 
-    @router.post("/source-recovery/preview")
-    def preview_source_recovery(payload: contracts.SourceRecoveryPreviewRequestContract):
-        try:
-            return source_recovery.preview(payload.package, payload.source_path)
-        except repair_module.RepairPlanningError as exc:
-            raise HTTPException(status_code=400, detail=repair_error(exc)) from exc
-
-    @router.post("/source-recovery/apply", response_model=contracts.MutationReceiptContract)
-    def apply_source_recovery(
-        payload: contracts.SourceRecoveryApplyRequestContract,
-        idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
-    ):
-        ticket = begin_idempotent_mutation("source-recovery.apply", payload,
-            idempotency_key, {"package": payload.package, "source_path": payload.source_path,
-                              "plan_id": payload.plan_id})
-        return apply_repair_transaction(payload.package, payload.plan_id,
-            selected_source=payload.source_path, ticket=ticket)
-
     @router.post("/reviewed-repair/inspect")
     def inspect_reviewed_repair(payload: contracts.ReviewedInspectRequestContract):
         require_player_review(payload.package)
@@ -663,7 +624,6 @@ def setup(app, context):
         reviewed_adapter_id: str | None = None,
         reviewed_decisions: list[dict] | None = None,
         reviewed_difficulty_scope: str = "full_only",
-        selected_source: str | None = None,
         ticket: dict | None = None,
     ):
         if ticket is not None and ticket.get("replay") is not None:
@@ -686,12 +646,7 @@ def setup(app, context):
             verified_options = (
                 verified_deep_audio_options(package) if deep_audio else {}
             )
-            if selected_source is not None:
-                result = source_recovery.apply(package, selected_source, plan_id,
-                    deep_audio=deep_audio, request_id=ticket and ticket["request_id"],
-                    request_operation="source-recovery.apply",
-                    request_fingerprint=ticket and ticket["fingerprint"], **verified_options)
-            elif reviewed_adapter_id is not None:
+            if reviewed_adapter_id is not None:
                 result = repair_service.apply_reviewed(
                     package,
                     reviewed_adapter_id,

@@ -1169,6 +1169,12 @@ test('Song Tools keeps its detail panel outside the result list and manages focu
   assert.equal(selection.parentElement.id, 'lh-song-tools-workspace');
   assert.equal(app.document.querySelector('#lh-song-tool-results').contains(selection), false);
   assert.equal(selection.getAttribute('aria-labelledby'), 'lh-song-tool-selection-title');
+  assert.deepEqual(
+    [...selection.querySelectorAll('.lh-song-tool-choice strong')].map(node => node.textContent),
+    ['Preview Creator'],
+  );
+  assert.equal(app.document.querySelector('#lh-source-recovery-batch'), null);
+  assert.equal(app.requests.some(({ key }) => key.includes('/source-recovery/')), false);
 
   app.document.querySelector('.lh-song-tool-item').click();
   await waitFor(() => app.document.activeElement?.classList.contains('lh-song-tool-item'), 'song trigger focus restore');

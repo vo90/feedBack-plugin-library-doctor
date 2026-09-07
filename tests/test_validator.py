@@ -704,7 +704,7 @@ def test_link_next_continuation_does_not_create_same_fret_hopo_finding(
     )
 
     assert "review.same-fret-hopo" not in _codes(report)
-    assert report["validator_version"].startswith("rules-36:")
+    assert report["validator_version"].startswith("rules-37:")
 
 
 def test_targeted_reviewed_arrangement_validation_is_read_only(validator):
@@ -3246,4 +3246,18 @@ def test_mixed_inline_and_manifest_tone_issues_block_the_package_rule(
 
 
 def test_validator_rule_version_is_bumped_for_structural_findings(validator):
-    assert validator.VALIDATOR_VERSION.startswith("rules-36:")
+    assert validator.VALIDATOR_VERSION.startswith("rules-37:")
+
+
+def test_ambiguous_bend_advice_requires_reconversion_or_original_chart_review(validator, tmp_path):
+    package = _package(tmp_path, arrangement={"notes": [{
+        "t": 10, "s": 0, "f": 5, "sus": 1, "bn": 2,
+        "bnv": [{"t": 9.9, "v": 0}, {"t": 10.5, "v": 2}],
+    }], "chords": []})
+    report = validator.validate_feedpak(package)
+    eligibility = report["features"]["repair_eligibility"]["chart.bend-time-coordinates"]
+    assert eligibility["status"] == "unavailable"
+    assert eligibility["reason_code"] == "ambiguous_bend_time_coordinates"
+    assert "Reconvert the original song with an updated converter" in eligibility["message"]
+    assert "review and correct the original chart" in eligibility["message"]
+    assert "select its original source" not in eligibility["message"]

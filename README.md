@@ -102,7 +102,7 @@ If Git is already installed on your computer:
 3. Select **Install**, then restart FeedBack when prompted.
 
 If FeedBack says Git is missing, use the release ZIP instructions above.
-FeedBack installs Library Doctor's Python dependencies automatically when
+FeedBack installs Library Doctor's small Python dependency automatically when
 the plugin starts.
 
 ## Your first scan
@@ -163,6 +163,12 @@ A finding without a repair button is not a failure of the interface. It means
 Library Doctor cannot make that decision without guessing. Follow the displayed
 next step and use a Feedpak editor or replace the song when necessary.
 
+Imported fret-127 pitchless mutes and unambiguous absolute bend timestamps have
+separate safe repairs in scan results. When bend data is missing or ambiguous,
+reconvert the original song with an updated converter, or review and correct the
+original chart. Library Doctor cannot infer a trajectory from a bend amount
+alone, and a scan cannot identify every curve discarded by an older converter.
+
 ### Fix several songs
 
 After a complete scan, **Fix several songs** can collect the same narrowly safe
@@ -182,66 +188,6 @@ review-assisted repair types may be added in future versions.
 
 ### Song Tools and previews
 
-**Recover source bends** compares a selected original PSARC with all playable
-arrangements and stored difficulties. Choose the original file, inspect the
-exact proposed bend fields, then use **Apply reviewed source recovery**. A
-missing curve is recovered only from matching authored source points; a scalar
-bend alone is insufficient. Existing or ambiguous curves and related copies are
-excluded. Unmatched arrangements or malformed declarations block the package.
-Preview validates the changed chart documents in memory. Apply validates the
-complete candidate before saving, preserves audio, and retains the original
-chart bytes through **Undo**.
-
-For many songs, use **Recover source bends across the scanned library** at the top of
-**Song tools**:
-
-1. Finish a scan of the song library or folder you want to repair.
-2. Choose the folder containing your original PSARC files. Subfolders are included.
-3. Select **Preview source recovery** and let the source matching finish.
-4. Review the eligible songs and exact proposed changes. Missing originals,
-   different versions and ambiguous matches are reported for review.
-5. Apply the reviewed batch. You can leave the screen while it runs, cancel
-   between packages, and review the results when you return. Playback pauses
-   the work. **Preview batch Undo** first checks the available restores.
-
-This checks every song in the current completed scan, including songs with no
-bend warning: an old converter may have discarded a curve without leaving
-enough information for a scan to recognize it. Source filenames do not decide
-a match; all supported chart topology must match. Different matching archives
-require an individual source choice. An unreadable or incomplete source-folder
-index cannot establish a unique match and requires a new preview after the
-listed source-folder problems are resolved.
-
-Source uniqueness is established during the preview. Apply rechecks the chosen
-source's complete file hash and the reviewed package data; it does not search
-again for files added to the source folder after you approved the preview.
-
-Completed previews now survive a restart when the library scan and validation
-version still match. **Recheck proposed repairs** reuses the selected originals
-for songs previously eligible for repair. It recalculates their changes and
-requires a fresh review, without searching the source folder again. Previously
-unchanged or blocked songs are marked as not rechecked. Use a full folder
-preview to search for new matches. A missing selected original blocks that
-song while other verified selections remain available; this recheck does not
-renew the earlier folder-wide uniqueness check.
-
-Identical chart content in full-audio and No Guitar packages shares bounded
-matching and validation work. Apply can reuse the completed scan's original
-report when its version and live package signature still match. Full candidate
-validation, archive integrity checks, backups and Undo remain required.
-
-The batch changes recoverable bend fields only. It preserves song audio,
-including MinusMix/No Guitar versions, and does not reconvert entire PSARCs.
-If an earlier repair still has a recovery copy, first keep and finalize that
-repair or Undo it in **Activity and recovery**, then preview the source batch
-again. The batch never removes earlier Undo copies for you. Interrupted batches
-keep their completed results; review them and start a new preview for the
-remaining songs instead of automatically repeating an uncertain operation.
-
-Imported fret-127 pitchless mutes and unambiguous absolute bend times also have
-separate safe repairs in scan results. Source exceptions such as pre-onset bend
-points require source recovery, whose preview identifies boundary adjustments.
-
 Open **Song tools** to search FeedBack's indexed library and select a song
 directly. **Preview Creator** can add a missing preview or replace an existing
 one. You can listen and choose a starting point, or explicitly select the
@@ -260,6 +206,11 @@ recovery safeguards as suggested repairs.
 Do not manually delete recovery files just to clear a warning. Use the actions
 shown under **Activity and recovery**, or keep both versions until you can
 review them safely.
+
+The original-PSARC bend recovery tools have been removed. Their saved reports
+and recovery records are left intact; existing repairs can still be reviewed
+and individually undone through **Activity and recovery**. Removing the tools
+does not revert any previous song changes.
 
 ## Privacy
 

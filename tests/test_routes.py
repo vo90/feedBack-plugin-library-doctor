@@ -1,4 +1,5 @@
 import concurrent.futures
+import builtins
 import importlib.util
 import json
 import logging
@@ -4334,3 +4335,35 @@ def test_missing_library_is_reported_in_status(tmp_path):
     assert response.status_code == 400
     assert "configured" in response.json()["detail"]["message"].lower()
     client.close()
+
+
+def test_retired_source_tools_do_not_load_dependencies_or_resume_saved_work(tmp_path, monkeypatch):
+    saved = tmp_path / "config" / "library_doctor" / "source_recovery_batch.json"
+    saved.parent.mkdir(parents=True)
+    original = b'{"schema":"library_doctor.source_recovery_batch.v1","phase":"previewing","running":true}'
+    saved.write_bytes(original)
+    original_import = builtins.__import__
+
+    def without_psarc_dependencies(name, *args, **kwargs):
+        if name.split(".")[0] in {"construct", "cryptography"}:
+            raise AssertionError(f"Retired PSARC dependency was imported: {name}")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", without_psarc_dependencies)
+    client, _library = _client(tmp_path)
+    with client:
+        status = client.get("/api/plugins/library_doctor/status")
+        assert status.status_code == 200
+        assert "source_batch" not in status.json()
+        assert not status.json()["running"]
+        assert client.get("/api/plugins/library_doctor/repair/batch/status").status_code == 200
+        for method, path in (
+            ("POST", "preview"), ("POST", "apply"),
+            ("GET", "batch/status"), ("GET", "batch/details?package=Song.feedpak"),
+            ("POST", "batch/preview"), ("POST", "batch/reuse"),
+            ("POST", "batch/apply"), ("POST", "batch/cancel"),
+            ("POST", "batch/undo/preview"), ("POST", "batch/undo/apply"),
+        ):
+            response = client.request(method, f"/api/plugins/library_doctor/source-recovery/{path}")
+            assert response.status_code == 404
+        assert saved.read_bytes() == original
