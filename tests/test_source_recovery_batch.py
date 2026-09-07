@@ -1,14 +1,17 @@
 """Exercise folder batch orchestration against the real package transaction engine."""
+import copy
 import hashlib
 import json
 import logging
 import shutil
 import threading
+import zipfile
 from pathlib import Path
+from types import SimpleNamespace as NS
 
 import pytest
 
-from test_source_recovery import build, load, read_all
+from test_source_recovery import build, legacy_chart, load, read_all
 
 
 batch = load("source_recovery_batch")
@@ -176,6 +179,66 @@ def test_incomplete_source_index_never_claims_uniqueness(tmp_path):
     assert plan["blocked_count"] == 1 and plan["eligible_count"] == 0
     assert plan["source_errors"] and not plan["source_index"]["complete"]
     assert read_all(package) == members
+
+
+@pytest.mark.parametrize("invalid_name", ["A-invalid.psarc", "Z-invalid.psarc"])
+def test_matching_invalid_archive_cannot_be_ignored_for_unique_recovery(tmp_path, invalid_name):
+    manager, scanner, engine, _, package, source, members, entries = setup(tmp_path)
+    invalid_path = source.with_name(invalid_name)
+    invalid_path.write_bytes(b"another original with invalid matching bend data")
+    invalid = copy.deepcopy(entries[0])
+    invalid["song"].levels[0].notes[0].bends = [NS(time=10.8, step=2), NS(time=10.2, step=0)]
+    read = engine.archive.read_source_charts
+    def selected(value, **options):
+        result = read(value, **options)
+        return {**result, "charts": [invalid]} if Path(value) == invalid_path else result
+    engine.archive.read_source_charts = selected
+    plan = preview(manager, scanner, source, package)
+    assert plan["source_index"]["complete"] and not plan["source_errors"]
+    assert plan["blocked_count"] == 1 and plan["eligible_count"] == 0
+    row = plan["packages"][0]
+    assert row["code"] == "source_bend_invalid"
+    assert invalid_name in row["reason"] and "chronological" in row["reason"]
+    assert read_all(package) == members
+
+
+def test_invalid_song_is_isolated_while_audio_variants_apply_and_undo(tmp_path):
+    manager, scanner, engine, _, package, source, members, entries = setup(tmp_path)
+    invalid_path = source.with_name("Invalid song.psarc")
+    invalid_path.write_bytes(b"another song's immutable original")
+    invalid = copy.deepcopy(entries[0])
+    for level in invalid["song"].levels:
+        level.notes[0].fret = 8
+    invalid_document = json.dumps(legacy_chart(invalid["song"])).encode()
+    invalid_members = {**members, "lead.json": invalid_document, "rhythm.json": invalid_document}
+    invalid_package = package.with_name("Invalid song.feedpak")
+    variant = package.with_name("Song (No Guitar).feedpak")
+    variant_members = {**members, "audio.ogg": b"alternate MinusMix audio"}
+    for path, payload in ((invalid_package, invalid_members), (variant, variant_members)):
+        with zipfile.ZipFile(path, "w") as target:
+            for name, raw in payload.items():
+                target.writestr(name, raw)
+    invalid["song"].levels[0].notes[0].bends = [NS(time=10.8, step=2), NS(time=10.2, step=0)]
+    read = engine.archive.read_source_charts
+    def selected(value, **options):
+        result = read(value, **options)
+        return {**result, "charts": [invalid]} if Path(value) == invalid_path else result
+    engine.archive.read_source_charts = selected
+    plan = preview(manager, scanner, source, package, variant, invalid_package)
+    assert plan["source_index"]["complete"] and plan["source_index"]["indexed_archive_count"] == 2
+    assert plan["eligible_count"] == 2 and plan["blocked_count"] == 1
+    assert next(row for row in plan["packages"] if row["package"] == invalid_package.name)["code"] == "source_bend_invalid"
+    manager.start_apply(plan["batch_plan_id"])
+    assert finish(manager, "completed")["result"]["success_count"] == 2
+    assert read_all(package)["audio.ogg"] == members["audio.ogg"]
+    assert read_all(variant)["audio.ogg"] == variant_members["audio.ogg"]
+    assert read_all(invalid_package) == invalid_members
+    manager.start_undo_preview()
+    undo = finish(manager, "undo_ready")["undo_preview"]
+    manager.start_undo_apply(undo["undo_plan_id"])
+    assert finish(manager, "undo_completed")["result"]["success_count"] == 2
+    assert read_all(package) == members and read_all(variant) == variant_members
+    assert read_all(invalid_package) == invalid_members
 
 
 @pytest.mark.parametrize("change", ["package", "source", "root"])

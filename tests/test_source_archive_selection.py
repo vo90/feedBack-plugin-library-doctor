@@ -148,3 +148,68 @@ def test_nonempty_member_with_invalid_empty_decoding_remains_blocking(tmp_path, 
     monkeypatch.setattr(module, "_reader", lambda: (*reader[:-1], NS(parse=invalid)))
     with pytest.raises(ValueError, match="could not be decoded"):
         module.inspect_source_charts(path, lambda entry: None)
+
+
+@pytest.mark.parametrize("selected_only", [False, True])
+def test_duplicate_nonchart_art_keeps_original_chart_table_positions(tmp_path, monkeypatch, selected_only):
+    module, path, names, parsed, refs = archive(tmp_path, monkeypatch, count=4)
+    names[1:3] = ["gfxassets/album_art/album_song_256.dds"] * 2
+    read = module._read_entry
+    reads = []
+    def member(stream, value, lengths, size, limit):
+        reads.append(value.index)
+        if value.index in (2, 3):
+            pytest.fail("Duplicate artwork must not be read or chosen during chart recovery")
+        return read(stream, value, lengths, size, limit)
+    monkeypatch.setattr(module, "_read_entry", member)
+    if selected_only:
+        result = module.read_source_charts(path, members=[names[3]])
+        assert [row["member"] for row in result["charts"]] == [names[3]]
+        assert reads == [0, 4]
+    else:
+        visited = []
+        result = module.inspect_source_charts(path, lambda row: visited.append(row["member"]))
+        assert visited == [names[0], names[3]]
+        assert reads == [0, 1, 4]
+    assert result["complete"] and result["sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+@pytest.mark.parametrize("selected_only", [False, True])
+def test_duplicate_sng_names_block_even_outside_requested_members(tmp_path, monkeypatch, selected_only):
+    module, path, names, parsed, refs = archive(tmp_path, monkeypatch, count=3)
+    names[2] = names[1]
+    with pytest.raises(ValueError, match="duplicate source chart member names"):
+        if selected_only:
+            module.read_source_charts(path, members=[names[0]])
+        else:
+            module.inspect_source_charts(path, lambda row: None)
+    assert not parsed
+
+
+@pytest.mark.parametrize("difference", [-1, 1])
+def test_listing_count_must_still_match_table_before_chart_selection(tmp_path, monkeypatch, difference):
+    module, path, names, parsed, refs = archive(tmp_path, monkeypatch, count=3)
+    if difference < 0:
+        names.pop()
+    else:
+        names.append("gfxassets/album_art/extra.dds")
+    with pytest.raises(ValueError, match="ambiguous member listing"):
+        module.read_source_charts(path, members=[names[0]])
+    assert not parsed
+
+
+def test_duplicate_art_does_not_bypass_chart_count_bound(tmp_path, monkeypatch):
+    module, path, names, parsed, refs = archive(tmp_path, monkeypatch, count=131)
+    names[-2:] = ["gfxassets/album_art/album_song_256.dds"] * 2
+    with pytest.raises(ValueError, match="folder batch"):
+        module.read_source_charts(path)
+    assert not parsed
+
+
+def test_duplicate_art_does_not_bypass_full_archive_hash_guard(tmp_path, monkeypatch):
+    module, path, names, parsed, refs = archive(tmp_path, monkeypatch, count=3)
+    names[1:] = ["gfxassets/album_art/album_song_256.dds"] * 2
+    def visit(row):
+        path.write_bytes(path.read_bytes() + b"changed unselected source asset")
+    with pytest.raises(ValueError, match="changed during"):
+        module.inspect_source_charts(path, visit)

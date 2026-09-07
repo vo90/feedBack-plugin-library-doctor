@@ -101,10 +101,14 @@ def _inspect(value, on_chart, *, members=None, streaming=False):
         stream.seek(0)
         header = HEADER.parse_stream(stream)
         listing = _read_entry(stream, header.bom.entries[0], header.bom.zlength, file_size, 2 * 1024 ** 2).decode("utf8").splitlines()
-        if len(listing) != entries - 1 or len(set(listing)) != len(listing):
+        if len(listing) != entries - 1:
             raise ValueError("The source archive has an ambiguous member listing.")
         selected = [(i + 1, name) for i, name in enumerate(listing)
                     if name.lower().endswith(".sng") and "/songs/bin/" in ("/" + name.replace("\\", "/").lower())]
+        # Non-chart assets do not participate in source recovery. Preserve their
+        # table positions, and establish chart-name uniqueness before selection.
+        if len({name for _, name in selected}) != len(selected):
+            raise ValueError("The source archive has duplicate source chart member names.")
         if wanted is not None:
             if not wanted.issubset({name for _, name in selected}):
                 raise ValueError("Every selected source chart must exist as an exact SNG member in this archive.")

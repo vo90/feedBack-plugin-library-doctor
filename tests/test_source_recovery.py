@@ -64,6 +64,41 @@ def test_existing_curve_edit_excludes_every_copy_of_same_note():
     assert fixed == doc and not changes and len(excluded) == 3
 
 
+@pytest.mark.parametrize("invalid_first", [True, False])
+def test_matching_invalid_bend_remains_blocker_beside_valid_chart(tmp_path, invalid_first):
+    _, _, engine, package, original, members, entries = build(tmp_path)
+    invalid = copy.deepcopy(entries[0])
+    invalid["member"] = "songs/bin/generic/invalid.sng"
+    invalid["sha256"] = "2" * 64
+    invalid["song"].levels[0].notes[0].bends = [NS(time=10.8, step=2), NS(time=10.2, step=0)]
+    entries.insert(0 if invalid_first else len(entries), invalid)
+    plan = engine.preview(package.name, str(original))
+    assert not plan["available"] and plan["change_count"] == 0
+    assert {item["code"] for item in plan["blockers"]} == {"source_bend_invalid"}
+    assert all(item["source_member"] == invalid["member"] for item in plan["blockers"])
+    assert all("chronological" in item["message"] for item in plan["blockers"])
+    assert read_all(package) == members
+
+
+@pytest.mark.parametrize("difference", ["timing", "difficulty"])
+def test_unrelated_invalid_curve_in_compilation_does_not_block_exact_match(tmp_path, difference):
+    _, _, engine, package, original, members, entries = build(tmp_path)
+    unrelated = copy.deepcopy(entries[0])
+    unrelated["member"] = "songs/bin/generic/other-song.sng"
+    unrelated["sha256"] = "2" * 64
+    unrelated["song"].levels[0].notes[0].bends = [NS(time=10.8, step=2), NS(time=10.2, step=0)]
+    if difference == "timing":
+        for level in unrelated["song"].levels:
+            level.notes[0].time += .1
+    else:
+        unrelated["song"].levels[0].notes[0].fret = 8
+    entries.insert(0, unrelated)
+    plan = engine.preview(package.name, str(original))
+    assert plan["available"] and plan["candidate_validated"] and not plan["blockers"]
+    assert plan["change_count"] == 6
+    assert read_all(package) == members
+
+
 def test_scalar_with_no_authored_source_points_is_never_reconstructed():
     source = song()
     for level in source.levels:

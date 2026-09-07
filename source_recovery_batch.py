@@ -301,13 +301,17 @@ class SourceRecoveryBatchManager:
                         if len(matches) > 1:
                             break
                     elif any(blocker.get("code") != "source_match_missing" for blocker in blockers):
-                        failures.append("A source archive contains ambiguous matching arrangements.")
+                        for blocker in blockers:
+                            if blocker.get("code") != "source_match_missing":
+                                failures.append({"code": blocker.get("code", "source_candidate_unavailable"),
+                                    "message": f"{source['relative_path']}: {blocker.get('source_member') or blocker.get('member_path', '')}: {blocker['message']}"})
                         break
                 except Exception as exc:
-                    failures.append(str(exc))
+                    failures.append({"code": "source_candidate_unavailable", "message": str(exc)})
                     break
             if failures:
-                row.update(reason="; ".join(failures[:3]), code="source_candidate_unavailable")
+                row.update(reason="; ".join(failure["message"] for failure in failures[:3]),
+                           code=failures[0]["code"])
             elif len(matches) > 1:
                 row.update(reason="Multiple different original source files match this package. Select one source individually after review.", code="source_match_ambiguous")
             elif len(matches) == 1:

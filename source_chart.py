@@ -22,7 +22,14 @@ FLAGS = {"fhm": 0x08, "tr": 0x10, "hm": 0x20, "pm": 0x40, "slp": 0x80,
          "vb": 0x10000, "mt": 0x20000, "ig": 0x40000, "ac": 0x4000000, "ln": 0x8000000}
 
 
-def _note(source, string, fret, sustain, mask, points, slide=-1, unpitched=-1, peak=0):
+class SourceBendError(ValueError):
+    """A structurally readable source note has an unsafe bend curve."""
+
+
+def _note(source, string, fret, sustain, mask, points, slide=-1, unpitched=-1, peak=0,
+          *, include_bends=True):
+    if not math.isfinite(float(source.time)) or not math.isfinite(float(sustain)) or sustain < 0:
+        raise ValueError("Source event onset and sustain must be finite; sustain must be nonnegative.")
     n = {"t": round(float(source.time), 6), "s": int(string), "f": int(fret),
          "sus": round(float(sustain), 3)}
     n.update({flag: True for flag, bit in FLAGS.items() if mask & bit})
@@ -32,15 +39,21 @@ def _note(source, string, fret, sustain, mask, points, slide=-1, unpitched=-1, p
         n["sl"] = int(slide)
     if unpitched >= 0:
         n["slu"] = int(unpitched)
-    absolute = [(float(p.time), float(p.step)) for p in points]
-    n["_absolute"] = [{"t": round(t, 6), "v": round(v, 6)} for t, v in absolute]
-    nonzero = [v for _, v in absolute if v]
-    n["_declared_peak"] = round(max(nonzero, key=abs) if nonzero else float(peak), 6)
-    n["_curve"], n["_adjustments"] = _normalizer()(float(source.time), float(sustain), absolute)
+    if include_bends:
+        try:
+            absolute = [(float(p.time), float(p.step)) for p in points]
+            n["_absolute"] = [{"t": round(t, 6), "v": round(v, 6)} for t, v in absolute]
+            nonzero = [v for _, v in absolute if v]
+            n["_declared_peak"] = round(max(nonzero, key=abs) if nonzero else float(peak), 6)
+            n["_curve"], n["_adjustments"] = _normalizer()(float(source.time), float(sustain), absolute)
+        except (ValueError, TypeError, OverflowError) as exc:
+            raise SourceBendError(
+                f"Source bend at {n['t']:.6f}s, string {n['s'] + 1}, fret {n['f']}: {exc}") from exc
     return n
 
 
-def source_document(song):
+def source_document(song, *, include_bends=True):
+    """Share exact chart extraction; discovery may omit all bend interpretation."""
     levels = {}
     for level in sorted(song.levels, key=lambda x: x.difficulty):
         payload = {"notes": [], "chords": []}
@@ -59,14 +72,16 @@ def source_document(song):
                         continue
                     mask = int(note.mask) | (int(cn.mask[string]) if cn else 0)
                     sustain = float(note.sustain) if cn is None or int(cn.mask[string]) & 0x2000 else 0
-                    points = cn.bends[string].bendValues[:cn.bends[string].count] if cn else []
+                    points = cn.bends[string].bendValues[:cn.bends[string].count] if cn and include_bends else []
                     member = _note(note, string, fret, sustain, mask, points,
-                                   cn.slideTo[string] if cn else -1, cn.slideUnpitchTo[string] if cn else -1)
+                                   cn.slideTo[string] if cn else -1, cn.slideUnpitchTo[string] if cn else -1,
+                                   include_bends=include_bends)
                     members.append(member)
                 payload["chords"].append({"t": round(float(note.time), 6), "id": cid, "notes": members})
             else:
                 payload["notes"].append(_note(note, note.string, note.fret, note.sustain, int(note.mask),
-                    note.bends, note.slideTo, note.slideUnpitchTo, note.bend_time))
+                    note.bends if include_bends else [], note.slideTo, note.slideUnpitchTo,
+                    note.bend_time if include_bends else 0, include_bends=include_bends))
         levels[int(level.difficulty)] = payload
     phrases = []
     for iteration in song.phraseIterations:
@@ -128,8 +143,7 @@ def _pairs(target, source, prefix=()):
     return result
 
 
-def recovery_patch(document, song):
-    source = source_document(song)
+def _matched_pairs(document, source):
     if document.get("capo", 0) != source["capo"] or document.get("tuning", [0] * 6) != source["tuning"]:
         raise ValueError("Source tuning or capo does not match this arrangement/version.")
     pairs = _pairs(document, source)
@@ -148,6 +162,16 @@ def recovery_patch(document, song):
                 if target_level.get("difficulty") != source_level["difficulty"]:
                     raise ValueError("Source difficulty identity does not match this arrangement/version.")
                 pairs.extend(_pairs(target_level, source_level, ("phrases", pi, "levels", li)))
+    return pairs
+
+
+def recovery_patch(document, song):
+    # An unrelated chart's unsafe curve must not hide a valid compilation match.
+    # Prove every exact correspondence first, then interpret bends in source order.
+    # Full normalization preserves the existing conservative policy for all native
+    # levels, including levels absent from a flattened-only stored arrangement.
+    _matched_pairs(document, source_document(song, include_bends=False))
+    pairs = _matched_pairs(document, source_document(song))
     changes, blocked, excluded_identities = [], [], set()
     for path, target, original in pairs:
         identity = (original["t"], target["s"], target["f"])

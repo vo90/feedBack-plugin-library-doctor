@@ -110,13 +110,23 @@ class SourceRecovery:
         documents, evidence = self._documents(package_path)
         members, changes, blocked, excluded, matches = [], [], [], [], []
         for member, raw, document in documents:
-            candidates = []
+            candidates, invalid_curves = [], []
             for entry in source["charts"]:
                 try:
                     result = self.chart.recovery_patch(document, entry["song"])
+                except self.chart.SourceBendError as exc:
+                    # Exact chart correspondence was established before bend
+                    # interpretation. Keep this candidate even if another
+                    # matching source chart has a usable curve.
+                    invalid_curves.append({"member_path": member, "source_member": entry["member"],
+                        "code": "source_bend_invalid", "message": str(exc)})
+                    continue
                 except (ValueError, TypeError, KeyError, IndexError, AttributeError, OverflowError):
                     continue
                 candidates.append((entry, result))
+            if invalid_curves:
+                blocked.extend(invalid_curves)
+                continue
             if len(candidates) != 1:
                 blocked.append({"member_path": member, "code": "source_match_ambiguous" if candidates else "source_match_missing",
                     "message": "Exactly one source arrangement must match all stored events, techniques, tuning and difficulty copies."})

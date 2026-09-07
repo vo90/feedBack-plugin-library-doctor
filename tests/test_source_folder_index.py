@@ -51,7 +51,7 @@ def create(tmp_path, records):
 
 def index(adapter, chart=None):
     return load("source_folder_index").SourceFolderIndex(
-        archive=adapter, chart=chart or NS(source_document=lambda source: source))
+        archive=adapter, chart=chart or NS(source_document=lambda source, **_options: source))
 
 
 def test_recursive_content_matching_ignores_names_and_media(tmp_path):
@@ -268,7 +268,7 @@ def test_index_holds_no_source_objects(tmp_path):
         return {"path": Path(value), "sha256": "1" * 64,
                 "charts": [{"member": "songs/bin/generic/lead.sng", "song": song}]}
     create(tmp_path, {"a.psarc": b"a"})
-    lookup = index(NS(read_source_charts=read), NS(source_document=lambda song: document()))
+    lookup = index(NS(read_source_charts=read), NS(source_document=lambda song, **_options: document()))
     lookup.build(tmp_path)
     gc.collect()
     assert references[0]() is None
@@ -334,3 +334,22 @@ def test_known_empty_placeholders_are_exposed_without_marking_scope_incomplete(t
     summary = lookup.build(tmp_path)
     assert summary["complete"] and summary["empty_member_count"] == 1
     assert summary["empty_members"] == [{"relative_path": "compilation.psarc", "member": "empty-placeholder.sng"}]
+
+
+def test_malformed_curve_remains_discoverable_without_poisoning_source_scope(tmp_path):
+    chart = load("source_chart")
+    note = NS(time=10.0, string=1, fret=7, sustain=1.0, mask=0,
+              bends=[NS(time=10.6, step=0), NS(time=10.4, step=2)],
+              slideTo=-1, slideUnpitchTo=-1, bend_time=2, chordId=4294967295)
+    source = NS(levels=[NS(difficulty=0, notes=[note])], phraseIterations=[], phrases=[],
+                chordTemplates=[], chordNotes=[], metadata=NS(capo=-1, tuning=[0] * 6))
+    good = copy.deepcopy(source)
+    good.levels[0].notes[0].bends.reverse()
+    create(tmp_path, {"unsafe.psarc": b"unsafe", "valid.psarc": b"valid"})
+    lookup = index(Archive({"unsafe.psarc": [source], "valid.psarc": [good]}), chart)
+    summary = lookup.build(tmp_path)
+    assert summary["complete"] and summary["error_count"] == 0 and summary["chart_count"] == 2
+    assert {row["relative_path"] for row in lookup.candidates([document()])} == {"unsafe.psarc", "valid.psarc"}
+    assert [p.time for p in source.levels[0].notes[0].bends] == [10.6, 10.4]
+    with pytest.raises(chart.SourceBendError, match="chronological"):
+        chart.recovery_patch(document(), source)

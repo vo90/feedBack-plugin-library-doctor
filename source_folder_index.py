@@ -181,7 +181,7 @@ class SourceFolderIndex:
                     member = source["member"]
                     if not isinstance(member, str) or not member:
                         raise ValueError("The source reader returned an invalid chart member name.")
-                    key = topology_key(self.chart.source_document(source["song"]))
+                    key = topology_key(self.chart.source_document(source["song"], include_bends=False))
                     member_keys.setdefault(key, set()).add(member)
                     return not cancelled()
                 inspector = getattr(self.archive, "inspect_source_charts", None)
