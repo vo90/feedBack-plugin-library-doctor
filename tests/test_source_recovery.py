@@ -94,7 +94,7 @@ def test_unrelated_invalid_curve_in_compilation_does_not_block_exact_match(tmp_p
         unrelated["song"].levels[0].notes[0].fret = 8
     entries.insert(0, unrelated)
     plan = engine.preview(package.name, str(original))
-    assert plan["available"] and plan["candidate_validated"] and not plan["blockers"]
+    assert plan["available"] and plan["chart_validated"] and not plan["blockers"]
     assert plan["change_count"] == 6
     assert read_all(package) == members
 
@@ -159,7 +159,8 @@ def build(tmp_path, *, archive=True):
         return {"title": "Song", "validator_version": "test", "findings": [],
             "counts": {"error": 0, "warning": 0, "info": 0}}
     service = repair.RepairService(config_dir=tmp_path / "config", get_dlc_dir=lambda: library,
-        validate_feedpak=validate, validator_version="test", log=logging.getLogger("source-test"))
+        validate_feedpak=validate, validate_reviewed_arrangement=lambda *_a, **_k: validate(None, None),
+        validator_version="test", log=logging.getLogger("source-test"))
     engine = load("source_recovery").SourceRecovery(repair=service, repair_module=repair,
         archive=adapter, chart=load("source_chart"))
     return repair, service, engine, package, original, members, entries
@@ -176,7 +177,7 @@ def read_all(package):
 def test_full_candidate_apply_exact_undo_and_repeat(tmp_path, archive):
     _, service, engine, package, original, members, _ = build(tmp_path, archive=archive)
     preview = engine.preview(package.name, str(original))
-    assert preview["available"] and preview["candidate_validated"]
+    assert preview["available"] and preview["chart_validated"]
     assert preview["change_count"] == 6
     assert read_all(package) == members
     receipt = engine.apply(package.name, str(original), preview["plan_id"])
@@ -268,16 +269,16 @@ def test_unresolved_playable_declaration_blocks_complete_package(tmp_path, point
     assert read_all(package) == before
 
 
-def test_complete_candidate_validation_error_prevents_preview(tmp_path):
+def test_changed_arrangement_validation_error_prevents_preview(tmp_path):
     repair, service, engine, package, original, members, _ = build(tmp_path)
-    validate = service._validate_feedpak
-    def validation(path, name, **options):
-        report = validate(path, name, **options)
-        if Path(path) != package:
+    validate = service._validate_reviewed_arrangement
+    def validation(document, **options):
+        report = validate(document, **options)
+        if document["notes"][0].get("bnv"):
             report["findings"] = [{"severity": "error", "code": "test.new-error"}]
             report["counts"]["error"] = 1
         return report
-    service._validate_feedpak = validation
+    service._validate_reviewed_arrangement = validation
     with pytest.raises(repair.RepairPlanningError):
         engine.preview(package.name, str(original))
     assert read_all(package) == members

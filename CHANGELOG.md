@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Speed up source-bend recovery by validating changed charts in memory during
+  preview, sharing bounded exact-content matching results between audio variants,
+  and reusing current scan reports with live signature guards during Apply.
+  Preserve completed previews across restarts and recheck previously proposed
+  repairs from their selected originals without repeating a folder-wide search.
+  Full candidate validation, archive integrity checks, backups and Undo remain.
+
 - Add folder-based batch Recover source bends in Song Tools. Recursively index
   original PSARCs, match all currently scanned packages (including those without
   bend warnings), review exact changes, and apply through the existing guarded

@@ -31,6 +31,8 @@ ROOT_FILES = (
     "source_archive.py",
     "source_chart.py",
     "source_recovery.py",
+    "source_recovery_state.py",
+    "source_result_cache.py",
     "source_folder_index.py",
     "source_recovery_batch.py",
     "source_recovery_routes.py",

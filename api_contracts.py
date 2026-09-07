@@ -285,6 +285,10 @@ class BatchApplyRequestContract(_RequestContract):
     batch_plan_id: str
 
 
+class SourceRecoveryReuseRequestContract(_RequestContract):
+    report: dict[str, Any]
+
+
 class BatchUndoApplyRequestContract(_RequestContract):
     undo_plan_id: str
 

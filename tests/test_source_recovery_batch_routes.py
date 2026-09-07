@@ -120,6 +120,30 @@ def test_new_scan_invalidates_previously_reviewed_source_scope(batch_client):
     assert all(read_all(package) == members for package in packages)
 
 
+def test_reuse_endpoint_issues_a_fresh_review_without_apply_or_a_new_library_scan(batch_client):
+    client, sources, packages, members = batch_client
+    scan(client)
+    scan_before = client.get(BASE + "/status").json()["last_scan"]
+    assert client.post(BATCH + "/preview", json={"source_folder": str(sources)}).status_code == 202
+    report = wait_idle(client, BATCH + "/status")
+    assert report["phase"] == "ready", report
+    old_id = report["preview"]["batch_plan_id"]
+    response = client.post(BATCH + "/reuse", json={"report": report})
+    assert response.status_code == 202, response.text
+    fresh = wait_idle(client, BATCH + "/status")
+    assert fresh["phase"] == "ready", fresh
+    assert fresh["preview"]["eligible_count"] == 2
+    assert fresh["preview"]["batch_plan_id"] != old_id
+    assert fresh["preview"]["provenance"] == "reused_selected_sources"
+    assert fresh["preview"]["validation_scope"] == "arrangements"
+    assert client.get(BASE + "/status").json()["last_scan"] == scan_before
+    assert fresh["result"] is None and all(read_all(package) == members for package in packages)
+    assert client.post(BATCH + "/reuse", json={"report": report, "apply": True}).status_code == 422
+    report["running"] = True
+    assert client.post(BATCH + "/reuse", json={"report": report}).status_code == 409
+    assert client.get(BATCH + "/status").json()["preview"] == fresh["preview"]
+
+
 def test_batch_api_rejects_forged_scope_and_missing_scan(batch_client):
     client, sources, packages, members = batch_client
     response = client.post(BATCH + "/preview", json={"source_folder": str(sources)})

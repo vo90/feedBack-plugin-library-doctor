@@ -16,6 +16,16 @@
       "responsibility": "Compose selected-source evidence with existing preview, transaction and Undo services.",
       "forbiddenImports": ["scanner", "fastapi"]
     },
+    "source_recovery_state.py": {
+      "maxLines": 350,
+      "responsibility": "Validate bounded saved source reviews and extract source choices without granting repair authority.",
+      "forbiddenImports": ["scanner", "repair", "fastapi", "os", "zipfile"]
+    },
+    "source_result_cache.py": {
+      "maxLines": 160,
+      "responsibility": "Cache bounded serialized exact chart results and validation reports without retaining repair approvals.",
+      "forbiddenImports": ["scanner", "repair", "fastapi", "zipfile"]
+    },
     "source_folder_index.py": {
       "maxLines": 300,
       "responsibility": "Discover bounded source-folder candidates using coarse topology and content hashes.",
@@ -52,7 +62,7 @@
       "forbiddenImports": ["scanner", "repair", "batch_repair"]
     },
     "scanner.py": {
-      "maxLines": 2350,
+      "maxLines": 2380,
       "responsibility": "Own playback-aware scan orchestration, cancellation, and exports.",
       "forbiddenImports": ["fastapi"]
     },
@@ -67,7 +77,7 @@
       "forbiddenImports": ["scanner", "validator", "fastapi"]
     },
     "repair.py": {
-      "maxLines": 7550,
+      "maxLines": 7600,
       "responsibility": "Plan, validate, commit, recover, and audit package mutations.",
       "forbiddenImports": ["fastapi", "scanner"]
     },

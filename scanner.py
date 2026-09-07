@@ -948,6 +948,36 @@ class LibraryScanner:
             f"{self._validator_version}:deep-audio",
         )
 
+    def source_recovery_report_for_signature(
+        self, package: str, expected_signature: str
+    ) -> dict | None:
+        """Read a current normal/deep report after the caller checks its signature.
+
+        This is cache-only: the batch checks live package identity before asking,
+        and supplies that same guard to the repair transaction before commit.
+        A normal scan may have reused a stronger Deep Audio report.
+        """
+        if not isinstance(expected_signature, str) or not expected_signature:
+            return None
+        with self._lock:
+            last_scan = self._cache.last_scan()
+            if (self._status.get("running") or not isinstance(last_scan, dict)
+                    or not last_scan.get("complete")
+                    or last_scan.get("validator_version") != self._validator_version):
+                return None
+            profiles = ("deep-audio",) if last_scan.get("deep_audio") else ("standard", "deep-audio")
+            for profile in profiles:
+                binding = self._cache.current_report_binding(package, f"{self._validator_version}:{profile}")
+                if not binding or binding.get("signature") != expected_signature:
+                    continue
+                report = binding.get("report")
+                if (isinstance(report, dict) and report.get("package") == package
+                        and report.get("validator_version") == self._validator_version
+                        and isinstance(report.get("features"), dict)
+                        and report["features"].get("deep_audio_checked") is (profile == "deep-audio")):
+                    return report
+            return None
+
     def _enrich_report(self, report: dict) -> None:
         """Add current catalog metadata to reports written by older rule sets."""
         findings = report.get("findings") if isinstance(report, dict) else None

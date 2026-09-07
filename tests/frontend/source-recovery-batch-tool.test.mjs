@@ -271,3 +271,85 @@ test('missing-source rows retain an individual original picker, while late detai
   response.resolve({ changes: [], change_count: 0, source_name: 'Late.psarc' }); await settle();
   assert.ok(!h.region.textContent.includes('Late.psarc'));
 });
+
+test('rechecking proposed repairs posts the completed report, follows its folder, and requires a fresh explicit Apply', async (t) => {
+  const original = { ...preview(), schema: 'library_doctor.source_recovery_batch.v1', mode: 'preview' };
+  original.preview.source_index = { complete: true, scope: 'folder' };
+  let remote = original;
+  const h = harness((call) => {
+    if (call.path.endsWith('/reuse')) return { ...idle, phase: 'indexing', mode: 'preview', running: true };
+    if (call.path.endsWith('/apply')) return { ...idle, phase: 'applying', running: true };
+    return remote;
+  });
+  t.after(h.cleanup); await settle();
+  assert.equal(h.calls.length, 1);
+  assert.match(h.region.textContent, /Preview validates the changed chart documents/);
+  assert.match(h.region.textContent, /Apply rechecks the inputs and validates the full package before saving/);
+  const input = h.document.querySelector('input');
+  input.value = 'C:/Different folder'; input.dispatchEvent(new h.dom.window.Event('input'));
+  h.find('Recheck proposed repairs').click(); await settle();
+  assert.equal(h.calls[1].path, '/source-recovery/batch/reuse');
+  assert.deepEqual(h.calls[1].body, { report: original });
+  assert.equal(input.value, original.preview.source_folder);
+  assert.equal(h.find('Apply reviewed recovery to 1 song'), undefined);
+  remote = { ...original, preview: { ...original.preview, source_folder: 'C:\\Originals', batch_plan_id: 'fresh-reviewed-plan',
+    provenance: 'reused_selected_sources', source_index: { complete: true, scope: 'selected_sources' } } };
+  await h.tick();
+  assert.equal(input.value, 'C:\\Originals');
+  assert.match(h.region.textContent, /Previously proposed repairs were rechecked against their selected originals/);
+  assert.match(h.region.textContent, /Use a folder preview to search for other recoverable songs/);
+  assert.doesNotMatch(h.region.textContent, /Only uniquely verified source matches are included/);
+  assert.equal(h.calls.filter((call) => call.path.endsWith('/apply')).length, 0);
+  h.find('Apply reviewed recovery to 1 song').click(); await settle();
+  assert.deepEqual(h.calls.at(-1).body, { batch_plan_id: 'fresh-reviewed-plan' });
+});
+
+test('a completed selected-source preview rechecks only proposed repairs and labels the retained skipped rows', async (t) => {
+  const ready = preview([entry(), { ...entry(1), status: 'unchanged', source_path: '', source_name: '', change_count: 0,
+    code: 'previously_unproposed_not_rechecked', reason: 'No previously proposed repair; this song was not rechecked.' },
+  { ...entry(2), status: 'blocked', source_path: '', source_name: '', change_count: 0,
+    code: 'previously_unproposed_not_rechecked', reason: 'Previously blocked; this song was not rechecked.' }]);
+  ready.preview.provenance = 'reused_selected_sources';
+  ready.preview.skipped_count = 2;
+  ready.preview.source_index = { complete: true, scope: 'selected_sources' };
+  const h = harness((call) => call.path.endsWith('/reuse')
+    ? { ...idle, phase: 'previewing', running: true } : ready);
+  t.after(h.cleanup); await settle();
+  assert.ok(h.find('Apply reviewed recovery to 1 song'));
+  assert.match(h.region.textContent, /3 packages in scope/);
+  assert.match(h.region.textContent, /Not rechecked: 2 songs without a previously proposed repair/);
+  assert.match(h.region.textContent, /Previously blocked; this song was not rechecked/);
+  h.find('Recheck proposed repairs').click(); await settle();
+  assert.deepEqual(h.calls.at(-1).body, { report: ready });
+  assert.equal(h.calls.filter((call) => call.path.endsWith('/apply')).length, 0);
+});
+
+test('incomplete indexes and previews without proposed repairs offer no recheck shortcut', async (t) => {
+  for (const kind of ['incomplete', 'blocked', 'unchanged', 'unmatched']) {
+    await t.test(kind, async (child) => {
+      const ready = preview([{ ...entry(), status: kind === 'blocked' ? 'blocked' : kind === 'incomplete' ? 'eligible' : 'unchanged',
+        change_count: kind === 'incomplete' ? 2 : 0,
+        source_path: kind === 'unmatched' ? '' : entry().source_path }]);
+      ready.preview.source_index = { complete: kind !== 'incomplete' };
+      const h = harness(() => ready); child.after(h.cleanup); await settle();
+      assert.equal(h.find('Recheck proposed repairs'), undefined);
+      assert.equal(h.calls.filter((call) => call.method === 'POST').length, 0);
+    });
+  }
+});
+
+test('selected-source read failures offer available next steps without promising folder-wide uniqueness', async (t) => {
+  const ready = preview([entry(), { ...entry(1), status: 'blocked', reason: 'Selected source is unavailable', change_count: 0 }]);
+  ready.preview.provenance = 'reused_selected_sources';
+  ready.preview.source_errors = [{ relative_path: 'Original.psarc', message: 'Cannot read this file' }];
+  ready.preview.source_index = { scope: 'selected_sources', complete: false, error_count: 1 };
+  const h = harness(() => ready); t.after(h.cleanup); await settle();
+  assert.match(h.region.textContent, /Some selected originals could not be checked/);
+  assert.match(h.region.textContent, /Resolve these paths and start a folder preview, or choose an original for each affected song/);
+  assert.match(h.region.textContent, /Original.psarc: Cannot read this file/);
+  assert.doesNotMatch(h.region.textContent, /unique matches can be verified/);
+  assert.equal(h.find('Recheck proposed repairs'), undefined);
+  assert.ok(h.find('Apply reviewed recovery to 1 song'));
+  assert.ok(h.find('Choose an original for this song'));
+  assert.equal(h.calls.filter((call) => call.method === 'POST').length, 0);
+});

@@ -25,7 +25,7 @@ def test_source_preview_apply_and_idempotent_replay_use_existing_receipts(tmp_pa
         body = {"package": package.name, "source_path": str(original)}
         preview = client.post("/api/plugins/library_doctor/source-recovery/preview", json=body)
         assert preview.status_code == 200, preview.text
-        assert preview.json()["candidate_validated"]
+        assert preview.json()["chart_validated"]
         payload = {**body, "plan_id": preview.json()["plan_id"], "request_id": "source-test-apply-1"}
         applied = client.post("/api/plugins/library_doctor/source-recovery/apply", json=payload)
         assert applied.status_code == 200, applied.text

@@ -109,7 +109,7 @@ def test_real_package_preview_apply_durable_result_and_exact_batch_undo(tmp_path
     plan = preview(manager, scanner, source, package)
     assert plan["eligible_count"] == 1 and plan["change_count"] == 6
     assert plan["scope_package_count"] == 1
-    assert manager.preview_details(package.name)["candidate_validated"]
+    assert manager.preview_details(package.name)["chart_validated"]
     assert read_all(package) == members
     manager.start_apply(plan["batch_plan_id"])
     result = finish(manager, "completed")["result"]

@@ -73,7 +73,11 @@ export function createSourceRecoveryBatchTool({
     if (pending || !active || !isCurrent()) return;
     const token = visit;
     const epoch = ++requestEpoch;
-    if (path === 'preview') submittedFolder = body.source_folder;
+    const previewRequest = path === 'preview' || path === 'reuse';
+    if (previewRequest) {
+      submittedFolder = path === 'reuse' ? body.report.preview.source_folder : body.source_folder;
+      if (path === 'reuse') input.value = submittedFolder;
+    }
     pending = true;
     clearTimer();
     notice.replaceChildren();
@@ -87,7 +91,7 @@ export function createSourceRecoveryBatchTool({
       if (!alive(token) || epoch !== requestEpoch) return;
       accept(next);
     } catch (error) {
-      if (path === 'preview') submittedFolder = null;
+      if (previewRequest) submittedFolder = null;
       if (alive(token) && epoch === requestEpoch) showError(error);
     } finally {
       pending = false;
@@ -135,7 +139,9 @@ export function createSourceRecoveryBatchTool({
     if (!errorCount && !linkCount && !index.limit_reached) return;
     const issues = make('details', 'lh-batch-details');
     issues.appendChild(make('summary', '', `Source folder issues: ${count(errorCount)} read errors; ${count(linkCount)} skipped links`));
-    issues.appendChild(make('p', 'lh-repair-warning', 'The source folder could not be fully checked. Resolve these paths and preview again so unique matches can be verified.'));
+    issues.appendChild(make('p', 'lh-repair-warning', preview.provenance === 'reused_selected_sources'
+      ? 'Some selected originals could not be checked. Resolve these paths and start a folder preview, or choose an original for each affected song.'
+      : 'The source folder could not be fully checked. Resolve these paths and preview again so unique matches can be verified.'));
     for (const error of errors.slice(0, SOURCE_ISSUE_LIMIT)) {
       issues.appendChild(make('p', 'lh-repair-warning', typeof error === 'string' ? error : `${error.relative_path || error.path || error.source || ''}: ${error.message || error.reason || error.code || 'Source could not be read'}`));
     }
@@ -219,7 +225,7 @@ export function createSourceRecoveryBatchTool({
       const visible = rows.filter((row) => (filter === 'all' || rowState(row) === filter)
         && [row.title, row.artist, row.package, row.source_name, row.source_path].some((v) => String(v || '').toLowerCase().includes(needle)));
       page = Math.min(page, Math.max(0, Math.ceil(visible.length / PAGE_SIZE) - 1));
-      listRegion.appendChild(make('p', 'lh-outcome-result-count', `${count(visible.length)} matching songs. Each row identifies the stored package and verified original source.`));
+      listRegion.appendChild(make('p', 'lh-outcome-result-count', `${count(visible.length)} matching songs. Each row identifies the stored package and its source review result.`));
       const list = make('ul', 'lh-batch-list lh-batch-list-scroll');
       for (const row of visible.slice(page * PAGE_SIZE, (page + 1) * PAGE_SIZE)) {
         const item = make('li');
@@ -267,21 +273,35 @@ export function createSourceRecoveryBatchTool({
     lastViewKey = viewKey;
     content.replaceChildren();
     if (busy) return;
-    const preview = status?.preview;
+      const preview = status?.preview;
     if (preview && status.phase === 'ready') {
       const card = make('div', 'lh-batch-card');
       card.appendChild(make('h4', '', 'Review source bend recovery'));
-      card.appendChild(make('p', '', `${count(preview.scope_package_count)} packages checked: ${count(preview.eligible_count)} eligible, ${count(preview.blocked_count)} blocked or unavailable, ${count(preview.unchanged_count)} unchanged. ${count(preview.change_count)} recoverable bend trajectories.`));
+      card.appendChild(make('p', '', `${count(preview.scope_package_count)} packages in scope: ${count(preview.eligible_count)} eligible, ${count(preview.blocked_count)} blocked or unavailable, ${count(preview.unchanged_count)} unchanged. ${count(preview.change_count)} recoverable bend trajectories.`));
       card.appendChild(make('p', 'lh-song-tool-path', `Source folder: ${preview.source_folder}`));
-      card.appendChild(make('p', '', 'Only uniquely verified source matches are included. Review the song rows and exact changes before applying. Excluded bends and unavailable songs stay unchanged. Audio, including MinusMix tracks, is preserved.'));
+      card.appendChild(make('p', '', preview.provenance === 'reused_selected_sources'
+        ? 'Previously proposed repairs were rechecked against their selected originals. Use a folder preview to search for other recoverable songs.'
+        : 'Only uniquely verified source matches are included. Review the song rows and exact changes before applying.'));
+      if (preview.skipped_count > 0) card.appendChild(make('p', '', `Not rechecked: ${songs(preview.skipped_count)} without a previously proposed repair.`));
+      card.appendChild(make('p', '', 'Preview validates the changed chart documents. Apply rechecks the inputs and validates the full package before saving. Excluded bends and unavailable songs stay unchanged. Audio, including MinusMix tracks, is preserved.'));
       renderSourceIssues(card, preview);
       reviewRows(card, preview.packages || [], 'preview');
       if (!currentPlan()) card.appendChild(make('p', 'lh-repair-warning', 'The folder or a reviewed song changed. Preview again before applying.'));
+      const reviewActions = make('div', 'lh-repair-buttons');
+      if (preview.eligible_count > 0 && preview.source_index?.complete === true
+          && preview.packages?.some((row) => row.status === 'eligible' && row.source_path)) {
+        reviewActions.appendChild(button('Recheck proposed repairs', () => {
+          if (status?.phase !== 'ready' || status.running) return;
+          page = 0; query = ''; filter = 'all';
+          post('reuse', { report: status });
+        }));
+      }
       if (preview.eligible_count > 0 && preview.batch_plan_id && currentPlan()) {
-        card.appendChild(button(`Apply reviewed recovery to ${songs(preview.eligible_count)}`, () => {
+        reviewActions.appendChild(button(`Apply reviewed recovery to ${songs(preview.eligible_count)}`, () => {
           if (status?.phase === 'ready' && currentPlan() && !status.running) post('apply', { batch_plan_id: preview.batch_plan_id });
         }, true));
       }
+      card.appendChild(reviewActions);
       content.appendChild(card);
     }
     const result = status?.result || status?.last_result;

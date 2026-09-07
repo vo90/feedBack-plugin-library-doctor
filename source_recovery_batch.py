@@ -1,6 +1,7 @@
 """Folder-source orchestration; exact matching and all writes stay in recovery services."""
 import copy
 import hashlib
+import importlib.util
 import json
 import os
 import tempfile
@@ -12,6 +13,11 @@ from pathlib import Path
 SCHEMA = "library_doctor.source_recovery_batch.v1"
 MAX_PACKAGES = 10000
 MAX_STATE_BYTES = 32 * 1024 * 1024
+
+_state_spec = importlib.util.spec_from_file_location(
+    "_doctor_source_recovery_state", Path(__file__).with_name("source_recovery_state.py"))
+_state_codec = importlib.util.module_from_spec(_state_spec)
+_state_spec.loader.exec_module(_state_codec)
 
 
 class SourceRecoveryBatchError(ValueError):
@@ -70,6 +76,11 @@ class SourceRecoveryBatchManager:
                    "done": self._state["done"], "total": self._state["total"],
                    "active": self._active, "result": self._state["result"],
                    "last_result": self._state["last_result"]}
+        if self._state["phase"] == "ready" and not self._state["running"] and not self._active:
+            payload["ready_preview"] = _state_codec.pack_ready(
+                self._root, self._snapshot, self._bindings, self._state["preview"],
+                catalog_version=self.recovery.module.REPAIR_CATALOG_VERSION,
+                validator_version=self.recovery.repair._validator_version)
         data = json.dumps(payload, ensure_ascii=False, allow_nan=False).encode("utf-8")
         if len(data) > MAX_STATE_BYTES:
             raise SourceRecoveryBatchError("checkpoint_too_large", "The batch result exceeds its storage bound.")
@@ -100,6 +111,21 @@ class SourceRecoveryBatchManager:
             self._state["result"] = saved.get("result")
             self._root = saved.get("root")
             if not saved.get("running") and not saved.get("active"):
+                if saved.get("ready_preview") is not None:
+                    try:
+                        ready = _state_codec.unpack_ready(saved["ready_preview"],
+                            catalog_version=self.recovery.module.REPAIR_CATALOG_VERSION,
+                            validator_version=self.recovery.repair._validator_version)
+                        scope_matches = getattr(self.scanner, "source_recovery_scope_matches", None)
+                        if self._root_key() != ready["root"] or (scope_matches and not scope_matches(ready["snapshot"])):
+                            raise ValueError("The saved preview's library scan changed.")
+                        self._root, self._snapshot, self._bindings = ready["root"], ready["snapshot"], ready["bindings"]
+                        self._state.update(phase="ready", mode="preview", preview=ready["preview"],
+                            total=ready["preview"]["scope_package_count"], done=ready["preview"]["scope_package_count"],
+                            message="Saved source preview restored. Inputs are rechecked before saving repairs.")
+                    except (ValueError, TypeError, KeyError, AttributeError) as exc:
+                        self._state.update(phase="stale", message=f"Saved preview requires a new review: {exc}")
+                        self.log.warning("Saved source preview was not restored: %s", exc)
                 return
             result = saved.get("result") or {"outcomes": [], "mode": saved.get("mode"),
                                               "root": self._root}
@@ -215,6 +241,7 @@ class SourceRecoveryBatchManager:
                 return False
             self._bindings, self._undo_bindings = {}, {}
             self._state.update(phase="stale", preview=None, undo_preview=None, message=str(reason))
+            self._save()
             return True
 
     def _package_current(self, row):
@@ -228,7 +255,7 @@ class SourceRecoveryBatchManager:
                 "change_count": 0, "excluded_count": 0, "member_count": 0,
                 "status": "blocked", "reason": "No exact original source match was found."}
 
-    def start_preview(self, snapshot, source_folder):
+    def start_preview(self, snapshot, source_folder, *, reuse_report=None):
         with self._lock:
             if self._state["running"]:
                 raise SourceRecoveryBatchError("batch_busy", "Wait for the current source batch to finish.")
@@ -243,19 +270,23 @@ class SourceRecoveryBatchManager:
             root = self._root_key()
             if root is None:
                 raise SourceRecoveryBatchError("invalid_scope", "Select and scan a song folder first.")
+            reuse = _state_codec.parse_reuse_report(reuse_report, snapshot) if reuse_report is not None else None
+            if reuse is not None:
+                source_folder = reuse["source_folder"]
             self._root, self._snapshot = root, copy.deepcopy(snapshot)
             self._bindings, self._undo_bindings = {}, {}
             self._state.update(preview=None, undo_preview=None)
-            return self._launch("preview", "indexing", lambda: self._preview(str(source_folder)), len(rows))
+            return self._launch("preview", "indexing", lambda: self._preview(str(source_folder), reuse=reuse), len(rows))
 
-    def _preview(self, source_folder):
+    def _preview(self, source_folder, *, reuse=None):
         index = self.index_factory()
         def progress(item):
             if not self._wait("indexing"):
                 return False
             self._progress("indexing", item.get("current"), item.get("done", 0), item.get("total", 0))
             return True
-        summary = index.build(source_folder, cancel_event=self._cancel, on_progress=progress)
+        options = {"selected_paths": sorted(set(reuse["selections"].values()))} if reuse else {}
+        summary = index.build(source_folder, cancel_event=self._cancel, on_progress=progress, **options)
         rows, work = [], []
         candidates = self._snapshot["candidates"]
         for number, item in enumerate(candidates):
@@ -264,6 +295,12 @@ class SourceRecoveryBatchManager:
             self._progress("previewing", item["package"], number, len(candidates))
             row = self._row(item)
             rows.append(row)
+            skipped = reuse["skipped"].get(item["package"]) if reuse else None
+            if skipped:
+                row.update(status=skipped["status"], code="previously_unproposed_not_rechecked",
+                    reason="Previous preview proposed no repair; not rechecked." if skipped["status"] == "unchanged"
+                    else "Not rechecked. Previous preview: " + (skipped["reason"] or "No verified source repair was available."))
+                continue  # No current file/status claim and no binding or mutation offered.
             try:
                 if not self._package_current(item):
                     raise SourceRecoveryBatchError("package_changed", "The package changed after the scan. Scan again.")
@@ -271,10 +308,28 @@ class SourceRecoveryBatchManager:
                 if not inspected["has_bend_potential"]:
                     row.update(status="unchanged", reason="No stored bend value or curve needs source inspection.")
                     continue
+                if reuse and item["package"] not in reuse["selections"]:
+                    row.update(code="source_choice_missing", reason="No previous source choice is available. Use a folder preview to search for this song.")
+                    continue
                 self.recovery.assert_available_for_apply(item["package"])
-                if not summary.get("complete"):
+                if not summary.get("complete") and not reuse:
                     raise SourceRecoveryBatchError("source_scope_incomplete", "The source folder could not be completely indexed. Resolve the listed source errors before claiming a unique match.")
                 sources = index.candidates(inspected["documents"])
+                if reuse:
+                    try:
+                        selected = Path(reuse["selections"][item["package"]]).resolve(strict=True)
+                        selected.relative_to(Path(summary["folder"]))
+                    except (OSError, ValueError) as exc:
+                        raise SourceRecoveryBatchError("selected_source_unavailable",
+                            "The previously selected source is missing or outside its reviewed folder.") from exc
+                    sources = [{**source, "path": str(selected),
+                                "relative_path": selected.relative_to(Path(summary["folder"])).as_posix()}
+                               for source in sources if selected in
+                               {Path(path).resolve(strict=True) for path in (source["path"], *source["duplicate_paths"])}]
+                    if not sources:
+                        row.update(code="selected_source_unavailable", reason=
+                            "The selected source could not be indexed or no longer matches this song. Review its source error or select another original.")
+                        continue
                 # Keep only light identities; decoded charts and package JSON are not retained.
                 work.append((item, row, sources))
             except Exception as exc:
@@ -319,21 +374,28 @@ class SourceRecoveryBatchManager:
                 row.update(source_name=plan["source_name"], source_path=source["path"],
                            change_count=plan["change_count"], excluded_count=plan.get("excluded_count", 0),
                            member_count=plan["member_count"], status="eligible" if plan["available"] else "unchanged",
-                           reason="Unique exact source match; validated package candidate." if plan["available"] else "No source-proven changes are available; existing edited curves are preserved.")
+                           reason=("Selected source matched; proposed chart changes validated." if reuse else
+                                   "Unique exact source match; proposed chart changes validated.") if plan["available"] else
+                                  "No source-proven changes are available; existing edited curves are preserved.")
                 self._bindings[item["package"]] = {**item, "source_path": source["path"],
                     "source_sha256": source["sha256"], "source_members": source.get("members"),
-                    "plan_id": plan["plan_id"], "available": plan["available"]}
+                    "plan_id": plan["plan_id"], "available": plan["available"], "source_indexed": True}
         with self._lock:
             if self._cancel.is_set():
                 self._bindings = {}
                 self._state.update(phase="cancelled", preview=None, message="Preview cancelled. No song files changed.")
                 return
             preview = {"source_folder": summary.get("folder", source_folder),
+                "provenance": "reused_selected_sources" if reuse else "folder_search",
+                "validation_scope": "arrangements",
+                "skipped_count": sum(r.get("code") == "previously_unproposed_not_rechecked" for r in rows),
                 "scope_package_count": len(candidates), "eligible_count": sum(r["status"] == "eligible" for r in rows),
                 "blocked_count": sum(r["status"] == "blocked" for r in rows),
                 "unchanged_count": sum(r["status"] == "unchanged" for r in rows),
                 "change_count": sum(r["change_count"] for r in rows if r["status"] == "eligible"),
                 "packages": rows, "source_errors": summary.get("errors", []), "source_index": summary}
+            if reuse:
+                preview["prior_report_digest"] = reuse["report_digest"]
             preview["batch_plan_id"] = _digest({"snapshot": self._snapshot, "root": self._root,
                                                 "bindings": self._bindings, "preview": preview})
             self._state.update(phase="ready", done=len(candidates), total=len(candidates), preview=preview,
@@ -462,8 +524,12 @@ class SourceRecoveryBatchManager:
                     raise SourceRecoveryBatchError("package_changed", "The package changed after preview. Scan and preview it again.")
                 self.recovery.assert_available_for_apply(row["package"])
                 active = self._begin_mutation(row, binding["plan_id"])
+                report_lookup = getattr(self.scanner, "source_recovery_report_for_signature", None)
+                verified = report_lookup(row["package"], binding["scan_signature"]) if report_lookup else None
                 receipt = self.recovery.apply(row["package"], binding["source_path"], binding["plan_id"],
                     source_members=binding.get("source_members"),
+                    verified_before_report=verified,
+                    source_guard=lambda: self._package_current(binding),
                     operation_guard=lambda: not self._cancel.is_set() and not self.scanner.playback_active()
                         and self._package_current(binding),
                     request_id=active["request_id"], request_operation=active["operation"],

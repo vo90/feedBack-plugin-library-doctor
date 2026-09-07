@@ -1,12 +1,24 @@
 """Selected-source bend recovery composed with Doctor's existing transaction engine."""
 import hashlib
+import importlib.util
 import math
+import sys
 import time
 from collections import OrderedDict
 from pathlib import Path
 from threading import RLock
 
 RULE_CODE = "source.bend-recovery"
+
+
+def _new_result_cache():
+    name = __name__ + "_results"
+    if name not in sys.modules:
+        spec = importlib.util.spec_from_file_location(name, Path(__file__).with_name("source_result_cache.py"))
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        spec.loader.exec_module(module)
+    return sys.modules[name].SourceResultCache()
 
 
 class SourceRecovery:
@@ -18,6 +30,7 @@ class SourceRecovery:
         self.error = repair_module.RepairPlanningError
         self._source_cache = OrderedDict()
         self._source_cache_lock = RLock()
+        self._result_cache = _new_result_cache()
 
     def read_source_charts(self, selected_source, *, source_members=None):
         """Share at most two decoded archives, while checking their current bytes."""
@@ -113,7 +126,7 @@ class SourceRecovery:
             candidates, invalid_curves = [], []
             for entry in source["charts"]:
                 try:
-                    result = self.chart.recovery_patch(document, entry["song"])
+                    result = self._result_cache.patch(self.chart, document, evidence[member], source["sha256"], entry)
                 except self.chart.SourceBendError as exc:
                     # Exact chart correspondence was established before bend
                     # interpretation. Keep this candidate even if another
@@ -169,23 +182,32 @@ class SourceRecovery:
         except (OSError, ValueError, self.error):
             return False
 
+    def _validate_arrangements(self, package_path, plan):
+        service, module = self.repair, self.module
+        if service._validate_reviewed_arrangement is None:
+            raise self.error("reviewed_validation_unavailable",
+                "Arrangement validation is unavailable. Reload Library Doctor before previewing source recovery.")
+        manifest = service._read_repair_manifest(package_path)
+        for member in plan["_members"]:
+            before = self._result_cache.reports(service, module, member["raw"], manifest, member["member_path"])
+            after = self._result_cache.reports(service, module, member["replacement"], manifest, member["member_path"])
+            # Compare each declared arrangement context separately: an improvement
+            # elsewhere must not conceal an increased finding in this chart.
+            for original, proposed in zip(before, after, strict=True):
+                service._verify_reviewed_validation(original, proposed)
+
     def preview(self, package, selected_source, *, source_members=None):
         service = self.repair
         with service._lock:
             _, path, name = service._resolve_package(package)
             plan = self._plan(path, name, selected_source, source_members=source_members)
             if plan["available"]:
-                replacements = {m["member_path"]: m["replacement"] for m in plan["_members"]}
-                before = service._validate_feedpak(path, name, deep_audio=False)
-                candidate, cleanup = service._candidate(path, replacements)
-                try:
-                    after = service._validate_feedpak(candidate, name, deep_audio=False)
-                    service._verify_reviewed_validation(before, after)
-                    if not self._guard(path, plan):
-                        raise self.error("source_changed", "A source input changed during preview. Inspect again.")
-                finally:
-                    cleanup()
-                plan["candidate_validated"] = True
+                self._validate_arrangements(path, plan)
+                if not self._guard(path, plan):
+                    raise self.error("source_changed", "A source input changed during preview. Inspect again.")
+                # Full package validation and candidate construction remain in Apply.
+                plan["chart_validated"] = True
+                plan["validation_scope"] = "arrangements"
             return service._public_plan(plan)
 
     def apply(self, package, selected_source, plan_id, *, operation_guard=None, source_members=None, **options):

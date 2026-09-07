@@ -188,8 +188,9 @@ exact proposed bend fields, then use **Apply reviewed source recovery**. A
 missing curve is recovered only from matching authored source points; a scalar
 bend alone is insufficient. Existing or ambiguous curves and related copies are
 excluded. Unmatched arrangements or malformed declarations block the package.
-The complete candidate is validated before the change, audio is preserved, and
-the original chart bytes remain available through **Undo**.
+Preview validates the changed chart documents in memory. Apply validates the
+complete candidate before saving, preserves audio, and retains the original
+chart bytes through **Undo**.
 
 For many songs, use **Recover source bends across the scanned library** at the top of
 **Song tools**:
@@ -214,6 +215,20 @@ listed source-folder problems are resolved.
 Source uniqueness is established during the preview. Apply rechecks the chosen
 source's complete file hash and the reviewed package data; it does not search
 again for files added to the source folder after you approved the preview.
+
+Completed previews now survive a restart when the library scan and validation
+version still match. **Recheck proposed repairs** reuses the selected originals
+for songs previously eligible for repair. It recalculates their changes and
+requires a fresh review, without searching the source folder again. Previously
+unchanged or blocked songs are marked as not rechecked. Use a full folder
+preview to search for new matches. A missing selected original blocks that
+song while other verified selections remain available; this recheck does not
+renew the earlier folder-wide uniqueness check.
+
+Identical chart content in full-audio and No Guitar packages shares bounded
+matching and validation work. Apply can reuse the completed scan's original
+report when its version and live package signature still match. Full candidate
+validation, archive integrity checks, backups and Undo remain required.
 
 The batch changes recoverable bend fields only. It preserves song audio,
 including MinusMix/No Guitar versions, and does not reconvert entire PSARCs.

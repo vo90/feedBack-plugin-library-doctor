@@ -90,7 +90,7 @@ export function createSourceRecoveryTool({ actions, document, make, request, isC
         pager.append(previous, next);
         result.append(rows, pager);
         renderPage();
-        result.appendChild(make('p', '', 'The complete candidate passed validation. Applying saves the original changed chart files for exact Undo; audio and other song data are preserved.'));
+        result.appendChild(make('p', '', 'The changed chart documents passed validation. Apply rechecks the inputs and validates the full package before saving. Original changed chart files are saved for exact Undo; audio and other song data are preserved.'));
         const apply = make('button', 'lh-button lh-button-primary', 'Apply reviewed source recovery');
         apply.type = 'button';
         const requestId = `source-recovery-${Date.now()}`;

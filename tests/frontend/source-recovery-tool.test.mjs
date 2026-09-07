@@ -27,7 +27,7 @@ function harness(plan) {
   return { dom, document, region, calls, receipts };
 }
 
-const plan = { available: true, candidate_validated: true, plan_id: 'a'.repeat(64),
+const plan = { available: true, chart_validated: true, validation_scope: 'arrangements', plan_id: 'a'.repeat(64),
   change_count: 1, member_count: 1, source_name: 'Original.psarc', blockers: [],
   changes: [{ member_path: 'lead.json', path: ['notes', 0], time: 10, string: 1, fret: 7,
     before: { bn: 2 }, after: { bn: 2, bnv: [{ t: 0, v: 0 }, { t: .4, v: 2 }] }, adjustments: [] }] };
@@ -39,6 +39,9 @@ test('source recovery presents exact changes and applies only after explicit rev
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.equal(h.calls.length, 1);
   assert.match(h.region.textContent, /Before:.*After:/s);
+  assert.match(h.region.textContent, /changed chart documents passed validation/);
+  assert.match(h.region.textContent, /Apply rechecks the inputs and validates the full package before saving/);
+  assert.doesNotMatch(h.region.textContent, /complete candidate passed validation/);
   const apply = [...h.document.querySelectorAll('button')].find((b) => b.textContent === 'Apply reviewed source recovery');
   apply.click();
   await new Promise((resolve) => setTimeout(resolve, 0));

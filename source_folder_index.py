@@ -73,7 +73,7 @@ class SourceFolderIndex:
     def summary(self):
         return copy.deepcopy(self._summary)
 
-    def build(self, folder, cancel_event=None, on_progress=None):
+    def build(self, folder, cancel_event=None, on_progress=None, *, selected_paths=None):
         self._groups, self._by_key, self._members = {}, {}, {}
         self._summary = None
         selected = Path(folder).expanduser()
@@ -86,6 +86,7 @@ class SourceFolderIndex:
         root = selected.resolve(strict=True)
         summary = self._summary = {
             "folder": str(root), "complete": False, "cancelled": False,
+            "scope": "selected_sources" if selected_paths is not None else "folder",
             "archive_count": 0, "indexed_archive_count": 0, "unique_archive_count": 0,
             "duplicate_archive_count": 0, "chart_count": 0, "errors": [], "error_count": 0,
             "skipped_links": [], "skipped_link_count": 0, "limit_reached": False,
@@ -123,6 +124,17 @@ class SourceFolderIndex:
                 summary["skipped_links_truncated"] = True
 
         paths, pending, visited = [], [(root, 0)], 0
+        if selected_paths is not None:
+            if not isinstance(selected_paths, list) or len(selected_paths) > MAX_ARCHIVES:
+                raise ValueError("Reuse requires at most 10,000 selected source paths.")
+            pending = []  # Recheck the chosen sources; never search the folder again.
+            for value in selected_paths:
+                if cancelled():
+                    break
+                path = Path(value).absolute()
+                paths.append(path)
+            paths = list(dict.fromkeys(paths))
+            summary["archive_count"] = len(paths)
         while pending and not cancelled() and not summary["limit_reached"]:
             directory, depth = pending.pop()
             relative = directory.relative_to(root).as_posix()
@@ -162,13 +174,18 @@ class SourceFolderIndex:
             except (OSError, ValueError) as exc:
                 error(relative, exc)
 
-        for path in sorted(paths, key=lambda p: p.relative_to(root).as_posix()):
+        for path in sorted(paths, key=lambda p: p.as_posix()):
             if cancelled() or summary["limit_reached"]:
                 break
-            relative = path.relative_to(root).as_posix()
+            try:
+                relative = path.relative_to(root).as_posix()
+            except ValueError:
+                relative = str(path)
             if not progress("indexing", relative):
                 break
             try:
+                if path.suffix.lower() != ".psarc":
+                    raise ValueError("A selected source must be an original PSARC.")
                 self._check_path(path, root)
                 member_keys, chart_count = {}, 0
                 def visit(source):
@@ -238,6 +255,9 @@ class SourceFolderIndex:
 
     @staticmethod
     def _check_path(path, root):
+        path.relative_to(root)  # Reject escapes before inspecting an outside path.
+        if ".." in path.parts:
+            raise ValueError("A selected source must stay inside its reviewed folder.")
         for parent in (path, *path.parents):
             if _linked(parent):
                 raise ValueError("A linked archive or parent requires a new folder review.")

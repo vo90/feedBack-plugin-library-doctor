@@ -31,6 +31,12 @@ def register(router, *, manager, scanner, contracts, errors, error_type):
     def source_batch_details(package: str = Query(min_length=1, max_length=4096)):
         return invoke(manager.preview_details, package)
 
+    @router.post("/source-recovery/batch/reuse", status_code=202)
+    def source_batch_reuse(payload: contracts.SourceRecoveryReuseRequestContract):
+        def start():
+            return manager.start_preview(scanner.source_recovery_scope_snapshot(), "", reuse_report=payload.report)
+        return invoke(start)
+
     @router.post("/source-recovery/batch/apply", status_code=202)
     def source_batch_apply(payload: contracts.BatchApplyRequestContract):
         return invoke(manager.start_apply, payload.batch_plan_id)
