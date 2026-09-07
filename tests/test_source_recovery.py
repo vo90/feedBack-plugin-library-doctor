@@ -101,11 +101,11 @@ def build(tmp_path, *, archive=True):
     repair = load("repair")
     source = song()
     original = tmp_path / "Original.psarc"
-    original.write_bytes(b"immutable selected source")
+    original.write_bytes(b"immutable selected source" * 2)
     def digest(path):
         return hashlib.sha256(Path(path).read_bytes()).hexdigest()
     entries = [{"member": "songs/bin/generic/lead.sng", "sha256": "1" * 64, "song": source}]
-    adapter = NS(read_source_charts=lambda value: {"path": Path(value), "sha256": digest(value), "charts": entries}, source_hash=digest)
+    adapter = NS(read_source_charts=lambda value, **_kwargs: {"path": Path(value), "sha256": digest(value), "charts": entries}, source_hash=digest)
     library = tmp_path / "library"
     library.mkdir()
     package = library / "Song.feedpak"

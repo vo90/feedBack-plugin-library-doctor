@@ -75,6 +75,15 @@ def setup(app, context):
         repair=repair_service, repair_module=repair_module,
         archive=load_sibling("source_archive"), chart=load_sibling("source_chart"),
     )
+    source_batch_module = load_sibling("source_recovery_batch")
+    source_index_module = load_sibling("source_folder_index")
+    source_batch = source_batch_module.SourceRecoveryBatchManager(
+        config_dir=Path(context["config_dir"]), scanner=scanner,
+        recovery=source_recovery,
+        index_factory=lambda: source_index_module.SourceFolderIndex(
+            archive=load_sibling("source_archive"), chart=load_sibling("source_chart"),
+        ), log=log,
+    )
     batch_manager = batch_module.BatchRepairManager(
         config_dir=Path(context["config_dir"]),
         scanner=scanner,
@@ -103,6 +112,10 @@ def setup(app, context):
     repair_error = errors.repair_detail
     receipt_error = errors.receipt_detail
     _audio_response = route_support.audio_response
+    load_sibling("source_recovery_routes").register(
+        router, manager=source_batch, scanner=scanner, contracts=contracts,
+        errors=errors, error_type=source_batch_module.SourceRecoveryBatchError,
+    )
 
     @router.get("/status", response_model=contracts.StatusContract)
     def get_status(
@@ -119,6 +132,7 @@ def setup(app, context):
                 next_action="correct_request",
             ) from exc
         status["batch"] = batch_manager.status()
+        status["source_batch"] = source_batch.status()
         return status
 
     @router.put("/playback")
@@ -145,6 +159,9 @@ def setup(app, context):
             if started:
                 batch_manager.invalidate_ready(
                     "A new scan started. Review the batch again after it finishes."
+                )
+                source_batch.invalidate_ready(
+                    "A new scan started. Preview source recovery again after it finishes."
                 )
         except ValueError as exc:
             raise http_error(

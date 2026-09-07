@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Add folder-based batch Recover source bends in Song Tools. Recursively index
+  original PSARCs, match all currently scanned packages (including those without
+  bend warnings), review exact changes, and apply through the existing guarded
+  repair engine. Keep ambiguous or unavailable sources visible, preserve audio
+  and existing edited curves, support cancellation and playback pauses, retain
+  interrupted-job results, and offer a separately previewed batch Undo.
+
 - Add Recover source bends in Song Tools. Match an explicitly selected original
   PSARC against complete arrangement/difficulty topology, preview exact source
   recovery, preserve excluded existing curves, and reuse complete-candidate

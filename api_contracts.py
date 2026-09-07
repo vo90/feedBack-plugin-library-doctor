@@ -33,6 +33,7 @@ class StatusContract(_ResponseContract):
     scan_current: bool | None = None
     repairing: bool = False
     batch: dict[str, Any] | None = None
+    source_batch: dict[str, Any] | None = None
     last_scan: dict[str, Any] | None = None
     review_difficulty_scope: Literal["full_only", "all_authored"] | None = None
 
@@ -152,6 +153,10 @@ class RepairPreviewRequestContract(_RequestContract):
     package: str
     rule_code: str
     start_seconds: float | None = Field(default=None, ge=0)
+
+
+class SourceRecoveryBatchPreviewRequestContract(_RequestContract):
+    source_folder: str = Field(min_length=1, max_length=4096)
 
 
 class SourceRecoveryPreviewRequestContract(_RequestContract):

@@ -1,4 +1,5 @@
 import { createSourceRecoveryTool } from './source-recovery-tool.js';
+import { createSourceRecoveryBatchTool } from './source-recovery-batch-tool.js';
 
 export function createSongToolsController({
   actions: actionRegistry,
@@ -20,6 +21,10 @@ export function createSongToolsController({
   const el = new Proxy({}, {
     get(_target, key) { return getElements()?.[key]; },
   });
+  const sourceBatch = createSourceRecoveryBatchTool({
+    actions: actionRegistry, document, make, request,
+    isCurrent: () => state.active && state.workspace === 'tools',
+  });
 
   function currentPreviewUrl(packageName) {
     return `${apiRoot}/repair/media/current?package=${encodeURIComponent(packageName)}&v=${Date.now()}`;
@@ -34,8 +39,10 @@ export function createSongToolsController({
       button.setAttribute('aria-pressed', String(button.dataset.workspace === next));
     });
     if (next === 'tools') {
+      sourceBatch.mount(document.getElementById('lh-source-recovery-batch'));
+      sourceBatch.resume();
       loadSongTools();
-    }
+    } else sourceBatch.pause();
   }
 
   function songPackage(song) {
@@ -391,6 +398,7 @@ export function createSongToolsController({
 
 
   return {
+    leave: sourceBatch.pause,
     closeSongToolSelection,
     loadSongTools,
     refreshSelectedSongTool,

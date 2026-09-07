@@ -2,8 +2,8 @@
   "schema": "library_doctor.architecture_contract.v1",
   "modules": {
     "source_archive.py": {
-      "maxLines": 150,
-      "responsibility": "Read bounded original PSARC chart members with explicit dependency diagnostics.",
+      "maxLines": 190,
+      "responsibility": "Stream bounded original PSARC chart metadata and read selected members with explicit dependency diagnostics.",
       "forbiddenImports": ["repair", "scanner", "fastapi"]
     },
     "source_chart.py": {
@@ -12,9 +12,24 @@
       "forbiddenImports": ["repair", "scanner", "fastapi"]
     },
     "source_recovery.py": {
-      "maxLines": 175,
+      "maxLines": 260,
       "responsibility": "Compose selected-source evidence with existing preview, transaction and Undo services.",
       "forbiddenImports": ["scanner", "fastapi"]
+    },
+    "source_folder_index.py": {
+      "maxLines": 300,
+      "responsibility": "Discover bounded source-folder candidates using coarse topology and content hashes.",
+      "forbiddenImports": ["scanner", "repair", "fastapi"]
+    },
+    "source_recovery_batch.py": {
+      "maxLines": 750,
+      "responsibility": "Coordinate source-folder recovery preview, serialized transactions and resumable results with batch Undo.",
+      "forbiddenImports": ["fastapi", "zipfile"]
+    },
+    "source_recovery_routes.py": {
+      "maxLines": 100,
+      "responsibility": "Map folder-based source recovery requests to background job operations.",
+      "forbiddenImports": ["scanner", "repair", "zipfile"]
     },
     "bend_time_repair.py": {
       "maxLines": 100,

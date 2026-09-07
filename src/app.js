@@ -402,6 +402,7 @@ export function bootLibraryDoctor(hostWindow = window) {
   }
   function leave() {
     activation.deactivate();
+    songToolsController.leave();
     clearTimeout(state.pollTimer);
     clearTimeout(state.searchTimer);
     clearTimeout(state.songTools.searchTimer);

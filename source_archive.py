@@ -9,6 +9,9 @@ from pathlib import Path
 MAX_ARCHIVE = 2 * 1024 ** 3
 MAX_MEMBER = 32 * 1024 ** 2
 MAX_TOTAL = 128 * 1024 ** 2
+MAX_EXPANDED_TOTAL = 256 * 1024 ** 2
+MAX_CHARTS = 128
+MAX_INDEX_CHARTS = 1024
 
 
 def _reader():
@@ -72,11 +75,23 @@ def _read_entry(stream, entry, lengths, file_size, limit):
     return bytes(result)
 
 
-def read_source_charts(value):
+def _selected_names(members):
+    if members is None:
+        return None
+    if (not isinstance(members, (list, tuple)) or not 1 <= len(members) <= MAX_CHARTS
+            or not all(isinstance(name, str) and name for name in members)
+            or len(set(members)) != len(members)):
+        raise ValueError("Select between 1 and 128 distinct source chart members.")
+    return set(members)
+
+
+def _inspect(value, on_chart, *, members=None, streaming=False):
+    wanted = _selected_names(members)
     path = source_path(value)
     HEADER, decrypt_sng, win_key, mac_key, Song = _reader()
     before = source_hash(path)
-    results, total = [], 0
+    total, expanded, chart_count, cancelled = 0, 0, 0, False
+    empty_members = []
     with path.open("rb") as stream:
         header_bytes = stream.read(32)
         header_size, entries = struct.unpack_from(">I", header_bytes, 12)[0], struct.unpack_from(">I", header_bytes, 20)[0]
@@ -90,8 +105,12 @@ def read_source_charts(value):
             raise ValueError("The source archive has an ambiguous member listing.")
         selected = [(i + 1, name) for i, name in enumerate(listing)
                     if name.lower().endswith(".sng") and "/songs/bin/" in ("/" + name.replace("\\", "/").lower())]
-        if len(selected) > 128:
-            raise ValueError("Select a source archive with at most 128 chart arrangements.")
+        if wanted is not None:
+            if not wanted.issubset({name for _, name in selected}):
+                raise ValueError("Every selected source chart must exist as an exact SNG member in this archive.")
+            selected = [(i, name) for i, name in selected if name in wanted]
+        if len(selected) > (MAX_INDEX_CHARTS if streaming else MAX_CHARTS):
+            raise ValueError("This archive exceeds the source chart limit; use folder batch recovery for compilations (at most 1,024 charts).")
         for index, name in selected:
             entry = header.bom.entries[index]
             total += entry.length
@@ -102,9 +121,47 @@ def read_source_charts(value):
             data = decrypt_sng(raw, key)
             if len(data) > MAX_MEMBER:
                 raise ValueError("A source chart exceeds the supported expansion bound.")
-            song = Song.parse(data)
+            expanded += len(data)
+            if expanded > MAX_EXPANDED_TOTAL:
+                raise ValueError("The source charts exceed the 256 MiB aggregate expansion bound.")
+            if entry.length == 0 and not data:
+                empty_members.append(name)
+                continue  # Explicitly empty compilation placeholder; no chart topology exists.
+            try:
+                song = Song.parse(data)
+            except Exception as exc:
+                raise ValueError(f"Source chart {name!r} could not be decoded: {exc}") from exc
             if song.levels:  # Ignore vocal/showlight-only SNGs.
-                results.append({"member": name, "sha256": hashlib.sha256(data).hexdigest(), "song": song})
+                chart_count += 1
+                if on_chart({"member": name, "sha256": hashlib.sha256(data).hexdigest(), "song": song}) is False:
+                    cancelled = True
+                    break
+            del song, data, raw
+    if cancelled:
+        return {"path": path, "sha256": before, "chart_count": chart_count,
+                "expanded_bytes": expanded, "empty_members": empty_members,
+                "complete": False, "cancelled": True}
     if before != source_hash(path):
         raise ValueError("The selected original source changed during inspection.")
-    return {"path": path, "sha256": before, "charts": results}
+    return {"path": path, "sha256": before, "chart_count": chart_count,
+            "expanded_bytes": expanded, "empty_members": empty_members,
+            "complete": True, "cancelled": False}
+
+
+def inspect_source_charts(value, on_chart):
+    """Stream a bounded compilation one chart at a time; never retain Songs.
+
+    Returning False from the visitor cancels the inspection. Its incomplete
+    result cannot establish source uniqueness. Normal completion verifies the
+    complete archive hash again, including unselected audio bytes.
+    """
+    if not callable(on_chart):
+        raise ValueError("Source inspection requires a chart visitor.")
+    return _inspect(value, on_chart, streaming=True)
+
+
+def read_source_charts(value, members=None):
+    """Read at most 128 exact selected charts, including from compilations."""
+    results = []
+    summary = _inspect(value, results.append, members=members)
+    return {**summary, "charts": results}

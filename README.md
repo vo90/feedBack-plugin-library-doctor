@@ -191,6 +191,38 @@ excluded. Unmatched arrangements or malformed declarations block the package.
 The complete candidate is validated before the change, audio is preserved, and
 the original chart bytes remain available through **Undo**.
 
+For many songs, use **Recover source bends across the scanned library** at the top of
+**Song tools**:
+
+1. Finish a scan of the song library or folder you want to repair.
+2. Choose the folder containing your original PSARC files. Subfolders are included.
+3. Select **Preview source recovery** and let the source matching finish.
+4. Review the eligible songs and exact proposed changes. Missing originals,
+   different versions and ambiguous matches are reported for review.
+5. Apply the reviewed batch. You can leave the screen while it runs, cancel
+   between packages, and review the results when you return. Playback pauses
+   the work. **Preview batch Undo** first checks the available restores.
+
+This checks every song in the current completed scan, including songs with no
+bend warning: an old converter may have discarded a curve without leaving
+enough information for a scan to recognize it. Source filenames do not decide
+a match; all supported chart topology must match. Different matching archives
+require an individual source choice. An unreadable or incomplete source-folder
+index cannot establish a unique match and requires a new preview after the
+listed source-folder problems are resolved.
+
+Source uniqueness is established during the preview. Apply rechecks the chosen
+source's complete file hash and the reviewed package data; it does not search
+again for files added to the source folder after you approved the preview.
+
+The batch changes recoverable bend fields only. It preserves song audio,
+including MinusMix/No Guitar versions, and does not reconvert entire PSARCs.
+If an earlier repair still has a recovery copy, first keep and finalize that
+repair or Undo it in **Activity and recovery**, then preview the source batch
+again. The batch never removes earlier Undo copies for you. Interrupted batches
+keep their completed results; review them and start a new preview for the
+remaining songs instead of automatically repeating an uncertain operation.
+
 Imported fret-127 pitchless mutes and unambiguous absolute bend times also have
 separate safe repairs in scan results. Source exceptions such as pre-onset bend
 points require source recovery, whose preview identifies boundary adjustments.
