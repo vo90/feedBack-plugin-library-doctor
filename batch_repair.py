@@ -2510,7 +2510,7 @@ class BatchRepairManager:
                 source = self._state.get("result") or self._state.get("last_result")
                 if isinstance(source, dict):
                     latest = copy.deepcopy(source)
-                self._state.update({
+                completion = {
                     "phase": (
                         "finalize_cancelled" if cancelled else "finalize_completed"
                     ),
@@ -2525,25 +2525,28 @@ class BatchRepairManager:
                     "completed_at": finalize_result["completed_at"],
                     "eta_seconds": 0.0,
                     "finalize_result": finalize_result,
-                })
+                }
             if latest is not None:
                 self._write_last_result(latest)
         except Exception as exc:
             self._log.exception(
                 "Library Doctor batch finalization execution failed: %s", exc
             )
-            with self._lock:
-                self._state.update({
-                    "phase": "error",
-                    "running": False,
-                    "message": (
-                        "Batch finalization stopped unexpectedly. Completed recovery-copy removals were kept."
-                    ),
-                    "current": "",
-                    "completed_at": time.time(),
-                })
+            completion = {
+                "phase": "error",
+                "running": False,
+                "message": (
+                    "Batch finalization stopped unexpectedly. Completed recovery-copy removals were kept."
+                ),
+                "current": "",
+                "completed_at": time.time(),
+            }
         finally:
-            self._scanner.finish_repair()
+            with self._lock:
+                # Finish receipt persistence and release our scanner reservation
+                # before publishing completion or admitting another batch.
+                self._scanner.finish_repair()
+                self._state.update(completion)
 
     @property
     def _last_result_path(self) -> Path:
