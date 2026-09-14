@@ -1515,6 +1515,7 @@ class RepairService:
             request_operation=request_operation,
             request_fingerprint=request_fingerprint,
         )
+
     def _commit_prepared_internal(self, prepared: _PreparedRepair) -> dict:
         if (
             not isinstance(prepared, _PreparedRepair)

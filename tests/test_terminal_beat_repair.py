@@ -149,6 +149,27 @@ def test_corroborating_input_changes_invalidate_preview(tmp_path, modules):
     assert len(json.loads(read(package, "arrangements/lead.json"))["beats"]) == 21
 
 
+def test_prepared_terminal_repair_rechecks_corroborating_input_before_commit(
+    tmp_path, modules
+):
+    service, package, before = build(tmp_path, modules)
+    prepared = service.prepare_selected(package.name, [RULE])
+    candidate = prepared.candidate
+    clean = package / "arrangements/bass.json"
+    clean.write_bytes(before["arrangements/bass.json"] + b" ")
+
+    with pytest.raises(modules[0].RepairPlanningError) as raised:
+        service.commit_prepared(prepared)
+
+    assert raised.value.code == "source_changed"
+    assert not candidate.exists()
+    assert len(json.loads(read(package, "arrangements/lead.json"))["beats"]) == 21
+    assert not (
+        tmp_path / "config" / "library_doctor" / "repair_backups"
+    ).exists()
+    assert service.history()["items"] == []
+
+
 @pytest.mark.parametrize("sidecar", [False, True])
 def test_every_stored_grid_is_diagnosed_independent_of_precedence(tmp_path, modules, sidecar):
     def mutate(m, d):
