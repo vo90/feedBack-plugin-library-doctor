@@ -55,6 +55,7 @@ def _client(
     preview_hook=None,
     repair_hook=None,
     scanner_hook=None,
+    batch_hook=None,
 ):
     root = Path(__file__).parents[1]
     loaded = {}
@@ -117,6 +118,8 @@ def _client(
                 repair_hook(loaded[name])
             if name == "scanner" and scanner_hook is not None:
                 scanner_hook(loaded[name])
+            if name == "batch_repair" and batch_hook is not None:
+                batch_hook(loaded[name])
         return loaded[name]
 
     library = tmp_path / "library"
@@ -3408,8 +3411,25 @@ def test_batch_finalizes_every_verified_recovery_copy_without_changing_feedpaks(
     client.close()
 
 
-def test_batch_requires_recovery_resolution_before_another_preview(tmp_path):
-    client, library = _client(tmp_path)
+@pytest.mark.parametrize("hold_final_receipt", [False, True])
+def test_batch_requires_recovery_resolution_before_another_preview(
+    tmp_path, hold_final_receipt
+):
+    receipt_started = threading.Event()
+    release_receipt = threading.Event()
+
+    def hold_receipt(module):
+        write_last_result = module.BatchRepairManager._write_last_result
+
+        def write_after_release(manager, result):
+            if hold_final_receipt and result.get("latest_finalize_result"):
+                receipt_started.set()
+                assert release_receipt.wait(10)
+            write_last_result(manager, result)
+
+        module.BatchRepairManager._write_last_result = write_after_release
+
+    client, library = _client(tmp_path, batch_hook=hold_receipt)
     package = _valid_package(library, "Pending recovery.feedpak")
     arrangement_path = package / "arrangements" / "lead.json"
     duplicate = {"t": 3.0, "s": 2, "f": 7}
@@ -3447,6 +3467,20 @@ def test_batch_requires_recovery_resolution_before_another_preview(tmp_path):
         "/api/plugins/library_doctor/repair/batch/finalize/apply",
         json={"finalize_plan_id": finalize_preview["finalize_plan_id"]},
     )
+    if hold_final_receipt:
+        try:
+            assert receipt_started.wait(5)
+            saving = client.get(
+                "/api/plugins/library_doctor/repair/batch/status"
+            ).json()
+            premature = client.post("/api/plugins/library_doctor/repair/batch/preview")
+            assert saving["running"] is True, (
+                saving["phase"], premature.status_code, premature.json()
+            )
+            assert saving["phase"] == "finalizing"
+            assert premature.status_code == 409
+        finally:
+            release_receipt.set()
     finalized = _wait_for_batch(client, "finalize_completed")
     assert finalized["result"]["undoable_count"] == 0
     assert list(backup_dir.glob("*.zip")) == []

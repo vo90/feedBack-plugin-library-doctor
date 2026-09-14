@@ -5,6 +5,8 @@ import sys
 import threading
 from pathlib import Path
 
+import pytest
+
 
 def _load_batch_module():
     path = Path(__file__).parents[1] / "batch_repair.py"
@@ -687,7 +689,10 @@ def test_batch_undo_cancellation_finishes_current_restore_and_keeps_later_packag
         sys.modules.pop(name, None)
 
 
-def test_batch_finalizes_all_verified_recovery_copies_and_updates_receipt(tmp_path):
+@pytest.mark.parametrize("finish_mode", ["complete", "cancelled", "error"])
+def test_batch_finalizes_all_verified_recovery_copies_and_updates_receipt(
+    tmp_path, finish_mode, monkeypatch
+):
     name, module = _load_batch_module()
     try:
         scanner = _Scanner()
@@ -734,30 +739,64 @@ def test_batch_finalizes_all_verified_recovery_copies_and_updates_receipt(tmp_pa
         assert review["recovery_bytes_to_free"] == 2048
         assert len(repairs.finalize_calls) == 0
 
+        if finish_mode == "cancelled":
+            finalize_backup = repairs.finalize_backup
+
+            def finalize_then_cancel(package, backup_id):
+                result = finalize_backup(package, backup_id)
+                manager.cancel()
+                return result
+
+            monkeypatch.setattr(repairs, "finalize_backup", finalize_then_cancel)
+        elif finish_mode == "error":
+            def fail_receipt(_result):
+                raise ValueError("Injected receipt serialization failure")
+
+            monkeypatch.setattr(manager, "_write_last_result", fail_receipt)
+
+        running_at_release = []
+        finish_repair = scanner.finish_repair
+
+        def release_before_completion():
+            running_at_release.append(manager.status()["running"])
+            finish_repair()
+
+        monkeypatch.setattr(scanner, "finish_repair", release_before_completion)
         manager.start_finalize_apply(review["finalize_plan_id"])
         manager.join(5)
         status = manager.status()
+        assert status["running"] is False
+        assert scanner.reserved is False
+        assert scanner.finish_count == 4
+        assert running_at_release == [True]
+        if finish_mode == "error":
+            assert status["phase"] == "error"
+            assert status["result"]["undoable_count"] == 0
+            return
+
         result = status["result"]
         finalize_result = status["finalize_result"]
+        finalized_count = 1 if finish_mode == "cancelled" else 2
 
-        assert status["phase"] == "finalize_completed"
+        assert status["phase"] == (
+            "finalize_cancelled" if finish_mode == "cancelled" else "finalize_completed"
+        )
         assert finalize_result["schema"] == module.BATCH_FINALIZE_RESULT_SCHEMA
-        assert finalize_result["finalized_count"] == 2
-        assert finalize_result["recovery_bytes_freed"] == 2048
+        assert finalize_result["finalized_count"] == finalized_count
+        assert finalize_result["recovery_bytes_freed"] == 1024 * finalized_count
         assert result["currently_repaired_count"] == 2
-        assert result["finalized_count"] == 2
-        assert result["undoable_count"] == 0
-        assert all(item["outcome"] == "finalized" for item in result["outcomes"])
-        assert all(item["undo_available"] is False for item in result["outcomes"])
+        assert result["finalized_count"] == finalized_count
+        assert result["undoable_count"] == 2 - finalized_count
+        assert sum(item["outcome"] == "finalized" for item in result["outcomes"]) == finalized_count
+        assert sum(item["undo_available"] is False for item in result["outcomes"]) == finalized_count
         assert len(repairs.finalize_preview_calls) == 2
-        assert len(repairs.finalize_calls) == 2
-        assert scanner.finish_count == 4
+        assert len(repairs.finalize_calls) == finalized_count
 
         persisted = json.loads(
             (tmp_path / "config" / "library_doctor" / "batch_result.json")
             .read_text(encoding="utf-8")
         )
-        assert persisted["undoable_count"] == 0
-        assert persisted["latest_finalize_result"]["finalized_count"] == 2
+        assert persisted["undoable_count"] == 2 - finalized_count
+        assert persisted["latest_finalize_result"]["finalized_count"] == finalized_count
     finally:
         sys.modules.pop(name, None)
