@@ -35,6 +35,8 @@
 - Add a plugin-owned portable FFmpeg fallback for preview repair, verify the
   selected executable before use, and allow preview preparation for independent
   Feedpaks to overlap.
+- Reserve bounded termination and kill-observation time when validation workers
+  stop, avoiding false repair-backend quarantine on Linux.
 
 - Add the origin-agnostic `timeline.repeated-measure-markers` Safe Fix for the
   strict repeated-positive-marker pattern produced by older FeedForge versions

@@ -333,3 +333,66 @@ def test_pool_shutdown_forcibly_terminates_a_non_cooperative_process():
     }
     assert process.terminated is True
     assert process.killed is False
+
+
+@pytest.mark.parametrize(
+    ("force", "expected_timeouts"),
+    (
+        (False, [0.6, 0.2, 0.2]),
+        (True, [0.5, 0.5]),
+    ),
+)
+def test_pool_shutdown_reserves_time_to_observe_async_termination(
+    monkeypatch, force, expected_timeouts
+):
+    root = Path(__file__).parents[1]
+    worker = _load(
+        root / "library_doctor_scan_worker.py",
+        "library_doctor_worker_async_shutdown_backend",
+    )
+
+    clock = SimpleNamespace(now=0.0)
+    monkeypatch.setattr(worker.time, "monotonic", lambda: clock.now)
+
+    class AsyncProcess:
+        def __init__(self):
+            self.alive = True
+            self.terminated = False
+            self.killed = False
+            self.join_timeouts = []
+
+        def join(self, timeout):
+            self.join_timeouts.append(timeout)
+            clock.now += timeout
+            if timeout > 0 and self.killed:
+                self.alive = False
+
+        def is_alive(self):
+            return self.alive
+
+        def terminate(self):
+            self.terminated = True
+
+        def kill(self):
+            self.killed = True
+
+    process = AsyncProcess()
+
+    class Executor:
+        def __init__(self):
+            self._processes = {1: process}
+
+        @staticmethod
+        def shutdown(**_options):
+            return None
+
+    pool = object.__new__(worker.ValidationProcessPool)
+    pool._pause_event = threading.Event()
+    pool._cancel_event = threading.Event()
+    pool._executor = Executor()
+
+    pool.shutdown(force=force, timeout_seconds=1.0)
+
+    assert process.terminated is True
+    assert process.killed is True
+    assert process.join_timeouts == pytest.approx(expected_timeouts)

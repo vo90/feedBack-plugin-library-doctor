@@ -239,7 +239,7 @@ class ValidationProcessPool:
         force: bool = False,
         timeout_seconds: float = 5.0,
     ) -> None:
-        """Stop workers within a bounded interval, terminating stragglers."""
+        """Stop workers within one bounded interval, terminating stragglers."""
         shutdown_lock = getattr(self, "_shutdown_lock", None)
         if shutdown_lock is None:
             shutdown_lock = threading.Lock()
@@ -267,12 +267,22 @@ class ValidationProcessPool:
                 # The captured process handles below remain authoritative.  A
                 # management-thread failure must not skip child termination.
                 pass
-            deadline = time.monotonic() + max(0.0, float(timeout_seconds))
+            phase_timeout = max(0.0, float(timeout_seconds))
+            phase_started = time.monotonic()
+            if force:
+                graceful_deadline = phase_started
+                terminate_deadline = phase_started + (phase_timeout * 0.5)
+            else:
+                graceful_deadline = phase_started + (phase_timeout * 0.6)
+                terminate_deadline = phase_started + (phase_timeout * 0.8)
+            kill_deadline = phase_started + phase_timeout
 
             if not force:
                 for process in processes:
                     try:
-                        remaining = max(0.0, deadline - time.monotonic())
+                        remaining = max(
+                            0.0, graceful_deadline - time.monotonic()
+                        )
                         process.join(remaining)
                     except Exception:
                         continue
@@ -283,7 +293,6 @@ class ValidationProcessPool:
                     process.terminate()
                 except Exception:
                     continue
-            terminate_deadline = deadline
             for process in alive:
                 try:
                     process.join(
@@ -302,7 +311,6 @@ class ValidationProcessPool:
                         process.terminate()
                 except Exception:
                     continue
-            kill_deadline = deadline
             for process in alive:
                 try:
                     process.join(
