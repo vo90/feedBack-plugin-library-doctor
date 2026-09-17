@@ -28,17 +28,18 @@ def test_clean_reference_is_explicitly_approved_by_scan(tmp_path, modules, archi
     assert all(finding["rule"]["repairability"] == "safe_candidate" for finding in findings)
 
 
-def test_all_affected_grids_need_review_under_clean_reference_rule(tmp_path, modules):
+def test_all_affected_grids_use_explicit_exact_redundancy_proof(tmp_path, modules):
     def mutate(_manifest, documents):
         beats = documents["arrangements/bass.json"]["beats"]
         beats.extend(copy.deepcopy(beats[-2:] + beats[-2:-1]))
 
     _, package, _ = build(tmp_path, modules, mutate=mutate)
     report = modules[1].validate_feedpak(package)
-    assert terminal_eligibility(report)["status"] == "author_review"
+    assert terminal_eligibility(report)["status"] == "automatic"
+    assert terminal_eligibility(report)["evidence_mode"] == "shared_prefix_exact_redundancy_v1"
     findings = [finding for finding in report["findings"] if finding["code"] == RULE]
     assert len(findings) == 4
-    assert all(finding["rule"]["repairability"] == "manual" for finding in findings)
+    assert all(finding["rule"]["repairability"] == "safe_candidate" for finding in findings)
 
 
 @pytest.mark.parametrize("change", [
@@ -209,7 +210,7 @@ def test_terminal_review_message_is_not_replaced_by_hopo_player_review(
 
 
 def test_validator_version_invalidates_pre_fix_cached_scan_approvals(modules):
-    assert modules[1].VALIDATOR_VERSION.startswith("rules-39:")
+    assert modules[1].VALIDATOR_VERSION.startswith("rules-40:")
     assert modules[1].rule_metadata(RULE)["repairability"] == "manual"
 
 

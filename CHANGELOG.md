@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Safely remove exact redundant ending markers when every stored grid has the
+  same strictly increasing retained prefix, its final pair brackets the song
+  end, and closed metadata/reference and event-boundary checks prove the suffix
+  adds no unique Feedpak timing data. Unknown or ambiguous cases remain manual.
+  Preview shows the exact removed and retained counts and the evidence mode.
+  Notes, lyrics, audio, retained markers, backup and Undo remain unchanged.
+
 - Require explicit, current package-wide safety approval before a terminal beat
   repair appears in Safe Fix or a batch. Unverified cases remain visible with
   their review reason; independent safe fixes for the same song remain available.

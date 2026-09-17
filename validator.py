@@ -86,7 +86,7 @@ if _terminal is None:
     _terminal_spec.loader.exec_module(_terminal)
 
 SPEC_REVISION = "52548b742f64c2a35052a141976ea1b7889f4b1a"
-VALIDATOR_VERSION = f"rules-39:feedpak-{SPEC_REVISION}"
+VALIDATOR_VERSION = f"rules-40:feedpak-{SPEC_REVISION}"
 SUPPORTED_MAJOR = 1
 SCHEMA_DIR = Path(__file__).resolve().parent / "schemas"
 MAX_TEXT_BYTES = 64 * 1024 * 1024
@@ -911,16 +911,23 @@ class _PackageReader:
         self._reserved_read_bytes = 0
         self._structure_items = 0
         self.terminal_inventory: list[str] = []
+        self.terminal_inventory_entry_count = 0
         self.terminal_inventory_issue: str | None = None
         self.terminal_parse_issues: dict[str, str] = {}
         self._inventory_names: set[str] = set()
 
-    def _inventory_member(self, name: str, *, linked: bool = False) -> None:
-        self.terminal_inventory.append(name)
+    def _inventory_member(self, name: str, *, linked: bool = False, directory: bool = False) -> None:
+        self.terminal_inventory_entry_count += 1
+        if self.terminal_inventory_entry_count > MAX_PACKAGE_MEMBERS:
+            raise _PackageBudgetError("Package contains too many filesystem entries to validate safely.")
+        if not directory:
+            self.terminal_inventory.append(name)
+        elif name.endswith("/"):
+            name = name[:-1]
         folded = name.casefold()
         if linked:
             self.terminal_inventory_issue = "Linked package members require manual review."
-        elif _archive_member_key(name) != name:
+        elif not _terminal.valid_member_name(name):
             self.terminal_inventory_issue = "Unsafe or ambiguous package paths require manual review."
         elif folded in self._inventory_names:
             self.terminal_inventory_issue = "Duplicate or case-colliding package members require manual review."
@@ -941,10 +948,13 @@ class _PackageReader:
             for dirpath, _dirnames, filenames in os.walk(
                 self._root, followlinks=False, onerror=self._inventory_error
             ):
-                for name in _dirnames:
+                for name in list(_dirnames):
                     directory = Path(dirpath) / name
-                    if directory.is_symlink() or directory.is_junction():
-                        self.terminal_inventory_issue = "Linked package members require manual review."
+                    linked = directory.is_symlink() or directory.is_junction()
+                    self._inventory_member(directory.relative_to(self._root).as_posix(),
+                                           linked=linked, directory=True)
+                    if linked:
+                        _dirnames.remove(name)
                 for name in filenames:
                     member_count += 1
                     if member_count > MAX_PACKAGE_MEMBERS:
@@ -981,11 +991,10 @@ class _PackageReader:
                 )
             casefolded_members: dict[str, str] = {}
             for info in infos:
-                if not info.is_dir():
-                    self._inventory_member(
-                        info.filename,
-                        linked=stat.S_ISLNK(info.external_attr >> 16),
-                    )
+                self._inventory_member(
+                    info.filename, directory=info.is_dir(),
+                    linked=stat.S_ISLNK(info.external_attr >> 16),
+                )
                 key = _archive_member_key(info.filename)
                 if key is None:
                     self.terminal_inventory_issue = "Unsafe or ambiguous package paths require manual review."
@@ -1276,6 +1285,8 @@ def _terminal_repair_eligibility(manifest, loaded_json, reader):
     try:
         if reader.terminal_inventory_issue:
             raise ValueError(reader.terminal_inventory_issue)
+        if reader.terminal_inventory_entry_count > _terminal.MAX_INVENTORY_MEMBERS:
+            raise ValueError("Package inventory exceeds the terminal repair limit.")
         paths = _terminal.input_paths(manifest)
         required_paths = set(paths)
         for path in ["manifest.yaml", *paths]:

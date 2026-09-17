@@ -456,7 +456,7 @@ SAFE_REPAIR_DEFINITIONS = (
         item_name="terminal beat copy",
         safety="safe_automatic",
         title="Remove a verified duplicate beat tail",
-        description="Remove only a short exact terminal repetition, corroborated by an existing clean grid, across every affected stored copy.",
+        description="Remove only a short exact repeated ending after clean-reference or closed exact-redundancy checks, across every affected stored grid. Keep every retained marker and all audio, notes and lyrics unchanged.",
         player_result="Stored grids become strictly increasing without retiming any beat or musical event.",
         user_value="Arrangement-based tools can use the same verified grid; ambiguous cases remain for manual review.",
     ),

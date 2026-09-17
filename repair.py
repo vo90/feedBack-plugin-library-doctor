@@ -213,7 +213,7 @@ if _bend is None:
     sys.modules[_bend_name] = _bend
     _bend_spec.loader.exec_module(_bend)
 
-REPAIR_CATALOG_VERSION = "repairs-25"
+REPAIR_CATALOG_VERSION = "repairs-26"
 REPAIR_PLAN_SCHEMA = "library_doctor.repair_plan.v1"
 REVIEWED_PACKAGE_PLAN_SCHEMA = "library_doctor.reviewed_repair_plan.v1"
 REVIEWED_INSPECTION_SCHEMA = "library_doctor.reviewed_repair_inspection.v1"
@@ -2678,11 +2678,12 @@ class RepairService:
         if rule_code == _terminal.RULE_CODE:
             try:
                 documents = {}
+                budget = _terminal.InputBudget(manifest)
                 for path in _terminal.input_paths(manifest):
                     path = _validate_member_path(path)
                     raw_input = self._read_member(package_path, path, MAX_REPAIR_TEXT_BYTES)
                     documents[path] = _parse_json(raw_input)
-                    _inspect_structure(documents[path])
+                    budget.include(documents[path], len(raw_input))
                     terminal_evidence[path] = hashlib.sha256(raw_input).hexdigest()
                 terminal_evidence["manifest.yaml"] = hashlib.sha256(
                     self._read_member(package_path, "manifest.yaml", MAX_REPAIR_TEXT_BYTES)

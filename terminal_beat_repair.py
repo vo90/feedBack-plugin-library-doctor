@@ -8,16 +8,34 @@ to mutate a song. No function in this module writes files.
 from __future__ import annotations
 
 import hashlib
+import importlib.util
 import json
 import math
-import os
 from pathlib import Path
-import zipfile
 
 from jsonschema import Draft202012Validator
 
 RULE_CODE = "timeline.terminal-duplicate-beats"
-ASSESSMENT_VERSION = "terminal-tail-1"
+ASSESSMENT_VERSION = "terminal-tail-2"
+
+
+def _sibling(name):
+    path = Path(__file__).with_name(name + ".py")
+    spec = importlib.util.spec_from_file_location(name + "_" + hashlib.sha256(
+        str(path.resolve()).encode()).hexdigest()[:16], path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_inputs = _sibling("terminal_beat_inputs")
+_metadata = _sibling("terminal_beat_metadata")
+input_paths = _inputs.input_paths
+package_inventory = _inputs.package_inventory
+check_inventory = _inputs.check_inventory
+InputBudget = _inputs.InputBudget
+MAX_INVENTORY_MEMBERS = _inputs.MAX_MEMBERS
+valid_member_name = _inputs.valid_member_name
 
 
 def finite(value):
@@ -58,63 +76,6 @@ def non_strict(beats):
         return False
     times = [b.get("time") for b in beats if isinstance(b, dict)]
     return any(finite(a) and finite(b) and b <= a for a, b in zip(times, times[1:]))
-
-
-def input_paths(manifest):
-    """All declarations whose contents can influence this closed repair."""
-    result = []
-    for entry in manifest.get("arrangements", []):
-        if not isinstance(entry, dict) or not isinstance(entry.get("file"), str):
-            raise ValueError("Every arrangement must declare a readable JSON file.")
-        result.append(entry["file"])
-    for key in ("song_timeline", "lyrics", "rigs"):
-        if key in manifest:
-            result.append(manifest[key])
-    for track in manifest.get("lyric_tracks", []):
-        if not isinstance(track, dict):
-            raise ValueError("A lyric declaration is malformed.")
-        result.append(track.get("file"))
-    if not all(isinstance(p, str) and p.endswith(".json") for p in result):
-        raise ValueError("Terminal beat repair requires ordinary declared JSON files.")
-    return list(dict.fromkeys(result))
-
-
-def package_inventory(package):
-    """Bounded inventory, without following directory links or reading media."""
-    if package.is_file():
-        with zipfile.ZipFile(package) as archive:
-            names = [i.filename for i in archive.infolist() if not i.is_dir()]
-    else:
-        names = []
-        for parent, dirs, files in os.walk(package, followlinks=False):
-            for name in dirs + files:
-                if (Path(parent) / name).is_symlink() or (Path(parent) / name).is_junction():
-                    raise ValueError("Linked package members require manual review.")
-            names.extend((Path(parent) / n).relative_to(package).as_posix() for n in files)
-            if len(names) > 10000:
-                raise ValueError("Package inventory exceeds the terminal repair limit.")
-    if len(names) > 10000 or len(names) != len(set(names)):
-        raise ValueError("An oversized or ambiguous member inventory requires manual review.")
-    return sorted(names)
-
-
-def check_inventory(manifest, names):
-    if (len(names) > 10000
-            or any(not isinstance(n, str) or not n or "\\" in n
-                   or n.startswith("/") or ":" in n
-                   or any(p in {"", ".", ".."} for p in n.split("/")) for n in names)
-            or len({n.casefold() for n in names}) != len(names)):
-        raise ValueError("An unsafe or ambiguous member inventory requires manual review.")
-    known = set(input_paths(manifest)) | {"manifest.yaml"}
-    for key in ("cover", "preview"):
-        if key in manifest:
-            known.add(manifest[key])
-    for stem in manifest.get("stems", []):
-        if not isinstance(stem, dict) or set(stem) - {"id", "file", "codec", "default"}:
-            raise ValueError("Unknown stem metadata requires manual review.")
-        known.add(stem.get("file"))
-    if set(names) - known:
-        raise ValueError("Undeclared package members may contain references; manual review is required.")
 
 
 def _closed(value, schema, root):
@@ -201,6 +162,7 @@ def _event_ends(value, *, parent_time=None):
         if t is not None:
             if not finite(t):
                 raise ValueError("An event has no valid time.")
+            yield t
             for key in ("sus", "d"):
                 if value.get(key, 0) < 0:
                     raise ValueError("An event has a negative duration.")
@@ -222,7 +184,7 @@ def _event_ends(value, *, parent_time=None):
 
 
 def assess_package(manifest, documents):
-    """Return a blocker message or None. Caller binds every input to its plan."""
+    """Return (blocker, proof mode). Caller binds every input to its plan."""
     allowed_manifest = {
         "feedpak_version", "title", "artist", "duration", "arrangements", "stems",
         "album", "year", "lyrics", "lyrics_source", "language", "lyric_tracks",
@@ -258,7 +220,7 @@ def assess_package(manifest, documents):
                 grids.append((b, tail_start(b)))
         affected = [(b, cut) for b, cut in grids if cut is not None]
         if not affected:
-            return None
+            return None, None
         clean = [b for b, cut in grids if cut is None and not non_strict(b)]
         duration = manifest.get("duration")
         if not finite(duration) or duration <= 0:
@@ -266,12 +228,30 @@ def assess_package(manifest, documents):
         for b, cut in grids:
             if cut is None and non_strict(b):
                 raise ValueError("Another grid contains an unrelated timing defect.")
-        for b, cut in affected:
-            if not any(identity(b[:cut]) == identity(c) for c in clean):
+        mode = "clean_reference_v1"
+        if clean:
+            if any(not any(identity(b[:cut]) == identity(c) for c in clean)
+                   for b, cut in affected):
                 raise ValueError("No existing clean grid exactly corroborates this tail.")
+        else:
+            # Agreement is consistency evidence, not independent author intent.
+            # Approval also requires exact redundancy and closed dependency checks.
+            mode = "shared_prefix_exact_redundancy_v1"
+            if len(grids) < 2 or len(affected) != len(grids):
+                raise ValueError("Exact-redundancy proof requires at least two distinct affected grids.")
+            if any("beats" not in documents[p] for p in grid_paths):
+                raise ValueError("Every declared grid must be present, even if explicitly empty.")
+            prefix = identity(affected[0][0][:affected[0][1]])
+            if any(identity(b[:cut]) != prefix for b, cut in affected):
+                raise ValueError("The retained grids do not match exactly in time and measure.")
+        for b, cut in affected:
             if not b[cut - 2]["time"] <= duration <= b[cut - 1]["time"]:
                 raise ValueError("The repeated tail does not bracket the song end.")
         boundary = min(b[cut]["time"] for b, cut in affected)
+        if mode == "shared_prefix_exact_redundancy_v1":
+            blocker = _metadata.assess_metadata(manifest, documents, boundary)
+            if blocker:
+                raise ValueError(blocker)
         schema_dir = Path(__file__).with_name("schemas")
         schema = arrangement_schema()
         if has_beat_reference(manifest) or any(has_beat_reference(d) for d in documents.values()):
@@ -311,8 +291,8 @@ def assess_package(manifest, documents):
             if any(t >= boundary or t < 0 for t in _event_ends(d)):
                 raise ValueError("A timeline event reaches the repeated terminal region.")
     except (ValueError, TypeError, KeyError, AttributeError) as exc:
-        return str(exc) or "Unsupported data requires manual review."
-    return None
+        return str(exc) or "Unsupported data requires manual review.", None
+    return None, mode
 
 
 def assess_repair(manifest, documents, inventory):
@@ -327,7 +307,8 @@ def assess_repair(manifest, documents, inventory):
               "members": []}
     try:
         check_inventory(manifest, inventory)
-        blocker = assess_package(manifest, documents)
+        _inputs.check_structure(manifest, documents)
+        blocker, mode = assess_package(manifest, documents)
         if blocker:
             result["message"] = blocker
             if blocker == "No existing clean grid exactly corroborates this tail.":
@@ -354,8 +335,10 @@ def assess_repair(manifest, documents, inventory):
                           message="No redundant terminal beat tail remains.")
             return result
         result.update(status="automatic", reason_code=None,
-                      message="An existing clean grid verifies the exact repeated ending markers.",
-                      evidence_mode="clean_reference_v1",
+                      message=("An existing clean grid verifies the exact repeated ending markers."
+                               if mode == "clean_reference_v1" else
+                               "The ending markers are exact redundant copies; retained grids agree and no supported data depends on the removed markers."),
+                      evidence_mode=mode,
                       removed_count=sum(m["removed_count"] for m in result["members"]))
     except (ValueError, TypeError, KeyError, AttributeError, RecursionError) as exc:
         result.update(status="author_review", message=str(exc) or result["message"])

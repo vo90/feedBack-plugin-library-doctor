@@ -30,6 +30,8 @@ ROOT_FILES = (
     "muted_fret_repair.py",
     "bend_time_repair.py",
     "terminal_beat_repair.py",
+    "terminal_beat_inputs.py",
+    "terminal_beat_metadata.py",
     "mutation_receipts.py",
     "plugin.json",
     "preview_repair.py",

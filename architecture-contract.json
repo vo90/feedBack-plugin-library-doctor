@@ -61,6 +61,16 @@
       "responsibility": "Assess terminal beat tails, references, event coverage and package corroboration.",
       "forbiddenImports": ["repair", "scanner", "fastapi"]
     },
+    "terminal_beat_inputs.py": {
+      "maxLines": 180,
+      "responsibility": "Bound and validate the closed input inventory for terminal-tail evidence.",
+      "forbiddenImports": ["repair", "scanner", "fastapi"]
+    },
+    "terminal_beat_metadata.py": {
+      "maxLines": 400,
+      "responsibility": "Validate supported non-indexed metadata and time-based rig controls for exact-tail proof.",
+      "forbiddenImports": ["repair", "scanner", "fastapi"]
+    },
     "repair_preparation.py": {
       "maxLines": 425,
       "responsibility": "Own temporary repair-candidate preparation and the serialized source-rechecked commit seam.",
