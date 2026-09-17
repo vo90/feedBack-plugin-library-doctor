@@ -15,6 +15,76 @@ from pathlib import PurePosixPath
 from typing import Callable, Iterator
 
 
+TERMINAL_REPAIR_RULE = "timeline.terminal-duplicate-beats"
+
+
+def terminal_scan_assessment(item, *, current: bool) -> dict:
+    """Normalize cached terminal evidence without treating omission as approval."""
+    if current and isinstance(item, dict) and item.get("status") in (
+        "automatic", "author_review", "unavailable"
+    ):
+        return dict(item)
+    return {
+        "status": "unavailable",
+        "reason_code": "terminal_inputs_unverified",
+        "message": "Rescan to verify whether this repeated ending can be safely repaired.",
+    }
+
+
+def scan_operation_is_automatic(code, item, *, current: bool) -> bool:
+    """Require positive terminal proof while preserving other rules' contracts."""
+    if code == TERMINAL_REPAIR_RULE:
+        return terminal_scan_assessment(item, current=current)["status"] == "automatic"
+    return not isinstance(item, dict) or item.get("status") == "automatic"
+
+
+def excluded_terminal_operation(report, rule_codes, *, current: bool) -> dict | None:
+    """Describe a blocked operation independently of other safe work on a song."""
+    if TERMINAL_REPAIR_RULE not in rule_codes:
+        return None
+    features = report.get("features")
+    features = features if isinstance(features, dict) else {}
+    eligibility = features.get("repair_eligibility")
+    eligibility = eligibility if isinstance(eligibility, dict) else {}
+    item = terminal_scan_assessment(eligibility.get(TERMINAL_REPAIR_RULE), current=current)
+    if item["status"] == "automatic":
+        return None
+    return {
+        "package": report.get("package"),
+        "title": str(report.get("title") or report.get("package") or ""),
+        "rule_code": TERMINAL_REPAIR_RULE,
+        "status": item["status"],
+        "reason_code": str(item.get("reason_code") or "terminal_inputs_unverified"),
+        "message": str(item.get("message") or (
+            "Rescan to verify whether this repeated ending can be safely repaired."
+        )),
+    }
+
+
+def scan_repair_presentation(code, item, player_review) -> dict:
+    """Return display overrides; timeline review is not the HO/PO workflow."""
+    if not isinstance(item, dict):
+        return {}
+    status = item.get("status")
+    if status == "automatic":
+        return {"repairability": "safe_candidate"}
+    if status == "author_review":
+        if code == TERMINAL_REPAIR_RULE:
+            return {"repairability": "manual", "guidance": item.get("message") or (
+                "This repeated ending requires manual review before it can be changed."
+            )}
+        if player_review.get("available") is False:
+            return {"repairability": "manual", "guidance": player_review["message"]}
+        return {"repairability": "review_required", "guidance": item.get("message") or (
+            "This occurrence needs author review before it is changed."
+        )}
+    if status == "unavailable":
+        return {"repairability": "manual", "guidance": item.get("message") or (
+            "The package does not contain the source data required for this automatic repair."
+        )}
+    return {}
+
+
 def _fidelity_containers(document):
     """All authored chart copies; malformed ladders are never skipped."""
     if not isinstance(document, dict):

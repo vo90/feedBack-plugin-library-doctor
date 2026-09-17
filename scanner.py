@@ -48,6 +48,17 @@ _BATCH_PREVIEW_RULE_PRIORITY = (
     "media.preview-too-short",
 )
 
+_ELIGIBILITY_MODULE_NAME = "_library_doctor_repair_eligibility"
+_eligibility = sys.modules.get(_ELIGIBILITY_MODULE_NAME)
+if _eligibility is None:
+    _eligibility_spec = importlib.util.spec_from_file_location(
+        _ELIGIBILITY_MODULE_NAME, Path(__file__).with_name("repair_eligibility.py")
+    )
+    _eligibility = importlib.util.module_from_spec(_eligibility_spec)
+    sys.modules[_ELIGIBILITY_MODULE_NAME] = _eligibility
+    _eligibility_spec.loader.exec_module(_eligibility)
+_TERMINAL_REPAIR_RULE = _eligibility.TERMINAL_REPAIR_RULE
+
 _SCAN_POLICY_MODULE_NAME = "_library_doctor_scan_policy"
 _scan_policy = sys.modules.get(_SCAN_POLICY_MODULE_NAME)
 if _scan_policy is None:
@@ -767,6 +778,7 @@ class LibraryScanner:
                 "This scan scope is too large for one batch. Scan and repair smaller folders."
             )
         candidates = []
+        excluded_operations = []
         for report in reports:
             findings = report.get("findings") if isinstance(report, dict) else None
             if not isinstance(findings, list):
@@ -796,8 +808,17 @@ class LibraryScanner:
             )
 
             def automatically_repairable(code: str) -> bool:
-                item = eligibility.get(code)
-                return not isinstance(item, dict) or item.get("status") == "automatic"
+                return _eligibility.scan_operation_is_automatic(
+                    code, eligibility.get(code),
+                    current=report.get("validator_version") == self._validator_version,
+                )
+
+            excluded = _eligibility.excluded_terminal_operation(
+                report, rule_codes,
+                current=report.get("validator_version") == self._validator_version,
+            )
+            if excluded is not None:
+                excluded_operations.append(excluded)
 
             rule_codes = [
                 code for code in rule_codes if automatically_repairable(code)
@@ -872,6 +893,7 @@ class LibraryScanner:
             "scanned_at": last_scan.get("completed_at"),
             "scope_package_count": len(reports),
             "candidates": candidates,
+            "excluded_operations": excluded_operations,
         }
 
     def package_matches_signature(self, package: str, expected: str) -> bool:
@@ -994,24 +1016,13 @@ class LibraryScanner:
             )
             repair_status = eligibility.get(code)
             rule = finding.get("rule")
-            if isinstance(repair_status, dict) and isinstance(rule, dict):
-                status = repair_status.get("status")
-                if status == "author_review":
-                    if player_review.get("available") is False:
-                        rule["repairability"] = "manual"
-                        rule["guidance"] = player_review["message"]
-                    else:
-                        rule["repairability"] = "review_required"
-                        rule["guidance"] = repair_status.get("message") or (
-                            "This occurrence needs author review before it is changed."
-                        )
-                elif status == "unavailable":
-                    rule["repairability"] = "manual"
-                    rule["guidance"] = repair_status.get("message") or (
-                        "The package does not contain the source data required for this automatic repair."
-                    )
-                elif status == "automatic":
-                    rule["repairability"] = "safe_candidate"
+            if code == _TERMINAL_REPAIR_RULE:
+                repair_status = _eligibility.terminal_scan_assessment(
+                    repair_status, current=features["repair_scan_current"]
+                )
+                features["repair_eligibility"] = {**eligibility, code: repair_status}
+            if isinstance(rule, dict):
+                rule.update(_eligibility.scan_repair_presentation(code, repair_status, player_review))
             if (
                 isinstance(rule, dict)
                 and player_review.get("available") is False

@@ -213,7 +213,7 @@ if _bend is None:
     sys.modules[_bend_name] = _bend
     _bend_spec.loader.exec_module(_bend)
 
-REPAIR_CATALOG_VERSION = "repairs-24"
+REPAIR_CATALOG_VERSION = "repairs-25"
 REPAIR_PLAN_SCHEMA = "library_doctor.repair_plan.v1"
 REVIEWED_PACKAGE_PLAN_SCHEMA = "library_doctor.reviewed_repair_plan.v1"
 REVIEWED_INSPECTION_SCHEMA = "library_doctor.reviewed_repair_inspection.v1"
@@ -2674,6 +2674,7 @@ class RepairService:
             })
         terminal_evidence = {}
         terminal_inventory = []
+        terminal_assessment = None
         if rule_code == _terminal.RULE_CODE:
             try:
                 documents = {}
@@ -2687,13 +2688,20 @@ class RepairService:
                     self._read_member(package_path, "manifest.yaml", MAX_REPAIR_TEXT_BYTES)
                 ).hexdigest()
                 terminal_inventory = _terminal.package_inventory(package_path)
-                _terminal.check_inventory(manifest, terminal_inventory)
-                blocker = _terminal.assess_package(manifest, documents)
-                if blocker:
-                    raise ValueError(blocker)
-            except (ValueError, TypeError, OSError, zipfile.BadZipFile, RepairPlanningError) as exc:
+                terminal_assessment = _terminal.assess_repair(manifest, documents, terminal_inventory)
+                if terminal_assessment["status"] != "automatic":
+                    blockers.append({"member_path": "manifest.yaml",
+                                     "code": "terminal_tail_safety_refusal",
+                                     "message": terminal_assessment["message"]})
+            except RepairPlanningError as exc:
                 blockers.append({"member_path": "manifest.yaml",
-                                 "code": "terminal_tail_requires_review", "message": str(exc)})
+                                 "code": exc.code, "message": str(exc)})
+            except (OSError, zipfile.BadZipFile) as exc:
+                blockers.append({"member_path": "manifest.yaml",
+                                 "code": "terminal_input_read_failed", "message": str(exc)})
+            except (ValueError, TypeError) as exc:
+                blockers.append({"member_path": "manifest.yaml",
+                                 "code": "terminal_input_invalid", "message": str(exc)})
         for member_path in member_paths:
             try:
                 raw = self._read_member(package_path, member_path, MAX_REPAIR_TEXT_BYTES)
@@ -2745,7 +2753,8 @@ class RepairService:
             "validator_version": self._validator_version,
             "package": package_name,
             "rule_code": rule_code,
-            **({"terminal_evidence": terminal_evidence, "terminal_inventory": terminal_inventory} if rule_code == _terminal.RULE_CODE else {}),
+            **({"terminal_evidence": terminal_evidence, "terminal_inventory": terminal_inventory,
+                "terminal_assessment": terminal_assessment} if rule_code == _terminal.RULE_CODE else {}),
             "member_plans": [
                 {"member_path": item["member_path"], "plan_id": item["plan"]["plan_id"]}
                 for item in planned
@@ -3646,6 +3655,7 @@ class RepairService:
         source_blockers = []
         terminal_evidence = {}
         terminal_inventory = []
+        terminal_assessment = None
         for rule_code in requested_rule_codes:
             definition = _REPAIR_BY_RULE[rule_code]
             try:
@@ -3675,6 +3685,7 @@ class RepairService:
                     continue
                 terminal_evidence = checked["terminal_evidence"]
                 terminal_inventory = checked["terminal_inventory"]
+                terminal_assessment = checked["terminal_assessment"]
             if implicit_all and rule_code in {"timeline.duplicate-beat", "timeline.beats-out-of-order"}:
                 if any(_terminal.tail_start((parsed_json_cache.get(path, (None, {}, None))[1] or {}).get("beats")) is not None for path in resolved_paths):
                     continue
@@ -3864,6 +3875,7 @@ class RepairService:
                 "arrays_affected": rule_total["arrays_affected"],
                 "musical_positions": rule_total["musical_positions"],
                 "member_count": len(rule_total["members"]),
+                **({"terminal_assessment": terminal_assessment} if rule_code == _terminal.RULE_CODE else {}),
             })
 
         rule_codes = [summary["rule_code"] for summary in repair_summaries]
@@ -3874,7 +3886,8 @@ class RepairService:
             "package": package_name,
             "rule_code": ALL_SAFE_RULE_CODE,
             "requested_rule_codes": list(requested_rule_codes),
-            **({"terminal_evidence": terminal_evidence, "terminal_inventory": terminal_inventory} if terminal_evidence else {}),
+            **({"terminal_evidence": terminal_evidence, "terminal_inventory": terminal_inventory,
+                "terminal_assessment": terminal_assessment} if terminal_evidence else {}),
             "rule_codes": rule_codes,
             "member_plans": [
                 {

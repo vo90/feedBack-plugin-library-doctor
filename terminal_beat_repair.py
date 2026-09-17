@@ -7,6 +7,7 @@ to mutate a song. No function in this module writes files.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -16,6 +17,7 @@ import zipfile
 from jsonschema import Draft202012Validator
 
 RULE_CODE = "timeline.terminal-duplicate-beats"
+ASSESSMENT_VERSION = "terminal-tail-1"
 
 
 def finite(value):
@@ -97,6 +99,12 @@ def package_inventory(package):
 
 
 def check_inventory(manifest, names):
+    if (len(names) > 10000
+            or any(not isinstance(n, str) or not n or "\\" in n
+                   or n.startswith("/") or ":" in n
+                   or any(p in {"", ".", ".."} for p in n.split("/")) for n in names)
+            or len({n.casefold() for n in names}) != len(names)):
+        raise ValueError("An unsafe or ambiguous member inventory requires manual review.")
     known = set(input_paths(manifest)) | {"manifest.yaml"}
     for key in ("cover", "preview"):
         if key in manifest:
@@ -305,3 +313,50 @@ def assess_package(manifest, documents):
     except (ValueError, TypeError, KeyError, AttributeError) as exc:
         return str(exc) or "Unsupported data requires manual review."
     return None
+
+
+def assess_repair(manifest, documents, inventory):
+    """One explicit, versioned approval shared by diagnosis and write planning.
+
+    Callers must provide strictly parsed, bounded inputs and a safe inventory.
+    This approval never replaces commit-time source and candidate checks.
+    """
+    result = {"status": "author_review", "reason_code": "terminal_tail_requires_review",
+              "message": "Terminal beat repair needs manual review.",
+              "assessment_version": ASSESSMENT_VERSION, "evidence_mode": None,
+              "members": []}
+    try:
+        check_inventory(manifest, inventory)
+        blocker = assess_package(manifest, documents)
+        if blocker:
+            result["message"] = blocker
+            if blocker == "No existing clean grid exactly corroborates this tail.":
+                result["reason_code"] = "missing_clean_grid"
+            return result
+        paths = [entry["file"] for entry in manifest["arrangements"]]
+        if "song_timeline" in manifest:
+            paths.append(manifest["song_timeline"])
+        for path in dict.fromkeys(paths):
+            beats = documents[path].get("beats", [])
+            cut = tail_start(beats)
+            if cut is None:
+                continue
+            result["members"].append({
+                "member_path": path, "suffix_start": cut,
+                "original_count": len(beats), "retained_count": cut,
+                "removed_count": len(beats) - cut,
+                "retained_grid_sha256": hashlib.sha256(identity(beats[:cut]).encode()).hexdigest(),
+                "boundary": beats[cut]["time"],
+                "duration_bracket": [beats[cut - 2]["time"], beats[cut - 1]["time"]],
+            })
+        if not result["members"]:
+            result.update(status="unavailable", reason_code="no_terminal_tail",
+                          message="No redundant terminal beat tail remains.")
+            return result
+        result.update(status="automatic", reason_code=None,
+                      message="An existing clean grid verifies the exact repeated ending markers.",
+                      evidence_mode="clean_reference_v1",
+                      removed_count=sum(m["removed_count"] for m in result["members"]))
+    except (ValueError, TypeError, KeyError, AttributeError, RecursionError) as exc:
+        result.update(status="author_review", message=str(exc) or result["message"])
+    return result

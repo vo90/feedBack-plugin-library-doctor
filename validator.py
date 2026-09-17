@@ -15,6 +15,7 @@ import json
 import math
 import os
 import re
+import stat
 import sys
 import zipfile
 from bisect import bisect_left, bisect_right
@@ -85,7 +86,7 @@ if _terminal is None:
     _terminal_spec.loader.exec_module(_terminal)
 
 SPEC_REVISION = "52548b742f64c2a35052a141976ea1b7889f4b1a"
-VALIDATOR_VERSION = f"rules-38:feedpak-{SPEC_REVISION}"
+VALIDATOR_VERSION = f"rules-39:feedpak-{SPEC_REVISION}"
 SUPPORTED_MAJOR = 1
 SCHEMA_DIR = Path(__file__).resolve().parent / "schemas"
 MAX_TEXT_BYTES = 64 * 1024 * 1024
@@ -601,8 +602,11 @@ def rule_metadata(code: str, severity: str = "warning", category: str = "validat
             "remove only later exact copies; leave conflicting beat data for review."
         )
     elif code == _terminal.RULE_CODE:
-        repairability = "safe_candidate"
-        guidance = "Review a suffix-only repair after all stored grids, references and event ends have been checked."
+        repairability = "manual"
+        guidance = (
+            "Rescan to verify all stored grids, references and event ends before "
+            "this repeated ending can be offered as a safe repair."
+        )
     elif code == "timeline.stored-beats-invalid":
         repairability = "manual"
         guidance = "Review this stored arrangement grid; do not sort or remove arbitrary beats."
@@ -827,6 +831,22 @@ class _BoundedSafeLoader(yaml.SafeLoader):
     def __init__(self, stream) -> None:
         super().__init__(stream)
         self._alias_count = 0
+        self.duplicate_keys = False
+
+    def construct_mapping(self, node, deep=False):
+        # Diagnostics retain the normal last-key-wins YAML behavior. Repair
+        # approval must nevertheless remember ambiguity rejected by its parser.
+        self.flatten_mapping(node)
+        seen = set()
+        for key_node, _value_node in node.value:
+            key = self.construct_object(key_node, deep=deep)
+            try:
+                if key in seen:
+                    self.duplicate_keys = True
+                seen.add(key)
+            except TypeError:
+                pass  # The normal loader provides the diagnostic below.
+        return super().construct_mapping(node, deep=deep)
 
     def compose_node(self, parent, index):
         if self.check_event(yaml.events.AliasEvent):
@@ -890,24 +910,56 @@ class _PackageReader:
         self._members: dict[str, zipfile.ZipInfo] = {}
         self._reserved_read_bytes = 0
         self._structure_items = 0
+        self.terminal_inventory: list[str] = []
+        self.terminal_inventory_issue: str | None = None
+        self.terminal_parse_issues: dict[str, str] = {}
+        self._inventory_names: set[str] = set()
+
+    def _inventory_member(self, name: str, *, linked: bool = False) -> None:
+        self.terminal_inventory.append(name)
+        folded = name.casefold()
+        if linked:
+            self.terminal_inventory_issue = "Linked package members require manual review."
+        elif _archive_member_key(name) != name:
+            self.terminal_inventory_issue = "Unsafe or ambiguous package paths require manual review."
+        elif folded in self._inventory_names:
+            self.terminal_inventory_issue = "Duplicate or case-colliding package members require manual review."
+        self._inventory_names.add(folded)
+
+    def _inventory_error(self, _error: OSError) -> None:
+        self.terminal_inventory_issue = "The complete package inventory could not be verified."
 
     def __enter__(self) -> "_PackageReader":
+        if self.package.is_symlink():
+            self.terminal_inventory_issue = "Linked packages require manual review."
         if self.package.is_dir():
+            if self.package.is_symlink() or self.package.is_junction():
+                self.terminal_inventory_issue = "Linked packages require manual review."
             self._root = self.package.resolve()
             member_count = 0
             total_size = 0
             for dirpath, _dirnames, filenames in os.walk(
-                self._root, followlinks=False
+                self._root, followlinks=False, onerror=self._inventory_error
             ):
+                for name in _dirnames:
+                    directory = Path(dirpath) / name
+                    if directory.is_symlink() or directory.is_junction():
+                        self.terminal_inventory_issue = "Linked package members require manual review."
                 for name in filenames:
                     member_count += 1
                     if member_count > MAX_PACKAGE_MEMBERS:
                         raise _PackageBudgetError(
                             f"Package contains more than {MAX_PACKAGE_MEMBERS:,} files."
                         )
+                    member = Path(dirpath) / name
+                    self._inventory_member(
+                        member.relative_to(self._root).as_posix(),
+                        linked=member.is_symlink() or member.is_junction(),
+                    )
                     try:
-                        total_size += (Path(dirpath) / name).stat().st_size
+                        total_size += member.stat().st_size
                     except OSError:
+                        self.terminal_inventory_issue = "The complete package inventory could not be verified."
                         continue
                     if total_size > MAX_PACKAGE_UNCOMPRESSED_BYTES:
                         raise _PackageBudgetError(
@@ -929,8 +981,14 @@ class _PackageReader:
                 )
             casefolded_members: dict[str, str] = {}
             for info in infos:
+                if not info.is_dir():
+                    self._inventory_member(
+                        info.filename,
+                        linked=stat.S_ISLNK(info.external_attr >> 16),
+                    )
                 key = _archive_member_key(info.filename)
                 if key is None:
+                    self.terminal_inventory_issue = "Unsafe or ambiguous package paths require manual review."
                     self.findings.add(
                         "error",
                         "package.unsafe-archive-path",
@@ -942,6 +1000,7 @@ class _PackageReader:
                 folded = key.casefold()
                 previous_case = casefolded_members.get(folded)
                 if previous_case is not None and previous_case != key:
+                    self.terminal_inventory_issue = "Case-colliding package members require manual review."
                     self.findings.add(
                         "warning",
                         "package.case-colliding-archive-member",
@@ -953,6 +1012,7 @@ class _PackageReader:
                     )
                 casefolded_members.setdefault(folded, key)
                 if key in self._members:
+                    self.terminal_inventory_issue = "Duplicate package members require manual review."
                     self.findings.add(
                         "error",
                         "package.duplicate-archive-member",
@@ -1062,6 +1122,8 @@ class _PackageReader:
                     f"{label} pushes this package beyond the "
                     f"{MAX_PACKAGE_STRUCTURE_ITEMS:,}-value validation safety limit."
                 )
+            if isinstance(value, float) and not math.isfinite(value):
+                self.terminal_parse_issues[label] = "Non-finite values cannot authorize a safe repair."
             if isinstance(value, dict):
                 if id(value) in seen:
                     continue
@@ -1164,9 +1226,27 @@ def _load_json(
         return cache[key]
     try:
         raw = reader.read_text(relpath)
-        data = _parse_jsonc(raw) if relpath.lower().endswith(".jsonc") else json.loads(raw)
+
+        def diagnostic_object(pairs):
+            result = {}
+            for name, value in pairs:
+                if name in result:
+                    reader.terminal_parse_issues[relpath] = (
+                        "Repeated JSON properties cannot authorize a safe repair."
+                    )
+                result[name] = value
+            return result
+
+        if relpath.lower().endswith(".jsonc"):
+            reader.terminal_parse_issues[relpath] = (
+                "Terminal beat repair requires ordinary declared JSON files."
+            )
+            data = _parse_jsonc(raw)
+        else:
+            data = json.loads(raw, object_pairs_hook=diagnostic_object)
         reader.inspect_structure(data, relpath)
     except _PackageBudgetError as exc:
+        reader.terminal_parse_issues[relpath] = "The repair input exceeds the validation safety limit."
         findings.add(
             "error",
             "package.validation-budget-exceeded",
@@ -1176,6 +1256,7 @@ def _load_json(
         cache[key] = None
         return None
     except (json.JSONDecodeError, RecursionError, _PackageReadError) as exc:
+        reader.terminal_parse_issues[relpath] = "A declared repair input could not be read as ordinary JSON."
         findings.add(
             "error",
             "package.invalid-json",
@@ -1188,6 +1269,43 @@ def _load_json(
     _report_nonfinite(data, relpath, findings)
     cache[key] = data
     return data
+
+
+def _terminal_repair_eligibility(manifest, loaded_json, reader):
+    """Assess once, using the bounded reads already needed for diagnosis."""
+    try:
+        if reader.terminal_inventory_issue:
+            raise ValueError(reader.terminal_inventory_issue)
+        paths = _terminal.input_paths(manifest)
+        required_paths = set(paths)
+        for path in ["manifest.yaml", *paths]:
+            if path in reader.terminal_parse_issues:
+                raise ValueError(reader.terminal_parse_issues[path])
+        documents = {
+            path: document
+            for (path, _schema_name), document in loaded_json.items()
+            if path in required_paths and document is not None
+        }
+        if any(path not in documents for path in paths):
+            raise ValueError("Every declared repair input must be readable and supported.")
+        assessment = _terminal.assess_repair(
+            manifest, documents, sorted(reader.terminal_inventory)
+        )
+        if (
+            not isinstance(assessment, dict)
+            or assessment.get("status") not in ("automatic", "author_review", "unavailable")
+        ):
+            raise ValueError("The terminal beat repair assessment is unavailable; rescan before repairing.")
+        return assessment
+    except (ValueError, TypeError, KeyError, RecursionError) as exc:
+        return {
+            "status": "unavailable",
+            "reason_code": "terminal_inputs_unverified",
+            "message": str(exc) or "The terminal beat repair inputs could not be verified.",
+            "assessment_version": getattr(_terminal, "ASSESSMENT_VERSION", None),
+            "evidence_mode": None,
+            "members": [],
+        }
 
 
 def _pointer(
@@ -4900,7 +5018,10 @@ def _result(
                 continue
             repair_status = item.get("status")
             if repair_status == "author_review":
-                rule["repairability"] = "review_required"
+                rule["repairability"] = (
+                    "manual" if finding.get("code") == _terminal.RULE_CODE
+                    else "review_required"
+                )
                 rule["guidance"] = item.get("message") or (
                     "This occurrence is not unambiguous enough for an automatic repair."
                 )
@@ -5136,9 +5257,15 @@ def validate_feedpak(
                 return _result(display_name, title, artist, features, findings)
 
             try:
-                manifest = yaml.load(
-                    reader.read_text(manifest_rel), Loader=_BoundedSafeLoader
-                )
+                loader = _BoundedSafeLoader(reader.read_text(manifest_rel))
+                try:
+                    manifest = loader.get_single_data()
+                    if loader.duplicate_keys:
+                        reader.terminal_parse_issues[manifest_rel] = (
+                            "Repeated YAML properties cannot authorize a safe repair."
+                        )
+                finally:
+                    loader.dispose()
                 reader.inspect_structure(manifest, manifest_rel)
             except _PackageBudgetError as exc:
                 findings.add(
@@ -5637,6 +5764,7 @@ def validate_feedpak(
 
             # Inspect stored copies as well as the host's effective timeline.
             seen_grids = set()
+            terminal_candidate = False
             active_beat_path = manifest.get("song_timeline") if song_timeline_overrides_legacy else legacy_timeline_sources.get("beats", (None,))[0]
             for (grid_path, schema_name), document in loaded_json.items():
                 if schema_name not in {"arrangement.schema.json", "song-timeline.schema.json"} or grid_path in seen_grids:
@@ -5645,6 +5773,7 @@ def validate_feedpak(
                 beats = document.get("beats") if isinstance(document, dict) else None
                 cut = _terminal.tail_start(beats)
                 if cut is not None:
+                    terminal_candidate = True
                     findings.add(
                         "warning", _terminal.RULE_CODE,
                         "A stored beat grid repeats its last two beats in a short terminal tail. A package-wide safety review is required before removing it.",
@@ -5658,6 +5787,11 @@ def validate_feedpak(
                         "A stored beat grid is not strictly increasing. This may affect tools that use this arrangement even when the active song grid is valid.",
                         location=f"{grid_path}:beats",
                     )
+
+            if terminal_candidate:
+                features["repair_eligibility"][_terminal.RULE_CODE] = (
+                    _terminal_repair_eligibility(manifest, loaded_json, reader)
+                )
 
             cover = manifest.get("cover")
             if cover is not None:

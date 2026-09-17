@@ -29,6 +29,17 @@ export function createFindingView({ actions, document, make, number, state }) {
 
   function repairBlockerCopy(report, finding, rule) {
     const eligibility = repairEligibility(report, finding.code);
+    if (finding.code === 'timeline.terminal-duplicate-beats') {
+      if (report.features?.repair_scan_current === false
+        || !eligibility || Array.isArray(eligibility)
+        || !['automatic', 'author_review', 'unavailable'].includes(eligibility.status)) {
+        return 'Safety not verified. Rescan this song with the current Library Doctor before a safe fix can be offered.';
+      }
+      if (eligibility.status === 'automatic') return '';
+      return `Needs review. ${typeof eligibility.message === 'string' && eligibility.message.trim()
+        ? eligibility.message
+        : 'Library Doctor could not prove that the repeated ending markers can be removed safely. The song will be left unchanged.'}`;
+    }
     if (!eligibility || eligibility.status === 'automatic') return '';
     if (eligibility.message) return eligibility.message;
     if (eligibility.reason_code === 'manifest_tones_require_manual_edit') {
@@ -110,7 +121,9 @@ export function createFindingView({ actions, document, make, number, state }) {
     item.dataset.severity = representative.severity || 'warning';
     item.dataset.category = representative.category || 'validation';
     item.appendChild(make('strong', 'lh-finding-title', rule.title || definition.title || 'Safe repair available'));
-    const technicalSummary = measureMarkerRepair
+    const technicalSummary = representative.code === 'timeline.terminal-duplicate-beats'
+      ? `${number(affected)} repeated beat markers appear at the end of ${scope}. These markers point back to earlier times; they are timing data, not audio or playable notes.${blockerCopy ? ' Automatic removal has not been approved.' : ' The package-wide safety checks passed; review the exact proposed removals below.'}`
+      : measureMarkerRepair
       ? `${number(affected)} repeated positive measure ${affected === 1 ? 'marker appears' : 'markers appear'} on later beats across ${scope}. Library Doctor can change only those repeated values to the sub-beat marker -1 while preserving the first measure marker, every beat timestamp, beat order, and all other stored properties.`
       : definition.change_kind === 'normalize_values'
       ? `${number(affected)} ${displayItem} across ${scope}. ${definition.description || ''}${blockerCopy ? ' Automatic repair is blocked for ambiguous data.' : ''}`

@@ -116,6 +116,9 @@ export function createPreviewController({
           ? plan.media?.creates_preview
             ? `Add this ${duration(plan.media?.candidate_duration_seconds || 30)} preview selected from the full song mix. The proposed clip starts at ${duration(plan.media?.start_seconds)} and adds about ${plan.media?.candidate_size || 'a short clip'} to the Feedpak.`
             : `Replace the existing ${duration(plan.media?.original_duration_seconds)} preview with this ${duration(plan.media?.candidate_duration_seconds || 30)} excerpt selected from the full song mix. The proposed clip starts at ${duration(plan.media?.start_seconds)} and is about ${plan.media?.candidate_size || 'a short clip'} instead of ${plan.media?.original_size || 'the current preview'}.`
+          : plan.rule_code === 'timeline.terminal-duplicate-beats'
+            || plan.action_kind === 'remove_terminal_duplicate_beats'
+            ? `Remove ${number(plan.removed_count)} repeated beat ${plan.removed_count === 1 ? 'marker' : 'markers'} only from the end of ${number(memberCount)} song-data ${memberCount === 1 ? 'file' : 'files'}. Keep every earlier marker, audio, notes, lyrics and their timing unchanged.`
           : measureMarkerRepair
             ? `Change ${number(repairChangeCount(plan))} repeated positive measure marker${repairChangeCount(plan) === 1 ? '' : 's'} to the sub-beat marker -1 across ${number(memberCount)} song-data ${memberCount === 1 ? 'file' : 'files'}. The first measure marker in each proven run, every beat timestamp, beat order, and every other stored property are kept unchanged.`
           : plan.change_kind === 'normalize_values'

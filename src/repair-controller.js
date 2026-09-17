@@ -574,6 +574,16 @@ export function createRepairController({
     }
   }
 
+  function automaticRepairAllowed(report, ruleCode) {
+    const eligibility = report.features?.repair_eligibility?.[ruleCode];
+    // Recognizing a terminal-tail shape is not proof that it is safe to remove.
+    if (ruleCode === 'timeline.terminal-duplicate-beats') {
+      return eligibility !== null && typeof eligibility === 'object'
+        && !Array.isArray(eligibility) && eligibility.status === 'automatic';
+    }
+    return !eligibility || eligibility.status === 'automatic';
+  }
+
   function repairControls(report, finding) {
     if (
       state.status?.target?.repairs_available === false
@@ -582,8 +592,7 @@ export function createRepairController({
     ) return null;
     const definition = state.repairRules[finding.code];
     if (!definition || !['safe_automatic', 'review_required'].includes(definition.safety)) return null;
-    const eligibility = report.features?.repair_eligibility?.[finding.code];
-    if (eligibility && eligibility.status !== 'automatic') return null;
+    if (!automaticRepairAllowed(report, finding.code)) return null;
     const wrapper = make('div', 'lh-repair-action');
     const mediaRepair = definition.change_kind === 'replace_media';
     const button = make(
@@ -609,6 +618,32 @@ export function createRepairController({
 
 
   function appendRepairPreviewAnswers(card, plan) {
+    const assessment = plan.terminal_assessment;
+    if (assessment?.status === 'automatic' && Array.isArray(assessment.members)) {
+      const members = assessment.members.filter((member) => (
+        Number.isInteger(member?.removed_count) && member.removed_count > 0
+        && Number.isInteger(member?.retained_count) && member.retained_count > 0
+      ));
+      if (members.length) {
+        const removed = members.reduce((total, member) => total + member.removed_count, 0);
+        const retained = new Set(members.map((member) => member.retained_count));
+        const retainedCopy = retained.size === 1
+          ? ` Keep ${number(members[0].retained_count)} markers in each.`
+          : ' Keep every earlier marker in its original order.';
+        const evidenceCopy = assessment.evidence_mode === 'shared_prefix_exact_redundancy_v1'
+          ? 'Safety evidence: the ending records are exact redundant copies, all retained timelines agree, and the complete package checks found no data depending on the removed markers.'
+          : assessment.evidence_mode === 'clean_reference_v1'
+            ? 'Safety evidence: an existing clean grid corroborates the retained timeline, and the complete package safety checks passed.'
+            : 'Safety evidence: the package-wide terminal-marker safety checks passed.';
+        const explanation = make('section', 'lh-terminal-repair-proof');
+        explanation.appendChild(make(
+          'p', '',
+          `Remove ${number(removed)} repeated beat ${removed === 1 ? 'marker' : 'markers'} at the end of ${number(members.length)} song-data ${members.length === 1 ? 'file' : 'files'}.${retainedCopy} Audio, notes, lyrics and their timing will not change.`,
+        ));
+        explanation.appendChild(make('p', 'lh-muted', evidenceCopy));
+        card.appendChild(explanation);
+      }
+    }
     const previewAnswers = make('div', 'lh-repair-preview-answers');
     [
       ['Expected result in game', plan.player_result],
@@ -646,8 +681,7 @@ export function createRepairController({
         .map((finding) => finding.code)
         .filter((code) => (
           state.repairRules[code]?.safety === 'safe_automatic'
-          && (!report.features?.repair_eligibility?.[code]
-            || report.features.repair_eligibility[code].status === 'automatic')
+          && automaticRepairAllowed(report, code)
         )),
     );
   }

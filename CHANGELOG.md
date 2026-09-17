@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- Require explicit, current package-wide safety approval before a terminal beat
+  repair appears in Safe Fix or a batch. Unverified cases remain visible with
+  their review reason; independent safe fixes for the same song remain available.
+  Rescan after this update. Expected safety refusals are separate from genuine
+  input, storage, validation, and backup failures.
+
 - Remove the original-PSARC bend recovery tools, folder batches, and saved-review
   rechecks. Keep normal scans, safe repairs, Preview Creator, and existing repair
   history and Undo. Ambiguous bend data now directs users to reconversion or

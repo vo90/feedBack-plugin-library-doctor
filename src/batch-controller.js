@@ -308,6 +308,7 @@ export function createBatchController({
       ));
     }
 
+    resultView.appendExcludedOperations(card, preview);
     card.appendChild(make('p', '', preview.file_handling));
     if (Number(preview.preview_repair_count || 0) > 0) {
       card.appendChild(make(

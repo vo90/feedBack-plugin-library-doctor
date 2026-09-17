@@ -27,6 +27,27 @@ export function createBatchResultsView({
     ].filter(Boolean).join(' ').toLocaleLowerCase();
   }
 
+  function appendExcludedOperations(card, preview) {
+    const excluded = Array.isArray(preview.excluded_operations) ? preview.excluded_operations : [];
+    if (!excluded.length) return;
+    const details = make('details', 'lh-batch-details lh-excluded-operations');
+    details.open = true;
+    details.appendChild(make('summary', '', `Repairs excluded from this batch (${number(preview.excluded_operation_count ?? excluded.length)})`));
+    details.appendChild(make('p', '', 'These operations have not passed their safety checks and will not be attempted. Other independently safe fixes for the same songs may still be included.'));
+    const list = make('ul', 'lh-batch-list');
+    excluded.slice(0, 250).forEach((item) => {
+      const row = make('li');
+      row.appendChild(make('strong', '', item.title || item.package || 'Scanned song'));
+      row.appendChild(make('span', '', `${item.message || 'Rescan or review this issue before repairing it.'} (${item.rule_code || 'Unverified repair'})`));
+      list.appendChild(row);
+    });
+    if (excluded.length > 250) {
+      list.appendChild(make('li', '', 'Additional excluded operations are included in the total. Review the individual scan results for their reasons.'));
+    }
+    details.appendChild(list);
+    card.appendChild(details);
+  }
+
   function appendOutcomeExplorer(container, outcomes, options) {
     const source = Array.isArray(outcomes) ? outcomes : [];
     const filters = options.filters;
@@ -40,7 +61,6 @@ export function createBatchResultsView({
     let rendered = 0;
     let filtered = [];
     const chunkSize = 100;
-
     const controls = make('div', 'lh-outcome-controls');
     const search = make('input');
     search.type = 'search';
@@ -63,7 +83,6 @@ export function createBatchResultsView({
     controls.appendChild(search);
     controls.appendChild(sort);
     container.appendChild(controls);
-
     const chips = make('div', 'lh-outcome-filters');
     const chipButtons = new Map();
     filters.forEach((filter) => {
@@ -83,7 +102,6 @@ export function createBatchResultsView({
       chips.appendChild(button);
     });
     container.appendChild(chips);
-
     const resultCount = make('p', 'lh-outcome-result-count');
     const list = make('ul', 'lh-batch-list lh-batch-list-scroll');
     list.tabIndex = 0;
@@ -92,7 +110,6 @@ export function createBatchResultsView({
     container.appendChild(resultCount);
     container.appendChild(list);
     container.appendChild(empty);
-
     function attentionRank(item) {
       if (item.outcome === 'failed') return 0;
       if (item.outcome === 'partial') return 1;
@@ -477,5 +494,5 @@ export function createBatchResultsView({
     return row;
   }
 
-  return { renderBatch, renderFinalize, renderUndo };
+  return { appendExcludedOperations, renderBatch, renderFinalize, renderUndo };
 }

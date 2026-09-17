@@ -45,6 +45,7 @@ _SKIPPED_REPAIR_CODES = {
     "reversed_handshape_requires_review",
     "full_mix_unavailable",
     "song_too_short",
+    "terminal_tail_safety_refusal",
 }
 _SKIPPED_RESTORE_CODES = {
     "backup_mismatch",
@@ -1749,6 +1750,7 @@ class BatchRepairManager:
 
     def _run_preview(self, snapshot: dict) -> None:
         candidates = snapshot["candidates"]
+        excluded_operations = copy.deepcopy(snapshot.get("excluded_operations") or [])
         total = len(candidates)
         started = time.monotonic()
         eligible = []
@@ -1968,9 +1970,10 @@ class BatchRepairManager:
                     1 for item in eligible
                     if item["safe_rule_count"] > 0 and item["preview_repair"]
                 ),
-                "excluded_operation_count": sum(
+                "excluded_operation_count": len(excluded_operations) + sum(
                     item["excluded_operation_count"] for item in eligible
                 ),
+                "excluded_operations": excluded_operations,
                 "rule_summaries": list(rule_totals.values()),
                 "packages": eligible,
                 "blocked": blocked,
