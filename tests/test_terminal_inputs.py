@@ -1,5 +1,6 @@
 import stat
 import zipfile
+from itertools import combinations
 
 import pytest
 
@@ -90,3 +91,76 @@ def test_duplicate_and_case_colliding_names_are_rejected(modules):
 def test_walk_io_failures_cannot_silently_omit_members(modules):
     with pytest.raises(OSError, match="denied"):
         modules[0]._terminal._inputs._walk_error(OSError("denied"))
+
+
+def declare(manifest, role, path):
+    if role == "arrangement":
+        manifest.setdefault("arrangements", []).append({"id": "alias", "file": path})
+    elif role == "lyric_track":
+        manifest.setdefault("lyric_tracks", []).append({
+            "id": "original", "file": path, "language": "en", "kind": "original",
+        })
+    else:
+        manifest[role] = path
+
+
+CROSS_ROLES = [pair for pair in combinations(
+    ("arrangement", "song_timeline", "lyrics", "lyric_track", "rigs"), 2
+) if pair != ("lyrics", "lyric_track")]
+
+
+@pytest.mark.parametrize("roles", CROSS_ROLES)
+def test_cross_role_aliases_are_rejected_by_shared_input_inventory(modules, roles):
+    manifest = {}
+    for role in roles:
+        declare(manifest, role, "shared.json")
+    inputs = modules[0]._terminal._inputs
+    with pytest.raises(ValueError, match="conflicting input roles"):
+        inputs.input_paths(manifest)
+    with pytest.raises(ValueError, match="conflicting input roles"):
+        inputs.check_inventory(manifest, ["manifest.yaml", "shared.json"])
+
+
+@pytest.mark.parametrize("archive", [False, True])
+@pytest.mark.parametrize("roles", CROSS_ROLES)
+def test_cross_role_alias_scan_and_preview_agree(tmp_path, modules, archive, roles):
+    def mutate(manifest, documents):
+        shared = "arrangements/lead.json" if "arrangement" in roles else "shared.json"
+        if shared not in documents:
+            documents[shared] = []
+        for role in roles:
+            # The fixture already has the lead declaration; do not add a duplicate id.
+            if role != "arrangement":
+                declare(manifest, role, shared)
+    service, package, _ = exact_fixture(tmp_path, modules, archive=archive, mutate=mutate)
+    rule = modules[0]._terminal.RULE_CODE
+    assessment = modules[1].validate_feedpak(package)["features"]["repair_eligibility"][rule]
+    assert assessment["status"] != "automatic"
+    assert "conflicting input roles" in assessment["message"]
+    preview = service.preview(package.name, rule)
+    assert not preview["available"]
+    assert any("conflicting input roles" in blocker["message"] for blocker in preview["blockers"])
+
+
+@pytest.mark.parametrize("archive", [False, True])
+def test_repeated_lyrics_role_is_deduplicated_and_remains_repairable(tmp_path, modules, archive):
+    def mutate(manifest, documents):
+        declare(manifest, "lyrics", "lyrics.json")
+        declare(manifest, "lyric_track", "lyrics.json")
+        documents["lyrics.json"] = [{"t": 1.0, "d": 1.0, "w": "Synthetic"}]
+    service, package, _ = exact_fixture(tmp_path, modules, archive=archive, mutate=mutate)
+    rule = modules[0]._terminal.RULE_CODE
+    assessment = modules[1].validate_feedpak(package)["features"]["repair_eligibility"][rule]
+    assert assessment["status"] == "automatic", assessment
+    assert service.preview(package.name, rule)["available"]
+    manifest = {"lyrics": "lyrics.json", "lyric_tracks": [{"file": "lyrics.json"}]}
+    assert modules[0]._terminal.input_paths(manifest) == ["lyrics.json"]
+
+
+def test_case_aliases_are_not_silently_treated_as_distinct_declared_inputs(modules):
+    inputs = modules[0]._terminal._inputs
+    for other_role in ("lyric_track", "rigs", "song_timeline"):
+        manifest = {"lyrics": "lyrics.json"}
+        declare(manifest, other_role, "LYRICS.json")
+        with pytest.raises(ValueError, match="conflicting input roles or path spellings"):
+            inputs.input_paths(manifest)

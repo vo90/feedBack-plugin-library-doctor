@@ -14,21 +14,30 @@ MAX_STRUCTURE_ITEMS = 2_000_000
 
 def input_paths(manifest):
     result = []
+    declarations = {}
+
+    def add(path, role):
+        if not valid_member_name(path) or not path.endswith(".json"):
+            raise ValueError("Terminal beat repair requires ordinary declared JSON files.")
+        previous = declarations.get(path.casefold())
+        if previous is not None and previous != (path, role):
+            raise ValueError("A JSON member has conflicting input roles or path spellings; manual review is required.")
+        declarations[path.casefold()] = (path, role)
+        result.append(path)
+        if len(result) > MAX_INPUTS:
+            raise ValueError("Too many declared terminal repair inputs; manual review is required.")
+
     for entry in manifest.get("arrangements", []):
         if not isinstance(entry, dict) or not isinstance(entry.get("file"), str):
             raise ValueError("Every arrangement must declare a readable JSON file.")
-        result.append(entry["file"])
+        add(entry["file"], "arrangement")
     for key in ("song_timeline", "lyrics", "rigs"):
         if key in manifest:
-            result.append(manifest[key])
+            add(manifest[key], key)
     for track in manifest.get("lyric_tracks", []):
         if not isinstance(track, dict):
             raise ValueError("A lyric declaration is malformed.")
-        result.append(track.get("file"))
-    if len(result) > MAX_INPUTS:
-        raise ValueError("Too many declared terminal repair inputs; manual review is required.")
-    if not all(isinstance(p, str) and p.endswith(".json") for p in result):
-        raise ValueError("Terminal beat repair requires ordinary declared JSON files.")
+        add(track.get("file"), "lyrics")
     return list(dict.fromkeys(result))
 
 
