@@ -89,7 +89,7 @@ export function createBatchResultsView({
       const count = source.filter(filter.test).length;
       const button = make('button', '', `${filter.label} (${number(count)})`);
       button.type = 'button';
-      button.dataset.filter = filter.id;
+      button.dataset.outcomeFilter = filter.id;
       button.setAttribute('aria-pressed', String(filter.id === activeFilter));
       button.addEventListener('click', () => {
         activeFilter = filter.id;
