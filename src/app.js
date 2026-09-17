@@ -355,7 +355,7 @@ export function bootLibraryDoctor(hostWindow = window) {
     el.batchCancel.addEventListener('click', batchController.cancelBatchOperation);
     el.healthWorkspace.addEventListener('click', (event) => {
       const button = event.target.closest('button[data-filter]');
-      if (!button) return;
+      if (!button || !button.closest('#lh-overview, #lh-filters, #lh-more-filters')) return;
       resultsController.setFilter(button.dataset.filter);
       if (button.closest('#lh-overview')) el.resultsSection.scrollIntoView({ behavior: 'smooth' });
     });

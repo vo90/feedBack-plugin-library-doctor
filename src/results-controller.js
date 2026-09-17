@@ -19,7 +19,9 @@ export function createResultsController({
   });
 
   function updateFilterButtons() {
-    const nodes = el.root.querySelectorAll('[data-filter]');
+    const nodes = el.root.querySelectorAll(
+      '#lh-overview button[data-filter], #lh-filters button[data-filter], #lh-more-filters button[data-filter]',
+    );
     nodes.forEach((node) => {
       node.setAttribute('aria-pressed', String(node.dataset.filter === state.filter));
     });
