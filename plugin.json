@@ -1,7 +1,7 @@
 {
   "id": "library_doctor",
   "name": "Library Doctor",
-  "version": "0.45.0",
+  "version": "0.46.0",
   "private": false,
   "description": "Find and safely repair problems in your FeedBack song library, with clear explanations, review steps, and Undo.",
   "category": "tools",

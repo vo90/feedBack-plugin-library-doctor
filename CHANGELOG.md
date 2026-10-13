@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.46.0 — Public beta (2026-10-13)
+
 - Add readable lyric phrase endings for tracks with excessive lyric blocks.
   Save only `+` markers at safe whole-word boundaries, preserving every cue's
   text, order, time, duration and other properties. Preserve normal authored
@@ -57,13 +59,16 @@
   Feedpaks to overlap.
 - Reserve bounded termination and kill-observation time when validation workers
   stop, avoiding false repair-backend quarantine on Linux.
+- Keep batch outcome filters independent of scan-result filters, and publish
+  batch finalization completion after releasing the scanner.
+- Update development dependencies to address reported advisories.
 
 - Add the origin-agnostic `timeline.repeated-measure-markers` Safe Fix for the
   strict repeated-positive-marker pattern produced by older FeedForge versions
   and equivalent sources. It repairs all declared beat copies atomically while
   preserving beat timing, array shape, and all unrelated data.
 
-## 0.45.0 â€” Public beta
+## 0.45.0 — Public beta (2026-08-20)
 
 - Prevent temporary repair candidates from looking like discoverable song packages.
 - Lock further changes when a song has unresolved recovery state.

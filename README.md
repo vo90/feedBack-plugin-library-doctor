@@ -1,7 +1,6 @@
 # Library Doctor
 
-> **Status: Public beta** — Library Doctor is ready for normal use, but this is
-> its first wider public release. Keep the original download or another backup
+> **Status: v0.46.0 Public Beta** — Keep the original download or another backup
 > of any song you would be unhappy to lose.
 
 Library Doctor is a free, open-source plugin that checks your FeedBack song
@@ -14,7 +13,8 @@ The plugin creates recovery data first, checks the repaired song completely,
 and keeps **Undo** available when that repair supports it. If the plugin cannot
 make a trustworthy choice, it explains the problem and leaves the song alone.
 
-[Download Library Doctor](https://github.com/vo90/feedBack-plugin-library-doctor/releases)
+[Download v0.46.0 ZIP](https://github.com/vo90/feedBack-plugin-library-doctor/releases/download/v0.46.0/feedBack-plugin-library-doctor-0.46.0.zip)
+· [Release notes](https://github.com/vo90/feedBack-plugin-library-doctor/releases/tag/v0.46.0)
 · [Installation](#installation)
 · [Your first scan](#your-first-scan)
 · [Help](#getting-help)
@@ -38,9 +38,11 @@ It can:
 
 A repeated terminal beat tail can be reported even when another stored grid
 allows normal playback. Its optional repair removes only one to three exact
-trailing copies, requires an existing matching clean grid, and checks event
-ends and supported package data first. Unknown references, extra files, and
-other timing defects require manual review. It does not infer the meaning of
+trailing copies when an existing matching clean grid corroborates them. A
+separate exact-suffix case is eligible when every stored grid agrees and checks
+prove the ending markers add no unique timing data. Both cases require current
+package-wide checks of references, event ends, and supported data. Unknown or
+ambiguous cases require manual review; the repair does not infer the meaning of
 flags in the original conversion source.
 
 It deliberately does not:
@@ -68,10 +70,9 @@ It deliberately does not:
 
 1. Close FeedBack.
 2. Open the
-   [Library Doctor Releases page](https://github.com/vo90/feedBack-plugin-library-doctor/releases).
-3. Choose the newest release labelled **Public Beta**. Under **Assets**, download
-   the file named like
-   <code>feedBack-plugin-library-doctor-0.45.0.zip</code>.
+   [v0.46.0 Public Beta release](https://github.com/vo90/feedBack-plugin-library-doctor/releases/tag/v0.46.0).
+3. Under **Assets**, download
+   <code>feedBack-plugin-library-doctor-0.46.0.zip</code>.
 4. Extract the downloaded ZIP. Do not leave the plugin inside the ZIP file.
 5. Press **Win+R**, enter
    <code>%APPDATA%\feedback-desktop\plugins</code>, and press Enter. Create the
@@ -170,6 +171,13 @@ reconvert the original song with an updated converter, or review and correct the
 original chart. Library Doctor cannot infer a trajectory from a bend amount
 alone, and a scan cannot identify every curve discarded by an older converter.
 
+For excessive lyric blocks, **Lyrics may be missing line breaks** can offer a
+repair that adds only `+` phrase endings at safe whole-word boundaries. It keeps
+the words, syllables, order, start times, and durations unchanged. Preview shows
+how many endings will be added; the normal backup and Undo flow applies. Rescan
+after updating to see the repair or the reason it is unavailable. This improves
+readability without retiming the source lyrics.
+
 ### Fix several songs
 
 After a complete scan, **Fix several songs** can collect the same narrowly safe
@@ -177,8 +185,12 @@ repairs across eligible songs. It always shows a read-only preview and asks for
 confirmation before changing anything. Songs that changed, have uncertain
 recovery state, or no longer match the scan are skipped rather than overwritten.
 
-Batch repair works one song at a time. Completed repairs stay valid if you stop
-the batch, while songs that were not started remain unchanged.
+Batch repair can prepare and validate independent songs concurrently. Replacing
+packages and recording their backups and recovery state remain coordinated one
+at a time. **Automatic** chooses a conservative worker limit; **Custom maximum**
+sets a ceiling without overriding hardware safety limits. Completed repairs
+stay valid if you stop the batch; prepared candidates that were not committed
+do not change their source songs.
 
 ### Player Review
 
@@ -252,6 +264,10 @@ those paths, and song file contents.
 Close FeedBack before replacing a manually installed folder. Keep only one
 Library Doctor folder in the plugins directory; two copies use the same plugin
 ID and make it unclear which version FeedBack loaded.
+
+After updating, rescan the affected songs so new findings and current repair
+eligibility replace older saved results. Version 0.46.0 adds lyric phrase repair
+and stricter package-wide eligibility for terminal beat repairs.
 
 Replacing or deleting the plugin folder does not automatically delete scan
 history or retained recovery data. Resolve any visible Undo or recovery choices

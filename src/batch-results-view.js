@@ -495,6 +495,5 @@ export function createBatchResultsView({
     }
     return row;
   }
-
   return { appendExcludedOperations, renderBatch, renderFinalize, renderUndo };
 }

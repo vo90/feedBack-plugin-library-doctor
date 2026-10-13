@@ -5,7 +5,7 @@ import zipfile
 
 import pytest
 
-from test_validator import validator, _package, _manifest, _lyrics, _codes
+from test_validator import validator as validator, _package, _manifest, _lyrics, _codes
 
 
 RULE = "lyrics.too-few-line-breaks"
