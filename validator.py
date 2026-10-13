@@ -30,6 +30,7 @@ from jsonschema import Draft202012Validator
 
 try:
     from repair_eligibility import (
+        assess_lyric_phrase_sources,
         assess_muted_fret_sentinels,
         assess_bend_time_coordinates,
         assess_repeated_measure_markers,
@@ -55,6 +56,7 @@ except ModuleNotFoundError:  # Tests and some plugin hosts load files by path.
         sys.modules[_eligibility_name] = _eligibility
         _eligibility_spec.loader.exec_module(_eligibility)
     assess_muted_fret_sentinels = _eligibility.assess_muted_fret_sentinels
+    assess_lyric_phrase_sources = _eligibility.assess_lyric_phrase_sources
     assess_bend_time_coordinates = _eligibility.assess_bend_time_coordinates
     assess_repeated_measure_markers = (
         _eligibility.assess_repeated_measure_markers
@@ -96,7 +98,7 @@ if _lyric_phrases is None:
     _lyric_phrases_spec.loader.exec_module(_lyric_phrases)
 
 SPEC_REVISION = "52548b742f64c2a35052a141976ea1b7889f4b1a"
-VALIDATOR_VERSION = f"rules-41:feedpak-{SPEC_REVISION}"
+VALIDATOR_VERSION = f"rules-42:feedpak-{SPEC_REVISION}"
 SUPPORTED_MAJOR = 1
 SCHEMA_DIR = Path(__file__).resolve().parent / "schemas"
 MAX_TEXT_BYTES = 64 * 1024 * 1024
@@ -5688,6 +5690,12 @@ def validate_feedpak(
             # Validate the primary lyrics and every additional lyric track.
             lyric_files: list[str] = []
             lyric_repair_eligibility = {}
+            lyric_sources = assess_lyric_phrase_sources(manifest)
+            if lyric_sources["status"] != "automatic":
+                _merge_structural_repair_eligibility(
+                    lyric_repair_eligibility, "lyrics.too-few-line-breaks", automatic=False,
+                    reason_code=lyric_sources["reason_code"], message=lyric_sources["message"],
+                )
             lyric_package_issue = (
                 reader.terminal_parse_issues.get(manifest_rel)
                 or reader.terminal_inventory_issue
@@ -5702,27 +5710,16 @@ def validate_feedpak(
                 relpath = _pointer(reader, manifest.get("lyrics"), "lyrics", findings)
                 if relpath:
                     lyric_files.append(relpath)
-                else:
+                elif lyric_sources["status"] == "automatic":
                     _merge_structural_repair_eligibility(
                         lyric_repair_eligibility, "lyrics.too-few-line-breaks", automatic=False,
                         reason_code="lyric_source_unavailable",
                         message="A declared lyric source is missing or has an unsupported path. Restore that source before repairing lyric phrases.",
                     )
             lyric_tracks = manifest.get("lyric_tracks") if isinstance(manifest.get("lyric_tracks"), list) else []
-            if manifest.get("lyric_tracks") is not None and not isinstance(manifest["lyric_tracks"], list):
-                _merge_structural_repair_eligibility(
-                    lyric_repair_eligibility, "lyrics.too-few-line-breaks", automatic=False,
-                    reason_code="lyric_source_unavailable",
-                    message="The lyric track declarations are malformed. Correct them before repairing lyric phrases.",
-                )
             lyric_track_ids: set[str] = set()
             for index, track in enumerate(lyric_tracks):
                 if not isinstance(track, dict):
-                    _merge_structural_repair_eligibility(
-                        lyric_repair_eligibility, "lyrics.too-few-line-breaks", automatic=False,
-                        reason_code="lyric_source_unavailable",
-                        message="A declared lyric track is malformed. Correct the track declaration before repairing lyric phrases.",
-                    )
                     continue
                 features["lyrics_declared"] = True
                 track_id = track.get("id")
@@ -5748,7 +5745,7 @@ def validate_feedpak(
                 )
                 if relpath:
                     lyric_files.append(relpath)
-                else:
+                elif lyric_sources["status"] == "automatic":
                     _merge_structural_repair_eligibility(
                         lyric_repair_eligibility, "lyrics.too-few-line-breaks", automatic=False,
                         reason_code="lyric_source_unavailable",

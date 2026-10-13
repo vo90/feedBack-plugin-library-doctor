@@ -39,7 +39,7 @@ def test_oversized_valid_track_is_visible_as_an_automatic_scan_candidate(tmp_pat
     assessment = assert_repairability(report, "automatic")
     assert assessment["safe_count"] == 1
     assert assessment["unsafe_count"] == 0
-    assert report["validator_version"].startswith("rules-41:")
+    assert report["validator_version"].startswith("rules-42:")
 
 
 def test_healthy_authored_tracks_and_empty_track_do_not_offer_phrase_repair(tmp_path, validator):
@@ -133,6 +133,32 @@ def test_malformed_track_collection_blocks_an_affected_primary(tmp_path, validat
     package = _package(tmp_path, manifest=_manifest(lyrics="lyrics.json", lyric_tracks={"file": "other.json"}),
                        files={"lyrics.json": json.dumps(_lyrics(100))})
     assert_repairability(validator.validate_feedpak(package), "unavailable")
+
+
+@pytest.mark.parametrize("pointer", [None, 42, "", ".", "./other.json", "other//words.json",
+                                    "../other.json", "other.json/", "C:other.json", "other\\words.json"])
+def test_shared_lyric_source_gate_rejects_ambiguous_secondary_paths(tmp_path, validator, pointer):
+    manifest = _manifest(lyrics="lyrics.json", lyric_tracks=[{"id": "other", "file": pointer}])
+    before = copy.deepcopy(manifest)
+    assessment = validator.assess_lyric_phrase_sources(manifest)
+    assert assessment["status"] == "unavailable"
+    assert assessment["member_paths"] == []
+    assert manifest == before
+    package = _package(tmp_path, manifest=manifest, files={"lyrics.json": json.dumps(_lyrics(100))})
+    assert_repairability(validator.validate_feedpak(package), "unavailable")
+
+
+def test_shared_lyric_source_gate_keeps_exact_paths_and_deduplicates_aliases(validator):
+    manifest = {"lyrics": "words/main.json", "lyric_tracks": [
+        {"id": "same", "file": "words/main.json"},
+        {"id": "other", "file": "words/other.json"},
+    ]}
+    before = copy.deepcopy(manifest)
+    assessment = validator.assess_lyric_phrase_sources(manifest)
+    assert assessment["status"] == "automatic"
+    assert assessment["member_paths"] == ["words/main.json", "words/other.json"]
+    assert manifest == before
+    assert validator.assess_lyric_phrase_sources({"lyrics": None, "lyric_tracks": None})["member_paths"] == []
 
 
 def test_warning_does_not_treat_a_gap_inside_a_held_word_as_a_line_break(tmp_path, validator):

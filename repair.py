@@ -2545,6 +2545,12 @@ class RepairService:
                     member_paths.append(member_path)
             return member_paths
 
+        if rule_code == "lyrics.too-few-line-breaks":
+            assessment = _eligibility.assess_lyric_phrase_sources(manifest)
+            if assessment["status"] != "automatic":
+                raise RepairPlanningError(assessment["reason_code"], assessment["message"])
+            return assessment["member_paths"]
+
         if source_kind != "timeline":
             return self._repair_member_paths(manifest, source_kind)
 

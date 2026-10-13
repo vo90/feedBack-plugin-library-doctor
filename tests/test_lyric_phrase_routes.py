@@ -204,3 +204,86 @@ def test_phrase_routes_refuse_stale_preview_without_touching_song(tmp_path, arch
         assert not (tmp_path / "config/library_doctor/repair_backups").exists()
     finally:
         client.close()
+
+
+@pytest.mark.parametrize("archive", [False, True], ids=["directory", "zip"])
+@pytest.mark.parametrize("declarations", [
+    {"lyric_tracks": {"file": ADDITIONAL}},
+    {"lyric_tracks": [None]},
+    {"lyric_tracks": [{"id": "other", "file": 42}]},
+    {"lyric_tracks": [{"id": "other", "file": "../other.json"}]},
+    {"lyrics": 42},
+])
+def test_malformed_lyric_declarations_block_single_and_combined_phrase_repair(
+    tmp_path, archive, declarations,
+):
+    client, library = _client(tmp_path, validator_hook=lambda _module: None)
+    try:
+        originals = _members()
+        manifest = yaml.safe_load(originals["manifest.yaml"])
+        manifest.update(declarations)
+        originals["manifest.yaml"] = yaml.safe_dump(manifest, sort_keys=False).encode("utf-8")
+        # Two independent safe findings expose the ordinary combined-fix path.
+        note = {"t": 1.0, "s": 0, "f": 3, "sus": 0.5}
+        anchor = {"time": 1.0, "fret": 3, "width": 4}
+        chart = {"notes": [note, dict(note)], "chords": [],
+                 "anchors": [anchor, dict(anchor)], "keep": "exact"}
+        originals["arrangements/lead.json"] = json.dumps(chart).encode("utf-8")
+        package = _write_package(library, archive, originals)
+        archive_before = package.read_bytes() if archive else None
+        before = _scan(client)
+        assert before["features"]["repair_eligibility"][RULE]["status"] == "unavailable"
+
+        response = client.post("/api/plugins/library_doctor/repair/preview",
+                               json={"package": PACKAGE, "rule_code": RULE})
+        assert response.status_code == 200, response.text
+        rejected = response.json()
+        assert rejected["available"] is False
+        assert rejected["change_count"] == 0
+        assert rejected["blockers"][0]["code"] == "lyric_source_unavailable"
+
+        response = client.post("/api/plugins/library_doctor/repair/all/preview", json={"package": PACKAGE})
+        assert response.status_code == 200, response.text
+        combined = response.json()
+        assert combined["available"] is True
+        assert set(combined["rule_codes"]) == {"chart.duplicate-note", "chart.duplicate-anchor"}
+        assert RULE not in {item["rule_code"] for item in combined["repair_summaries"]}
+        assert _read_members(package) == originals
+        if archive:
+            assert package.read_bytes() == archive_before
+
+        # Independent repairs may still commit, leaving ALL lyric/source bytes
+        # unchanged, including the malformed declaration and every cue timing.
+        response = client.post("/api/plugins/library_doctor/repair/all/apply",
+                               json={"package": PACKAGE, "plan_id": combined["plan_id"]})
+        assert response.status_code == 200, response.text
+        repaired = _read_members(package)
+        for path, raw in originals.items():
+            if path != "arrangements/lead.json":
+                assert repaired[path] == raw
+        assert json.loads(repaired["arrangements/lead.json"]) == dict(
+            chart, notes=[note], anchors=[anchor],
+        )
+    finally:
+        client.close()
+
+
+def test_new_phrase_declaration_guard_does_not_change_existing_lyric_order_repair(tmp_path):
+    client, library = _client(tmp_path, validator_hook=lambda _module: None)
+    try:
+        originals = _members()
+        manifest = yaml.safe_load(originals["manifest.yaml"])
+        manifest["lyric_tracks"] = {"file": ADDITIONAL}
+        originals["manifest.yaml"] = yaml.safe_dump(manifest, sort_keys=False).encode("utf-8")
+        cues = json.loads(originals[PRIMARY])
+        cues[0], cues[1] = cues[1], cues[0]
+        originals[PRIMARY] = json.dumps(cues).encode("utf-8")
+        package = _write_package(library, False, originals)
+        response = client.post("/api/plugins/library_doctor/repair/preview",
+                               json={"package": PACKAGE, "rule_code": "lyrics.out-of-order"})
+        assert response.status_code == 200, response.text
+        assert response.json()["available"] is True
+        assert response.json()["change_kind"] == "reorder"
+        assert _read_members(package) == originals
+    finally:
+        client.close()

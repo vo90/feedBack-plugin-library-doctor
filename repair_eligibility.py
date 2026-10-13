@@ -18,6 +18,47 @@ from typing import Callable, Iterator
 TERMINAL_REPAIR_RULE = "timeline.terminal-duplicate-beats"
 
 
+def assess_lyric_phrase_sources(manifest: dict) -> dict:
+    """Require every declared lyric source before offering a phrase repair.
+
+    Keep paths exact: the repair writer cannot guess which spelling or file a
+    malformed declaration intended. Duplicate valid pointers name one member.
+    Content, file existence and ordinary-JSON checks remain with the caller.
+    """
+    unavailable = {
+        "status": "unavailable", "member_paths": [],
+        "reason_code": "lyric_source_unavailable",
+        "message": "A lyric source declaration is malformed or has an unsupported path. Correct every declaration before repairing lyric phrases.",
+    }
+    if not isinstance(manifest, dict):
+        return unavailable
+    candidates = []
+    if manifest.get("lyrics") is not None:
+        candidates.append(manifest["lyrics"])
+    tracks = manifest.get("lyric_tracks")
+    if tracks is not None:
+        if not isinstance(tracks, list):
+            return unavailable
+        for track in tracks:
+            if not isinstance(track, dict):
+                return unavailable
+            candidates.append(track.get("file"))
+    paths = []
+    seen = set()
+    for value in candidates:
+        if not isinstance(value, str) or not value or "\\" in value or ":" in value:
+            return unavailable
+        path = PurePosixPath(value)
+        if (not path.parts or path.is_absolute() or path.as_posix() != value
+                or any(part in {"", ".", ".."} for part in path.parts)):
+            return unavailable
+        if value not in seen:
+            paths.append(value)
+            seen.add(value)
+    return {"status": "automatic", "member_paths": paths,
+            "reason_code": None, "message": ""}
+
+
 def terminal_scan_assessment(item, *, current: bool) -> dict:
     """Normalize cached terminal evidence without treating omission as approval."""
     if current and isinstance(item, dict) and item.get("status") in (
