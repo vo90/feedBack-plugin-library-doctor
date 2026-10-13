@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import multiprocessing
 import sys
 import threading
 import time
@@ -282,7 +283,7 @@ def test_worker_initialization_and_paused_checkpoint_share_control_events(
     worker._cancel_event = None
 
 
-def test_pool_shutdown_forcibly_terminates_a_non_cooperative_process():
+def test_pool_shutdown_forcibly_terminates_a_non_cooperative_process(monkeypatch):
     root = Path(__file__).parents[1]
     worker = _load(
         root / "library_doctor_scan_worker.py",
@@ -291,6 +292,7 @@ def test_pool_shutdown_forcibly_terminates_a_non_cooperative_process():
 
     class StuckProcess:
         def __init__(self):
+            self.sentinel = object()
             self.alive = True
             self.terminated = False
             self.killed = False
@@ -310,6 +312,10 @@ def test_pool_shutdown_forcibly_terminates_a_non_cooperative_process():
             self.alive = False
 
     process = StuckProcess()
+    monkeypatch.setattr(
+        worker, "wait_for_process_exit",
+        lambda handles, _timeout: [] if process.alive else handles,
+    )
 
     class Executor:
         def __init__(self):
@@ -356,16 +362,11 @@ def test_pool_shutdown_reserves_time_to_observe_async_termination(
 
     class AsyncProcess:
         def __init__(self):
+            self.sentinel = object()
             self.alive = True
             self.terminated = False
             self.killed = False
-            self.join_timeouts = []
-
-        def join(self, timeout):
-            self.join_timeouts.append(timeout)
-            clock.now += timeout
-            if timeout > 0 and self.killed:
-                self.alive = False
+            self.wait_timeouts = []
 
         def is_alive(self):
             return self.alive
@@ -377,6 +378,16 @@ def test_pool_shutdown_reserves_time_to_observe_async_termination(
             self.killed = True
 
     process = AsyncProcess()
+
+    def wait(handles, timeout):
+        if timeout > 0:
+            process.wait_timeouts.append(timeout)
+        clock.now += timeout
+        if timeout > 0 and process.killed:
+            process.alive = False
+        return [] if process.alive else handles
+
+    monkeypatch.setattr(worker, "wait_for_process_exit", wait)
 
     class Executor:
         def __init__(self):
@@ -395,4 +406,172 @@ def test_pool_shutdown_reserves_time_to_observe_async_termination(
 
     assert process.terminated is True
     assert process.killed is True
-    assert process.join_timeouts == pytest.approx(expected_timeouts)
+    assert process.wait_timeouts == pytest.approx(expected_timeouts)
+    assert clock.now == pytest.approx(1.0)
+
+
+def _shutdown_test_pool(worker, processes):
+    class Executor:
+        def __init__(self):
+            self._processes = dict(enumerate(processes))
+            self.shutdown_calls = 0
+
+        def shutdown(self, **_options):
+            self.shutdown_calls += 1
+            self._processes = None
+
+    pool = object.__new__(worker.ValidationProcessPool)
+    pool._pause_event = threading.Event()
+    pool._cancel_event = threading.Event()
+    pool._executor = Executor()
+    return pool
+
+
+@pytest.mark.parametrize("force", [False, True])
+def test_shutdown_observes_os_exit_despite_stale_process_returncode(force):
+    """A ready exit handle wins over metadata awaiting the manager's reap."""
+    worker = _load(
+        Path(__file__).parents[1] / "library_doctor_scan_worker.py",
+        "library_doctor_worker_stale_reap_backend",
+    )
+    reader, writer = multiprocessing.Pipe(duplex=False)
+
+    class ReapedButUnpublishedProcess:
+        sentinel = reader
+        returncode = None
+        joins = 0
+        polls = 0
+        signals = 0
+
+        def join(self, _timeout):
+            self.joins += 1
+
+        def is_alive(self):
+            self.polls += 1
+            return True  # The concurrent waitpid loser observes ECHILD/None.
+
+        def terminate(self):
+            self.signals += 1
+
+        kill = terminate
+
+    process = ReapedButUnpublishedProcess()
+    pool = _shutdown_test_pool(worker, [process])
+    writer.close()  # Real OS handle becomes ready, as an exited POSIX child does.
+    try:
+        pool.shutdown(force=force, timeout_seconds=0.05)
+        pool.shutdown(force=force, timeout_seconds=0.05)
+    finally:
+        reader.close()
+
+    assert process.returncode is None
+    assert (process.joins, process.polls, process.signals) == (0, 0, 0)
+    assert pool._shutdown_complete is True
+    assert pool._executor.shutdown_calls == 1
+
+
+@pytest.mark.parametrize("failure", ["missing", "unreadable"])
+def test_shutdown_refuses_unobservable_exit_and_retains_it_on_retry(
+    monkeypatch, failure
+):
+    worker = _load(
+        Path(__file__).parents[1] / "library_doctor_scan_worker.py",
+        "library_doctor_worker_unobservable_backend",
+    )
+
+    class Process:
+        signals = 0
+
+        @property
+        def sentinel(self):
+            if failure == "missing":
+                raise ValueError("sentinel unavailable")
+            return object()
+
+        def is_alive(self):
+            return False  # Unverified cached state cannot authorize completion.
+
+        def terminate(self):
+            self.signals += 1
+
+        kill = terminate
+
+    def unreadable(_handles, _timeout):
+        raise OSError("handle unreadable")
+
+    monkeypatch.setattr(worker, "wait_for_process_exit", unreadable)
+    process = Process()
+    pool = _shutdown_test_pool(worker, [process])
+    for _ in range(2):
+        with pytest.raises(RuntimeError, match="1 validation worker.*did not stop"):
+            pool.shutdown(force=True, timeout_seconds=0)
+        assert not getattr(pool, "_shutdown_complete", False)
+    assert pool._shutdown_processes == [process]
+    assert process.signals == 4
+    assert pool._executor.shutdown_calls == 2
+
+
+def test_shutdown_one_unreadable_handle_does_not_signal_confirmed_exit(monkeypatch):
+    worker = _load(
+        Path(__file__).parents[1] / "library_doctor_scan_worker.py",
+        "library_doctor_worker_mixed_handles_backend",
+    )
+
+    class Process:
+        def __init__(self):
+            self.sentinel = object()
+            self.signals = 0
+
+        def terminate(self):
+            self.signals += 1
+
+        kill = terminate
+
+    stopped, unknown = Process(), Process()
+
+    def wait(handles, _timeout):
+        if unknown.sentinel in handles:
+            raise OSError("handle unreadable")
+        return handles
+
+    monkeypatch.setattr(worker, "wait_for_process_exit", wait)
+    pool = _shutdown_test_pool(worker, [stopped, unknown])
+    with pytest.raises(RuntimeError, match="1 validation worker.*did not stop"):
+        pool.shutdown(force=True, timeout_seconds=0)
+    assert stopped.signals == 0
+    assert unknown.signals == 2
+
+
+def test_shutdown_live_workers_share_one_absolute_deadline(monkeypatch):
+    worker = _load(
+        Path(__file__).parents[1] / "library_doctor_scan_worker.py",
+        "library_doctor_worker_deadline_backend",
+    )
+    clock = SimpleNamespace(now=0.0)
+    waits = []
+    monkeypatch.setattr(worker.time, "monotonic", lambda: clock.now)
+
+    class Process:
+        def __init__(self):
+            self.sentinel = object()
+            self.signals = 0
+
+        def terminate(self):
+            self.signals += 1
+
+        kill = terminate
+
+    def wait(handles, timeout):
+        waits.append((len(handles), timeout))
+        clock.now += timeout
+        return []
+
+    monkeypatch.setattr(worker, "wait_for_process_exit", wait)
+    processes = [Process(), Process(), Process()]
+    pool = _shutdown_test_pool(worker, processes)
+    with pytest.raises(RuntimeError, match="3 validation worker.*did not stop"):
+        pool.shutdown(timeout_seconds=1)
+    assert [size for size, _timeout in waits] == [3, 3, 3]
+    assert [timeout for _size, timeout in waits] == pytest.approx([0.6, 0.2, 0.2])
+    assert clock.now == pytest.approx(1.0)
+    assert all(process.signals == 2 for process in processes)

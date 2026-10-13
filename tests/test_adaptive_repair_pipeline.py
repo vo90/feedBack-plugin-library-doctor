@@ -980,7 +980,7 @@ def test_persistent_validator_stop_fault_preserves_real_workspace_and_blocks_rep
 
 
 def test_validation_pool_shutdown_attempts_every_process_and_is_repeatable(
-    scan_worker_module
+    scan_worker_module, monkeypatch
 ):
     class Signal:
         def __init__(self):
@@ -994,6 +994,7 @@ def test_validation_pool_shutdown_attempts_every_process_and_is_repeatable(
 
     class Process:
         def __init__(self, *, terminate_fails=False):
+            self.sentinel = self
             self.alive = True
             self.terminate_fails = terminate_fails
             self.terminate_calls = 0
@@ -1028,6 +1029,10 @@ def test_validation_pool_shutdown_attempts_every_process_and_is_repeatable(
 
     first = Process(terminate_fails=True)
     second = Process()
+    monkeypatch.setattr(
+        scan_worker_module, "wait_for_process_exit",
+        lambda handles, _timeout: [handle for handle in handles if not handle.alive],
+    )
     pool = scan_worker_module.ValidationProcessPool.__new__(
         scan_worker_module.ValidationProcessPool
     )
@@ -1050,7 +1055,7 @@ def test_validation_pool_shutdown_attempts_every_process_and_is_repeatable(
 
 
 def test_validation_pool_retries_retained_processes_after_failed_stop(
-    scan_worker_module
+    scan_worker_module, monkeypatch
 ):
     class Signal:
         @staticmethod
@@ -1063,6 +1068,7 @@ def test_validation_pool_retries_retained_processes_after_failed_stop(
 
     class Process:
         def __init__(self):
+            self.sentinel = self
             self.alive = True
             self.allow_stop = False
             self.terminate_calls = 0
@@ -1099,6 +1105,13 @@ def test_validation_pool_retries_retained_processes_after_failed_stop(
             self._processes = None
 
     process = Process()
+
+    def wait(handles, _timeout):
+        if not process.allow_stop:
+            raise OSError("process exit handle unavailable")
+        return [handle for handle in handles if not handle.alive]
+
+    monkeypatch.setattr(scan_worker_module, "wait_for_process_exit", wait)
     pool = scan_worker_module.ValidationProcessPool.__new__(
         scan_worker_module.ValidationProcessPool
     )
@@ -1128,10 +1141,11 @@ def test_validation_pool_retries_retained_processes_after_failed_stop(
 
 
 def test_validation_pool_submit_and_shutdown_share_one_lifecycle_lock(
-    scan_worker_module
+    scan_worker_module, monkeypatch
 ):
     class Process:
         def __init__(self):
+            self.sentinel = self
             self.alive = True
             self.terminated = False
 
@@ -1164,6 +1178,10 @@ def test_validation_pool_submit_and_shutdown_share_one_lifecycle_lock(
             return None
 
     process = Process()
+    monkeypatch.setattr(
+        scan_worker_module, "wait_for_process_exit",
+        lambda handles, _timeout: [handle for handle in handles if not handle.alive],
+    )
     executor = Executor(process)
     pool = scan_worker_module.ValidationProcessPool.__new__(
         scan_worker_module.ValidationProcessPool

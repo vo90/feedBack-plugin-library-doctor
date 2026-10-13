@@ -58,7 +58,8 @@
   selected executable before use, and allow preview preparation for independent
   Feedpaks to overlap.
 - Reserve bounded termination and kill-observation time when validation workers
-  stop, avoiding false repair-backend quarantine on Linux.
+  stop. Observe process exit without competing with Python's worker manager,
+  avoiding false repair-backend quarantine on Linux.
 - Keep batch outcome filters independent of scan-result filters, and publish
   batch finalization completion after releasing the scanner.
 - Update development dependencies to address reported advisories.

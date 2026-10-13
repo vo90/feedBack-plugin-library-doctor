@@ -17,6 +17,7 @@ import os
 import sys
 import threading
 import time
+from multiprocessing.connection import wait as wait_for_process_exit
 from pathlib import Path
 
 
@@ -192,6 +193,7 @@ class ValidationProcessPool:
         )
         self._shutdown_lock = threading.Lock()
         self._shutdown_processes = None
+        self._shutdown_sentinels = None
         self._shutdown_complete = False
         self._shutdown_started = False
 
@@ -247,6 +249,8 @@ class ValidationProcessPool:
         with shutdown_lock:
             if getattr(self, "_shutdown_complete", False):
                 return
+            phase_timeout = max(0.0, float(timeout_seconds))
+            phase_started = time.monotonic()
             self._shutdown_started = True
             try:
                 self._pause_event.clear()
@@ -260,15 +264,21 @@ class ValidationProcessPool:
                 self._shutdown_processes = list(
                     (getattr(self._executor, "_processes", None) or {}).values()
                 )
-            processes = list(self._shutdown_processes)
+            if getattr(self, "_shutdown_sentinels", None) is None:
+                self._shutdown_sentinels = []
+                for process in self._shutdown_processes:
+                    try:
+                        sentinel = process.sentinel
+                    except Exception:
+                        sentinel = None
+                    self._shutdown_sentinels.append((process, sentinel))
+            processes = list(self._shutdown_sentinels)
             try:
                 self._executor.shutdown(wait=False, cancel_futures=True)
             except Exception:
-                # The captured process handles below remain authoritative.  A
+                # The captured process exit handles remain authoritative.  A
                 # management-thread failure must not skip child termination.
                 pass
-            phase_timeout = max(0.0, float(timeout_seconds))
-            phase_started = time.monotonic()
             if force:
                 graceful_deadline = phase_started
                 terminate_deadline = phase_started + (phase_timeout * 0.5)
@@ -277,32 +287,18 @@ class ValidationProcessPool:
                 terminate_deadline = phase_started + (phase_timeout * 0.8)
             kill_deadline = phase_started + phase_timeout
 
-            if not force:
-                for process in processes:
-                    try:
-                        remaining = max(
-                            0.0, graceful_deadline - time.monotonic()
-                        )
-                        process.join(remaining)
-                    except Exception:
-                        continue
-
-            alive = self._alive_processes(processes)
-            for process in alive:
+            # The executor manager owns Process.join()/waitpid(). Concurrent
+            # join()/is_alive() calls can observe ECHILD before that thread has
+            # stored the return code, falsely reporting an exited worker alive.
+            # Public exit sentinels observe OS termination without reaping.
+            alive = self._wait_for_process_exits(processes, graceful_deadline)
+            for process, _sentinel in alive:
                 try:
                     process.terminate()
                 except Exception:
                     continue
-            for process in alive:
-                try:
-                    process.join(
-                        max(0.0, terminate_deadline - time.monotonic())
-                    )
-                except Exception:
-                    continue
-
-            alive = self._alive_processes(alive)
-            for process in alive:
+            alive = self._wait_for_process_exits(alive, terminate_deadline)
+            for process, _sentinel in alive:
                 try:
                     kill = getattr(process, "kill", None)
                     if callable(kill):
@@ -311,15 +307,7 @@ class ValidationProcessPool:
                         process.terminate()
                 except Exception:
                     continue
-            for process in alive:
-                try:
-                    process.join(
-                        max(0.0, kill_deadline - time.monotonic())
-                    )
-                except Exception:
-                    continue
-
-            alive = self._alive_processes(alive)
+            alive = self._wait_for_process_exits(alive, kill_deadline)
             if alive:
                 raise RuntimeError(
                     f"{len(alive)} validation worker process(es) did not stop"
@@ -327,16 +315,36 @@ class ValidationProcessPool:
             self._shutdown_complete = True
 
     @staticmethod
-    def _alive_processes(processes) -> list:
-        alive = []
-        for process in processes:
+    def _wait_for_process_exits(processes, deadline: float) -> list:
+        """Return unconfirmed processes; never reap alongside the manager."""
+        remaining = list(processes)
+        while remaining:
+            sentinels = [
+                sentinel for _process, sentinel in remaining
+                if sentinel is not None
+            ]
+            if not sentinels:
+                break
             try:
-                if process.is_alive():
-                    alive.append(process)
+                ready = wait_for_process_exit(
+                    sentinels, max(0.0, deadline - time.monotonic())
+                )
             except Exception:
-                # An unreadable process state is not proof that it stopped.
-                alive.append(process)
-        return alive
+                # One unreadable handle must not hide another confirmed exit
+                # and cause us to signal an already stopped process.
+                ready = []
+                for sentinel in sentinels:
+                    try:
+                        ready.extend(wait_for_process_exit([sentinel], 0.0))
+                    except Exception:
+                        continue
+            if not ready:
+                break
+            remaining = [
+                record for record in remaining if record[1] not in ready
+            ]
+        # Missing, unreadable and unsignalled handles are never proof of exit.
+        return remaining
 
     def terminate(self, *, timeout_seconds: float = 1.0) -> None:
         self.shutdown(force=True, timeout_seconds=timeout_seconds)
