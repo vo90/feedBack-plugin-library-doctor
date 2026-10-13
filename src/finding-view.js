@@ -29,6 +29,17 @@ export function createFindingView({ actions, document, make, number, state }) {
 
   function repairBlockerCopy(report, finding, rule) {
     const eligibility = repairEligibility(report, finding.code);
+    if (finding.code === 'lyrics.too-few-line-breaks') {
+      if (report.features?.repair_scan_current === false
+        || !eligibility || Array.isArray(eligibility)
+        || !['automatic', 'author_review', 'unavailable'].includes(eligibility.status)) {
+        return 'Safety not verified. Rescan this song with the current Library Doctor before a safe fix can be offered.';
+      }
+      if (eligibility.status === 'automatic') return '';
+      return typeof eligibility.message === 'string' && eligibility.message.trim()
+        ? eligibility.message
+        : 'Library Doctor could not find safe lyric phrase boundaries. The lyric files will be left unchanged.';
+    }
     if (finding.code === 'timeline.terminal-duplicate-beats') {
       if (report.features?.repair_scan_current === false
         || !eligibility || Array.isArray(eligibility)
@@ -125,6 +136,8 @@ export function createFindingView({ actions, document, make, number, state }) {
       ? `${number(affected)} repeated beat markers appear at the end of ${scope}. These markers point back to earlier times; they are timing data, not audio or playable notes.${blockerCopy ? ' Automatic removal has not been approved.' : ' The package-wide safety checks passed; review the exact proposed removals below.'}`
       : measureMarkerRepair
       ? `${number(affected)} repeated positive measure ${affected === 1 ? 'marker appears' : 'markers appear'} on later beats across ${scope}. Library Doctor can change only those repeated values to the sub-beat marker -1 while preserving the first measure marker, every beat timestamp, beat order, and all other stored properties.`
+      : definition.change_kind === 'add_line_breaks'
+      ? `Oversized lyric blocks appear across ${scope}.${blockerCopy ? ' Library Doctor leaves the source unchanged automatically.' : " Library Doctor can add '+' phrase endings at complete word boundaries while preserving lyric text and cue timing. The preview shows the exact number of markers to add."}`
       : definition.change_kind === 'normalize_values'
       ? `${number(affected)} ${displayItem} across ${scope}. ${definition.description || ''}${blockerCopy ? ' Automatic repair is blocked for ambiguous data.' : ''}`
       : definition.change_kind === 'omit_empty'

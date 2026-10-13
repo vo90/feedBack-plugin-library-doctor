@@ -308,6 +308,21 @@ every word, duration, unknown future property, and the authored order between
 equal-time cues is preserved. A timeline that also contains an invalid cue is
 blocked rather than guessed at. The primary lyrics and additional lyric tracks
 declared by the manifest use the same safeguards.
+The separate `lyrics.too-few-line-breaks` repair adds readable phrase endings
+when a track contains a clearly excessive lyric block. It uses existing pauses,
+punctuation and phrase size to add only `+` markers at complete-word boundaries.
+Every cue keeps its start time, duration, order, visible text and other stored
+properties. Normal authored lines and joined syllables are preserved; a new
+phrase never starts while an earlier cue in that phrase is still active.
+Malformed timing and indivisible oversized blocks remain for manual review.
+This improves readability while retaining the source sync; it cannot correct
+incorrect timestamps or infer word timings inside one large text cue. The
+normal preview, candidate validation, backup and exact Undo flow applies.
+The repair runs in Library Doctor and adds no per-frame gameplay work.
+After updating Library Doctor, rescan the song. Eligible results show
+"Lyrics may be missing line breaks" with a repair action and a preview of the
+number of phrase endings to add. Unavailable cases keep the warning and explain
+why automatic repair is blocked. Older cached scans must be refreshed first.
 For exact-duplicate and ordering repairs, the complete song-wide timeline
 sidecar is repaired when it is the active FeedBack source. Otherwise, Library
 Doctor follows FeedBack's legacy fallback independently for beats and sections

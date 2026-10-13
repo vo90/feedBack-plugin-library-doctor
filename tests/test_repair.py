@@ -79,6 +79,7 @@ def test_catalog_is_an_explicit_allowlist(repair):
         "chart.note-duplicates-chord",
         "chart.bend-points-out-of-order",
         "lyrics.out-of-order",
+        "lyrics.too-few-line-breaks",
         "timeline.terminal-duplicate-beats",
         "timeline.repeated-measure-markers",
         "timeline.duplicate-beat",
@@ -94,7 +95,7 @@ def test_catalog_is_an_explicit_allowlist(repair):
     assert {item["safety"] for item in catalog} == {
         "safe_automatic", "review_required",
     }
-    assert sum(item["safety"] == "safe_automatic" for item in catalog) == 28
+    assert sum(item["safety"] == "safe_automatic" for item in catalog) == 29
     structural_repairs = {
         item["rule_code"]: (
             item["action_kind"], item["source_kind"], item["change_kind"]
@@ -189,7 +190,7 @@ def test_catalog_is_an_explicit_allowlist(repair):
     assert measure_repair["action_kind"] == "normalize_repeated_measure_markers"
     assert measure_repair["item_name"] == "measure marker"
     assert measure_repair["change_kind"] == "normalize_measure_markers"
-    assert repair.REPAIR_CATALOG_VERSION == "repairs-26"
+    assert repair.REPAIR_CATALOG_VERSION == "repairs-27"
     assert repair._ALL_SAFE_RULE_ORDER.index(
         "timeline.repeated-measure-markers"
     ) < repair._ALL_SAFE_RULE_ORDER.index("timeline.duplicate-beat")
@@ -1021,6 +1022,75 @@ def test_lyric_repair_stably_orders_cues_without_changing_content(repair):
     assert sorted(repaired, key=lambda cue: cue["future"]["id"]) == sorted(
         cues, key=lambda cue: cue["future"]["id"]
     )
+
+
+def _long_lyric_cues():
+    return [
+        {"t": i * 0.5, "d": 0.25, "w": f"word{i}", "future": {"id": i}}
+        for i in range(90)
+    ]
+
+
+def test_lyric_phrase_repair_preserves_all_content_except_added_markers(repair):
+    cues = _long_lyric_cues()
+    original = copy.deepcopy(cues)
+    raw = _raw(cues)
+    plan = _plan(repair, cues, source_kind="lyrics", rule_code="lyrics.too-few-line-breaks")
+    action = plan["actions"][0]
+    indices = action["operations"][0]["cue_indices"]
+    assert action["change_kind"] == "add_line_breaks"
+    assert action["change_count"] == len(indices) > 0
+    assert action["removed_count"] == 0
+    assert action["arrays_affected"] == 1
+    assert action["musical_positions"] == len(indices)
+    assert action["summary"].startswith("Add ")
+    repaired = json.loads(repair.apply_json_member(raw, plan))
+    expected = copy.deepcopy(cues)
+    for index in indices:
+        expected[index]["w"] += "+"
+    assert repaired == expected
+    assert cues == original
+    assert _plan(repair, repaired, source_kind="lyrics", rule_code="lyrics.too-few-line-breaks")["actions"] == []
+
+
+@pytest.mark.parametrize("mutation", ["index", "boolean", "hash", "extra", "length", "rule", "duplicate"])
+def test_lyric_phrase_repair_rejects_forged_operations(repair, mutation):
+    cues = _long_lyric_cues()
+    plan = _plan(repair, cues, source_kind="lyrics", rule_code="lyrics.too-few-line-breaks")
+    operation = plan["actions"][0]["operations"][0]
+    if mutation == "index":
+        operation["cue_indices"][0] = 0
+    elif mutation == "boolean":
+        operation["cue_indices"][0] = True
+    elif mutation == "hash":
+        operation["repaired_sha256"] = "0" * 64
+    elif mutation == "extra":
+        operation["new_text"] = "forged"
+    elif mutation == "length":
+        operation["expected_length"] = True
+    elif mutation == "rule":
+        action = plan["actions"][0]
+        definition = repair.repair_for_rule("lyrics.out-of-order")
+        for key in ("rule_code", "action_kind", "change_kind"):
+            action[key] = definition[key]
+    else:
+        plan["actions"][0]["operations"].append(copy.deepcopy(operation))
+    plan["plan_id"] = repair._digest_json({key: value for key, value in plan.items() if key != "plan_id"})
+    with pytest.raises(repair.RepairPlanningError):
+        repair.apply_json_member(_raw(cues), plan)
+
+
+def test_lyric_phrase_repair_refuses_changed_source_and_invalid_timeline(repair):
+    cues = _long_lyric_cues()
+    plan = _plan(repair, cues, source_kind="lyrics", rule_code="lyrics.too-few-line-breaks")
+    changed = copy.deepcopy(cues)
+    changed[0]["d"] += 0.1
+    with pytest.raises(repair.RepairPlanningError) as caught:
+        repair.apply_json_member(_raw(changed), plan)
+    assert caught.value.code == "source_changed"
+    cues[40]["t"] = -1
+    with pytest.raises(repair.RepairPlanningError):
+        _plan(repair, cues, source_kind="lyrics", rule_code="lyrics.too-few-line-breaks")
 
 
 def test_lyric_repair_ignores_ordered_cues_and_refuses_invalid_mixed_timeline(repair):

@@ -85,8 +85,18 @@ if _terminal is None:
     sys.modules[_terminal_name] = _terminal
     _terminal_spec.loader.exec_module(_terminal)
 
+_lyric_phrases_name = "_library_doctor_lyric_phrases"
+_lyric_phrases = sys.modules.get(_lyric_phrases_name)
+if _lyric_phrases is None:
+    _lyric_phrases_spec = importlib.util.spec_from_file_location(
+        _lyric_phrases_name, Path(__file__).resolve().with_name("lyric_phrases.py")
+    )
+    _lyric_phrases = importlib.util.module_from_spec(_lyric_phrases_spec)
+    sys.modules[_lyric_phrases_name] = _lyric_phrases
+    _lyric_phrases_spec.loader.exec_module(_lyric_phrases)
+
 SPEC_REVISION = "52548b742f64c2a35052a141976ea1b7889f4b1a"
-VALIDATOR_VERSION = f"rules-40:feedpak-{SPEC_REVISION}"
+VALIDATOR_VERSION = f"rules-41:feedpak-{SPEC_REVISION}"
 SUPPORTED_MAJOR = 1
 SCHEMA_DIR = Path(__file__).resolve().parent / "schemas"
 MAX_TEXT_BYTES = 64 * 1024 * 1024
@@ -231,6 +241,7 @@ _SAFE_REPAIR_CANDIDATES = {
     "chart.note-duplicates-chord",
     "chart.bend-points-out-of-order",
     "lyrics.out-of-order",
+    "lyrics.too-few-line-breaks",
     "timeline.duplicate-beat",
     "timeline.repeated-measure-markers",
     "timeline.beats-out-of-order",
@@ -579,6 +590,13 @@ def rule_metadata(code: str, severity: str = "warning", category: str = "validat
         guidance = (
             "Put the existing lyric cues in chronological order. Preserve every "
             "cue and keep equal-time cues in their authored order."
+        )
+    elif code == "lyrics.too-few-line-breaks":
+        repairability = "safe_candidate"
+        guidance = (
+            "Add '+' phrase endings only to valid ordered lyric tokens at safe "
+            "word boundaries. Preserve every word, syllable, timestamp, duration "
+            "and existing line ending; ambiguous or inseparable blocks require manual review."
         )
     elif code == "chart.phrases-out-of-order":
         repairability = "conditional"
@@ -4675,7 +4693,31 @@ def _validate_lyrics_semantics(
     relpath: str,
     duration: float | None,
     findings: _Findings,
+    *,
+    repair_eligibility: dict | None = None,
+    source_parse_issue: str | None = None,
 ) -> int:
+    if repair_eligibility is not None:
+        # The authoritative repair reads every declared lyric member. Healthy
+        # valid tracks are no-ops; unsupported or malformed secondary members
+        # must not let a different affected member advertise an unusable repair.
+        automatic, reason, message = _ordinary_json_eligibility(relpath)
+        assessment = None
+        if automatic and source_parse_issue:
+            automatic, reason, message = False, "lyric_source_parse_issue", source_parse_issue
+        if automatic:
+            assessment = _lyric_phrases.assess_lyric_phrases(data)
+            automatic = assessment.get("status") in ("eligible", "no_defect")
+            if not automatic:
+                reason = assessment.get("blocker_code") or "lyric_phrasing_unavailable"
+                message = assessment.get("message") or (
+                    "This lyric track cannot be divided safely without changing word timing or syllable joins."
+                )
+        if not automatic or assessment.get("status") != "no_defect":
+            _merge_structural_repair_eligibility(
+                repair_eligibility, "lyrics.too-few-line-breaks",
+                automatic=automatic, reason_code=reason, message=message,
+            )
     if not isinstance(data, list):
         return 0
     if not data:
@@ -4774,6 +4816,7 @@ def _validate_lyrics_semantics(
     longest_duration = 0.0
     timed_syllables = 0
     previous_end: float | None = None
+    previous_continues = False
     for entry in data:
         if not isinstance(entry, dict) or not isinstance(entry.get("w"), str):
             continue
@@ -4785,6 +4828,7 @@ def _validate_lyrics_semantics(
         if (
             current_line
             and previous_end is not None
+            and not previous_continues
             and start - previous_end > LYRIC_FALLBACK_BREAK_GAP_SECONDS
         ):
             longest_line = max(longest_line, current_line)
@@ -4794,22 +4838,27 @@ def _validate_lyrics_semantics(
             current_line = 0
             current_characters = 0
             current_line_start = None
+            previous_end = None
 
         timed_syllables += 1
         if current_line_start is None:
             current_line_start = start
         current_line += 1
-        current_characters += len(entry["w"].rstrip("+").strip())
+        current_characters += _lyric_phrases.visible_character_count(entry["w"])
+        # Keep the active end across overlaps. A short later token must not
+        # manufacture a silence while an earlier word is still sounding.
+        previous_end = max(previous_end if previous_end is not None else start, start + length)
         if entry["w"].endswith("+"):
             authored_breaks += 1
             longest_line = max(longest_line, current_line)
             longest_characters = max(longest_characters, current_characters)
             if current_line_start is not None:
-                longest_duration = max(longest_duration, start + length - current_line_start)
+                longest_duration = max(longest_duration, previous_end - current_line_start)
             current_line = 0
             current_characters = 0
             current_line_start = None
-        previous_end = start + length
+            previous_end = None
+        previous_continues = entry["w"].endswith("-")
 
     longest_line = max(longest_line, current_line)
     longest_characters = max(longest_characters, current_characters)
@@ -5638,15 +5687,42 @@ def validate_feedpak(
 
             # Validate the primary lyrics and every additional lyric track.
             lyric_files: list[str] = []
+            lyric_repair_eligibility = {}
+            lyric_package_issue = (
+                reader.terminal_parse_issues.get(manifest_rel)
+                or reader.terminal_inventory_issue
+            )
+            if lyric_package_issue:
+                _merge_structural_repair_eligibility(
+                    lyric_repair_eligibility, "lyrics.too-few-line-breaks", automatic=False,
+                    reason_code="lyric_source_unavailable", message=lyric_package_issue,
+                )
             if manifest.get("lyrics") is not None:
                 features["lyrics_declared"] = True
                 relpath = _pointer(reader, manifest.get("lyrics"), "lyrics", findings)
                 if relpath:
                     lyric_files.append(relpath)
+                else:
+                    _merge_structural_repair_eligibility(
+                        lyric_repair_eligibility, "lyrics.too-few-line-breaks", automatic=False,
+                        reason_code="lyric_source_unavailable",
+                        message="A declared lyric source is missing or has an unsupported path. Restore that source before repairing lyric phrases.",
+                    )
             lyric_tracks = manifest.get("lyric_tracks") if isinstance(manifest.get("lyric_tracks"), list) else []
+            if manifest.get("lyric_tracks") is not None and not isinstance(manifest["lyric_tracks"], list):
+                _merge_structural_repair_eligibility(
+                    lyric_repair_eligibility, "lyrics.too-few-line-breaks", automatic=False,
+                    reason_code="lyric_source_unavailable",
+                    message="The lyric track declarations are malformed. Correct them before repairing lyric phrases.",
+                )
             lyric_track_ids: set[str] = set()
             for index, track in enumerate(lyric_tracks):
                 if not isinstance(track, dict):
+                    _merge_structural_repair_eligibility(
+                        lyric_repair_eligibility, "lyrics.too-few-line-breaks", automatic=False,
+                        reason_code="lyric_source_unavailable",
+                        message="A declared lyric track is malformed. Correct the track declaration before repairing lyric phrases.",
+                    )
                     continue
                 features["lyrics_declared"] = True
                 track_id = track.get("id")
@@ -5672,6 +5748,12 @@ def validate_feedpak(
                 )
                 if relpath:
                     lyric_files.append(relpath)
+                else:
+                    _merge_structural_repair_eligibility(
+                        lyric_repair_eligibility, "lyrics.too-few-line-breaks", automatic=False,
+                        reason_code="lyric_source_unavailable",
+                        message="A declared lyric source is missing or has an unsupported path. Restore that source before repairing lyric phrases.",
+                    )
             for relpath in dict.fromkeys(lyric_files):
                 if scan_checkpoint is not None:
                     scan_checkpoint()
@@ -5679,8 +5761,12 @@ def validate_feedpak(
                     reader, relpath, "lyrics.schema.json", findings, loaded_json
                 )
                 features["lyrics_entries"] += _validate_lyrics_semantics(
-                    data, relpath, duration, findings
+                    data, relpath, duration, findings,
+                    repair_eligibility=lyric_repair_eligibility,
+                    source_parse_issue=reader.terminal_parse_issues.get(relpath),
                 )
+            if any(item.code == "lyrics.too-few-line-breaks" for item in findings.items):
+                features["repair_eligibility"].update(lyric_repair_eligibility)
 
             song_timeline_overrides_legacy = False
             rigs_data = None

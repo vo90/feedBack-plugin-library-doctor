@@ -38,6 +38,9 @@ export function createFormatters({ number }) {
   function plannedRepairChange(value) {
     const count = repairChangeCount(value);
     const itemName = value?.item_name || 'item';
+    if (value?.change_kind === 'add_line_breaks') {
+      return `add ${number(count)} '+' lyric line-break marker${count === 1 ? '' : 's'}`;
+    }
     if (value?.change_kind === 'normalize_values') {
       return `normalize ${number(count)} ${itemName}${count === 1 ? '' : 's'}`;
     }
@@ -65,6 +68,9 @@ export function createFormatters({ number }) {
   function completedRepairChange(value) {
     const count = repairChangeCount(value);
     const itemName = value?.item_name || 'item';
+    if (value?.change_kind === 'add_line_breaks') {
+      return `Added ${number(count)} '+' lyric line-break marker${count === 1 ? '' : 's'}${memberScope(value)} while preserving lyric text, cue timing, and every other stored property`;
+    }
     if (value?.change_kind === 'normalize_values') {
       return `Normalized ${number(count)} ${itemName}${count === 1 ? '' : 's'}${memberScope(value)} while preserving every other stored property`;
     }

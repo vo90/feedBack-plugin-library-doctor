@@ -1,6 +1,16 @@
 {
   "schema": "library_doctor.architecture_contract.v1",
   "modules": {
+    "lyric_phrases.py": {
+      "maxLines": 300,
+      "responsibility": "Assess persistent whole-word lyric phrase boundaries without changing input data or timing.",
+      "forbiddenImports": ["repair", "scanner", "fastapi", "pathlib"]
+    },
+    "lyric_repair.py": {
+      "maxLines": 250,
+      "responsibility": "Plan and verify closed lyric ordering and phrase-ending operations against current source content.",
+      "forbiddenImports": ["repair", "scanner", "fastapi"]
+    },
     "bend_time_repair.py": {
       "maxLines": 100,
       "responsibility": "Plan and verify retained bend-time coordinate normalization.",

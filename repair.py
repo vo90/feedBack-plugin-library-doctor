@@ -99,8 +99,30 @@ MutedFretChange = _actions.MutedFretChange
 NormalizeMutedNegativeFrets = _actions.NormalizeMutedNegativeFrets
 StableSortBendPoints = _actions.StableSortBendPoints
 StableSortLyricCues = _actions.StableSortLyricCues
+AddLyricLineBreaks = _actions.AddLyricLineBreaks
 StableSortTimelineMarkers = _actions.StableSortTimelineMarkers
 StableSortTimedEvents = _actions.StableSortTimedEvents
+
+
+_lyric_phrases_name = "_library_doctor_lyric_phrases"
+_lyric_phrases = sys.modules.get(_lyric_phrases_name)
+if _lyric_phrases is None:
+    _lyric_phrases_spec = importlib.util.spec_from_file_location(
+        _lyric_phrases_name, Path(__file__).resolve().with_name("lyric_phrases.py")
+    )
+    _lyric_phrases = importlib.util.module_from_spec(_lyric_phrases_spec)
+    sys.modules[_lyric_phrases_name] = _lyric_phrases
+    _lyric_phrases_spec.loader.exec_module(_lyric_phrases)
+
+_lyric_repair_name = "_library_doctor_lyric_repair"
+_lyric_repair = sys.modules.get(_lyric_repair_name)
+if _lyric_repair is None:
+    _lyric_repair_spec = importlib.util.spec_from_file_location(
+        _lyric_repair_name, Path(__file__).resolve().with_name("lyric_repair.py")
+    )
+    _lyric_repair = importlib.util.module_from_spec(_lyric_repair_spec)
+    sys.modules[_lyric_repair_name] = _lyric_repair
+    _lyric_repair_spec.loader.exec_module(_lyric_repair)
 
 
 _terminal_name = "_library_doctor_terminal_beat_repair"
@@ -213,7 +235,7 @@ if _bend is None:
     sys.modules[_bend_name] = _bend
     _bend_spec.loader.exec_module(_bend)
 
-REPAIR_CATALOG_VERSION = "repairs-26"
+REPAIR_CATALOG_VERSION = "repairs-27"
 REPAIR_PLAN_SCHEMA = "library_doctor.repair_plan.v1"
 REVIEWED_PACKAGE_PLAN_SCHEMA = "library_doctor.reviewed_repair_plan.v1"
 REVIEWED_INSPECTION_SCHEMA = "library_doctor.reviewed_repair_inspection.v1"
@@ -287,6 +309,7 @@ _ALL_SAFE_RULE_ORDER = (
     "chart.zero-length-handshape",
     "chart.invalid-handshape-span",
     "lyrics.out-of-order",
+    "lyrics.too-few-line-breaks",
     "timeline.repeated-measure-markers",
     "timeline.terminal-duplicate-beats",
     "timeline.duplicate-beat",
@@ -297,6 +320,7 @@ _ALL_SAFE_RULE_ORDER = (
 )
 
 _CONDITIONAL_STRUCTURAL_RULES = frozenset({
+    "lyrics.too-few-line-breaks",
     "chart.muted-fret-sentinel",
     "chart.bend-time-coordinates",
     "chart.empty-phrases-key",
@@ -5499,7 +5523,15 @@ def _plan_json_document(
     elif definition.rule_code == "chart.bend-points-out-of-order":
         operations = _plan_bend_point_order(document)
     elif definition.rule_code == "lyrics.out-of-order":
-        operations = _plan_lyric_cue_order(document)
+        operations = _lyric_repair.plan_cue_order(
+            document, finite_number=_finite_number, canonical_json=_canonical_json,
+            action_type=StableSortLyricCues, error_type=RepairPlanningError,
+        )
+    elif definition.rule_code == "lyrics.too-few-line-breaks":
+        operations = _lyric_repair.plan_line_breaks(
+            document, assess=_lyric_phrases.assess_lyric_phrases, digest_json=_digest_json,
+            action_type=AddLyricLineBreaks, error_type=RepairPlanningError,
+        )
     elif definition.rule_code == _measure_marker.RULE_CODE:
         operation = _measure_marker.plan_operation(
             document,
@@ -5538,7 +5570,7 @@ def _plan_json_document(
         removed_count = sum(len(operation.remove_indices) for operation in operations)
         if definition.change_kind in {"reorder", "omit_empty"}:
             change_count = len(operations)
-        elif definition.change_kind in {"normalize", "normalize_measure_markers", "normalize_values"}:
+        elif definition.change_kind in {"normalize", "normalize_measure_markers", "normalize_values", "add_line_breaks"}:
             change_count = sum(
                 operation.change_count for operation in operations
                 if hasattr(operation, "change_count")
@@ -6023,50 +6055,6 @@ def _plan_bend_point_order(document: dict) -> list[StableSortBendPoints]:
     return operations
 
 
-def _plan_lyric_cue_order(document: list) -> list[StableSortLyricCues]:
-    parsed_times = [
-        cue.get("t")
-        for cue in document
-        if isinstance(cue, dict) and _finite_number(cue.get("t"))
-    ]
-    if not any(
-        current < previous
-        for previous, current in zip(parsed_times, parsed_times[1:])
-    ):
-        return []
-
-    if not all(
-        isinstance(cue, dict)
-        and _finite_number(cue.get("t"))
-        and _finite_number(cue.get("d"))
-        and isinstance(cue.get("w"), str)
-        for cue in document
-    ):
-        raise RepairPlanningError(
-            "invalid_lyric_timeline",
-            "The out-of-order lyric timeline also contains an invalid cue, so "
-            "Library Doctor will not guess how to reorder it.",
-        )
-
-    sorted_indices = tuple(sorted(
-        range(len(document)), key=lambda index: document[index]["t"]
-    ))
-    moved_count = sum(
-        index != original_index
-        for index, original_index in enumerate(sorted_indices)
-    )
-    if not moved_count:
-        return []
-    sorted_cues = [document[index] for index in sorted_indices]
-    return [StableSortLyricCues(
-        expected_length=len(document),
-        original_sha256=hashlib.sha256(_canonical_json(document)).hexdigest(),
-        sorted_sha256=hashlib.sha256(_canonical_json(sorted_cues)).hexdigest(),
-        sorted_indices=sorted_indices,
-        moved_count=moved_count,
-    )]
-
-
 def _plan_timeline_marker_order(
     document: dict,
     field: str,
@@ -6470,7 +6458,19 @@ def _apply_operation(
         )
         return
     if operation.get("operation") == "stable_sort_lyric_cues":
-        _apply_lyric_cue_sort_operation(document, operation, reordered)
+        _lyric_repair.apply_cue_order(
+            document, operation, reordered, finite_number=_finite_number,
+            integer=_integer, canonical_json=_canonical_json, error_type=RepairPlanningError,
+        )
+        return
+    if operation.get("operation") == "add_lyric_line_breaks":
+        if rule_code != "lyrics.too-few-line-breaks":
+            raise RepairPlanningError("invalid_plan", "The repair operation does not match its rule.")
+        _lyric_repair.apply_line_breaks(
+            document, operation, assess=_lyric_phrases.assess_lyric_phrases,
+            digest_json=_digest_json, canonical_json=_canonical_json,
+            action_type=AddLyricLineBreaks, error_type=RepairPlanningError,
+        )
         return
     if operation.get("operation") == "stable_sort_bend_points":
         _apply_bend_point_sort_operation(document, operation, reordered)
@@ -6945,64 +6945,6 @@ def _apply_bend_point_sort_operation(
     reordered.add(path)
 
 
-def _apply_lyric_cue_sort_operation(
-    document,
-    operation: dict,
-    reordered: set[tuple[str | int, ...]],
-) -> None:
-    if operation.get("array_path") != [] or () in reordered:
-        raise RepairPlanningError("invalid_plan", "The repair preview is invalid.")
-    if (
-        not isinstance(document, list)
-        or operation.get("expected_length") != len(document)
-        or len(document) < 2
-    ):
-        raise RepairPlanningError(
-            "source_changed",
-            "The lyrics changed after this preview. Review the safe fix again before applying it.",
-        )
-    if not all(
-        isinstance(cue, dict)
-        and _finite_number(cue.get("t"))
-        and _finite_number(cue.get("d"))
-        and isinstance(cue.get("w"), str)
-        for cue in document
-    ):
-        raise RepairPlanningError(
-            "source_changed",
-            "The lyrics changed after this preview. Review the safe fix again before applying it.",
-        )
-    original_digest = hashlib.sha256(_canonical_json(document)).hexdigest()
-    if operation.get("original_sha256") != original_digest:
-        raise RepairPlanningError(
-            "source_changed",
-            "The lyrics changed after this preview. Review the safe fix again before applying it.",
-        )
-    sorted_indices = list(sorted(
-        range(len(document)), key=lambda index: document[index]["t"]
-    ))
-    declared_indices = operation.get("sorted_indices")
-    moved_count = sum(
-        index != original_index
-        for index, original_index in enumerate(sorted_indices)
-    )
-    if (
-        not moved_count
-        or not isinstance(declared_indices, list)
-        or any(not _integer(index) for index in declared_indices)
-        or declared_indices != sorted_indices
-        or not _integer(operation.get("moved_count"))
-        or operation["moved_count"] != moved_count
-    ):
-        raise RepairPlanningError("invalid_plan", "The repair preview is invalid.")
-    sorted_cues = [document[index] for index in sorted_indices]
-    sorted_digest = hashlib.sha256(_canonical_json(sorted_cues)).hexdigest()
-    if operation.get("sorted_sha256") != sorted_digest:
-        raise RepairPlanningError("invalid_plan", "The repair preview is invalid.")
-    document[:] = sorted_cues
-    reordered.add(())
-
-
 def _apply_timeline_marker_sort_operation(
     document: dict,
     operation: dict,
@@ -7273,7 +7215,7 @@ def _musical_position_count(
     document,
     operations: list[
         DeleteArrayItems | DeleteNotesMatchingChords | OmitEmptyRootArray
-        | StableSortBendPoints | StableSortLyricCues
+        | StableSortBendPoints | StableSortLyricCues | AddLyricLineBreaks
         | StableSortTimelineMarkers | StableSortTimedEvents
         | DeleteRedundantHandshapes | NormalizeMutedNegativeFrets
         | _measure_marker.NormalizeRepeatedMeasureMarkers
@@ -7317,6 +7259,9 @@ def _musical_position_count(
                 }))
         elif isinstance(operation, StableSortLyricCues):
             positions.add(_canonical_json({"path": [], "timeline": "lyrics"}))
+        elif isinstance(operation, AddLyricLineBreaks):
+            for index in operation.cue_indices:
+                positions.add(_canonical_json({"timeline": "lyrics", "t": document[index]["t"]}))
         elif isinstance(operation, StableSortBendPoints):
             positions.add(_canonical_json({
                 "path": list(operation.array_path[:-1]),
@@ -7515,6 +7460,8 @@ def _summary(
 ) -> str:
     item_label = noun if change_count == 1 else f"{noun}s"
     list_label = "list" if arrays_affected == 1 else "lists"
+    if change_kind == "add_line_breaks":
+        return f"Add {change_count} {item_label}; preserve every word, start time and duration."
     if change_kind == "normalize_values":
         return f"Normalize {change_count} {item_label}; preserve every other stored property."
     if change_kind == "omit_empty":

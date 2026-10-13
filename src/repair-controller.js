@@ -46,6 +46,10 @@ export function createRepairController({
       : [];
     if (restored) {
       const restoredChange = summaries.length === 1 ? summaries[0] : receipt;
+      if (restoredChange.change_kind === 'add_line_breaks') {
+        const added = repairChangeCount(restoredChange);
+        return `Restored the exact original lyric files, undoing ${number(added)} added '+' line-break marker${added === 1 ? '' : 's'}. The missing-line-break finding may return.`;
+      }
       if (restoredChange.change_kind === 'reviewed_decisions') {
         return `Restored the exact original HO/PO/tap fields for ${number(repairChangeCount(restoredChange))} reviewed ${repairChangeCount(restoredChange) === 1 ? 'decision' : 'decisions'}. The related review findings may return.`;
       }
@@ -98,6 +102,9 @@ export function createRepairController({
       return `Applied ${number(count)} explicit reviewed HO/PO ${count === 1 ? 'decision' : 'decisions'}. Note timing, string, fret, and every technique outside HO/PO/tap were preserved.`;
     }
     if (receipt.change_kind === 'omit_empty') {
+      return `${completedRepairChange(receipt)}.`;
+    }
+    if (receipt.change_kind === 'add_line_breaks') {
       return `${completedRepairChange(receipt)}.`;
     }
     if (receipt.change_kind === 'reorder') {
@@ -483,6 +490,8 @@ export function createRepairController({
           : 'Undo will restore the exact original preview saved before conversion. The repaired preview recommendation is expected to return. Every other Feedpak file is preserved.'
         : measureMarkerRepair
         ? `Undo will restore ${number(measureMarkerCount)} original repeated positive measure-marker ${measureMarkerCount === 1 ? 'value' : 'values'}${measureMarkerMembers ? ` across ${number(measureMarkerMembers)} song-data ${measureMarkerMembers === 1 ? 'file' : 'files'}` : ''}. The repeated measure-marker finding is expected to return; every beat timestamp and other Feedpak file is preserved.`
+        : receipt.change_kind === 'add_line_breaks'
+        ? `Undo will restore the exact original lyric files, undoing ${number(repairChangeCount(receipt))} added '+' line-break marker${repairChangeCount(receipt) === 1 ? '' : 's'}. The missing-line-break finding may return. Lyric text, cue timing, and other Feedpak files are preserved.`
         : receipt.rule_code === 'package.all-safe'
         ? 'Undo will restore all original song-data files saved before this combined repair. The repaired safe findings are expected to return. Other package files are preserved.'
         : 'Undo will restore the original song-data files saved before this repair. The repaired finding is expected to return. Other package files are preserved.';
@@ -491,6 +500,8 @@ export function createRepairController({
       message,
       confirmLabel: receipt.change_kind === 'replace_media'
         ? 'Restore original preview'
+        : receipt.change_kind === 'add_line_breaks'
+        ? 'Restore original lyrics'
         : 'Restore original song data',
       confirmClass: 'lh-button lh-button-danger',
       trigger,
@@ -576,8 +587,9 @@ export function createRepairController({
 
   function automaticRepairAllowed(report, ruleCode) {
     const eligibility = report.features?.repair_eligibility?.[ruleCode];
-    // Recognizing a terminal-tail shape is not proof that it is safe to remove.
-    if (ruleCode === 'timeline.terminal-duplicate-beats') {
+    // A warning alone does not prove these edits can be made safely.
+    if (ruleCode === 'timeline.terminal-duplicate-beats'
+      || ruleCode === 'lyrics.too-few-line-breaks') {
       return eligibility !== null && typeof eligibility === 'object'
         && !Array.isArray(eligibility) && eligibility.status === 'automatic';
     }

@@ -121,6 +121,8 @@ export function createPreviewController({
             ? `Remove ${number(plan.removed_count)} repeated beat ${plan.removed_count === 1 ? 'marker' : 'markers'} only from the end of ${number(memberCount)} song-data ${memberCount === 1 ? 'file' : 'files'}. Keep every earlier marker, audio, notes, lyrics and their timing unchanged.`
           : measureMarkerRepair
             ? `Change ${number(repairChangeCount(plan))} repeated positive measure marker${repairChangeCount(plan) === 1 ? '' : 's'} to the sub-beat marker -1 across ${number(memberCount)} song-data ${memberCount === 1 ? 'file' : 'files'}. The first measure marker in each proven run, every beat timestamp, beat order, and every other stored property are kept unchanged.`
+          : plan.change_kind === 'add_line_breaks'
+            ? `Add ${number(repairChangeCount(plan))} '+' lyric line-break marker${repairChangeCount(plan) === 1 ? '' : 's'} across ${number(memberCount)} lyric ${memberCount === 1 ? 'file' : 'files'}. These phrase endings preserve lyric text, cue order, start times, durations, and every other stored property.`
           : plan.change_kind === 'normalize_values'
             ? `Normalize ${number(repairChangeCount(plan))} ${itemName}${repairChangeCount(plan) === 1 ? '' : 's'} across ${number(memberCount)} song-data ${memberCount === 1 ? 'file' : 'files'}. The preview below describes the exact change.`
           : plan.change_kind === 'normalize'
@@ -203,7 +205,7 @@ export function createPreviewController({
           card.appendChild(make(
             'p',
             'lh-repair-warning',
-            `${number(plan.blockers.length)} arrangement file${plan.blockers.length === 1 ? '' : 's'} cannot be changed safely and will be left untouched.`,
+            `${number(plan.blockers.length)} ${plan.change_kind === 'add_line_breaks' ? 'lyric' : 'arrangement'} file${plan.blockers.length === 1 ? '' : 's'} cannot be changed safely and will be left untouched.`,
           ));
         }
         const actions = make('div', 'lh-repair-buttons');

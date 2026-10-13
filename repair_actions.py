@@ -260,6 +260,32 @@ class StableSortLyricCues:
 
 
 @dataclass(frozen=True)
+class AddLyricLineBreaks:
+    expected_length: int
+    original_sha256: str
+    repaired_sha256: str
+    cue_indices: tuple[int, ...]
+
+    @property
+    def remove_indices(self) -> tuple[int, ...]:
+        return ()
+
+    @property
+    def change_count(self) -> int:
+        return len(self.cue_indices)
+
+    def to_dict(self) -> dict:
+        return {
+            "operation": "add_lyric_line_breaks",
+            "array_path": [],
+            "expected_length": self.expected_length,
+            "original_sha256": self.original_sha256,
+            "repaired_sha256": self.repaired_sha256,
+            "cue_indices": list(self.cue_indices),
+        }
+
+
+@dataclass(frozen=True)
 class StableSortTimelineMarkers:
     field: str
     expected_length: int

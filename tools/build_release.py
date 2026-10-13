@@ -29,6 +29,8 @@ ROOT_FILES = (
     "measure_marker_repair.py",
     "muted_fret_repair.py",
     "bend_time_repair.py",
+    "lyric_phrases.py",
+    "lyric_repair.py",
     "terminal_beat_repair.py",
     "terminal_beat_inputs.py",
     "terminal_beat_metadata.py",

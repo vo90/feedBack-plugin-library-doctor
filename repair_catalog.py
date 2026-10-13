@@ -450,6 +450,29 @@ SAFE_REPAIR_DEFINITIONS = (
         change_kind="reorder",
     ),
     RepairDefinition(
+        rule_code="lyrics.too-few-line-breaks",
+        action_kind="add_lyric_line_breaks",
+        source_kind="lyrics",
+        item_name="lyric phrase ending",
+        safety="safe_automatic",
+        title="Add readable lyric phrase endings",
+        description=(
+            "Add '+' line endings to oversized lyric blocks at complete-word "
+            "boundaries using existing pauses and phrase size. Keep every cue, "
+            "start time, duration, word and other property; preserve normal "
+            "authored lines and never cut through an active overlapping cue."
+        ),
+        player_result=(
+            "Lyrics advance in shorter readable phrases at their original times. "
+            "This repair does not correct inaccurate source timing."
+        ),
+        user_value=(
+            "Save readable phrasing into the song for compatible lyric displays, "
+            "with preview, backup and exact Undo."
+        ),
+        change_kind="add_line_breaks",
+    ),
+    RepairDefinition(
         rule_code="timeline.terminal-duplicate-beats",
         action_kind="remove_terminal_duplicate_beats",
         source_kind="timeline",

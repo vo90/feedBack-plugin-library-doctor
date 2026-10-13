@@ -210,7 +210,7 @@ def test_terminal_review_message_is_not_replaced_by_hopo_player_review(
 
 
 def test_validator_version_invalidates_pre_fix_cached_scan_approvals(modules):
-    assert modules[1].VALIDATOR_VERSION.startswith("rules-40:")
+    assert modules[1].VALIDATOR_VERSION.startswith("rules-41:")
     assert modules[1].rule_metadata(RULE)["repairability"] == "manual"
 
 

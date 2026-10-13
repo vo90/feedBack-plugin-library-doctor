@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Add readable lyric phrase endings for tracks with excessive lyric blocks.
+  Save only `+` markers at safe whole-word boundaries, preserving every cue's
+  text, order, time, duration and other properties. Preserve normal authored
+  lines and active overlaps; leave malformed or indivisible blocks for review.
+  Preview reports the added endings, validates the complete candidate, and
+  supports backup and exact Undo for primary and additional lyric tracks.
+
 - Safely remove exact redundant ending markers when every stored grid has the
   same strictly increasing retained prefix, its final pair brackets the song
   end, and closed metadata/reference and event-boundary checks prove the suffix

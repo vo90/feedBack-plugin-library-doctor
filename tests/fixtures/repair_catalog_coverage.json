@@ -15,6 +15,11 @@
     "chart.note-duplicates-chord": ["tests/test_repair.py::test_plans_exact_standalone_notes_that_duplicate_explicit_chord_members"],
     "chart.bend-points-out-of-order": ["tests/test_repair.py::test_bend_repair_stably_orders_every_curve_without_losing_data"],
     "lyrics.out-of-order": ["tests/test_repair.py::test_lyric_repair_stably_orders_cues_without_changing_content"],
+    "lyrics.too-few-line-breaks": [
+      "tests/test_repair.py::test_lyric_phrase_repair_preserves_all_content_except_added_markers",
+      "tests/test_repair.py::test_lyric_phrase_repair_rejects_forged_operations",
+      "tests/test_lyric_phrase_routes.py::test_phrase_routes_preview_apply_validate_and_exact_byte_undo"
+    ],
     "timeline.terminal-duplicate-beats": ["tests/test_terminal_beat_repair.py::test_terminal_transaction_preserves_events_and_undo"],
     "timeline.repeated-measure-markers": ["tests/test_measure_marker_repair.py::test_measure_marker_plan_applies_only_exact_repetitions_and_preserves_data"],
     "timeline.empty-arrangement-tempos-key": ["tests/test_repair.py::test_omits_only_empty_optional_arrangement_keys"],
