@@ -72,11 +72,9 @@ validation before replacing a song.
 
 ## Verification
 
-Draft release candidate: final verification is pending. Before publication,
-replace this paragraph with the checks completed for the tagged revision and
-exact attached ZIP, including the tested FeedBack build. Append the ZIP SHA-256
-to the published release body after building; do not put it in an included
-archive document.
+<!-- Before publication, replace this comment with the checks completed for
+the tagged revision and exact attached ZIP, including the tested FeedBack build
+and ZIP SHA-256. Keep the checksum outside documents included in the ZIP. -->
 
 ## Need help?
 
