@@ -1,6 +1,11 @@
 {
   "schema": "library_doctor.architecture_contract.v1",
   "modules": {
+    "coincident_sustain_repair.py": {
+      "maxLines": 100,
+      "responsibility": "Plan and verify transfer of plain coincident sustains into uniquely identified chord members.",
+      "forbiddenImports": ["repair", "scanner", "fastapi"]
+    },
     "lyric_phrases.py": {
       "maxLines": 300,
       "responsibility": "Assess persistent whole-word lyric phrase boundaries without changing input data or timing.",
@@ -57,7 +62,7 @@
       "forbiddenImports": ["fastapi", "scanner"]
     },
     "repair_catalog.py": {
-      "maxLines": 700,
+      "maxLines": 725,
       "responsibility": "Declare the closed safe and reviewed-media repair allowlists.",
       "forbiddenImports": ["repair", "scanner", "fastapi"]
     },

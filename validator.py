@@ -33,6 +33,7 @@ try:
         assess_lyric_phrase_sources,
         assess_muted_fret_sentinels,
         assess_bend_time_coordinates,
+        assess_coincident_chord_sustains,
         assess_repeated_measure_markers,
         assess_redundant_handshapes,
         complete_json_identity,
@@ -58,6 +59,7 @@ except ModuleNotFoundError:  # Tests and some plugin hosts load files by path.
     assess_muted_fret_sentinels = _eligibility.assess_muted_fret_sentinels
     assess_lyric_phrase_sources = _eligibility.assess_lyric_phrase_sources
     assess_bend_time_coordinates = _eligibility.assess_bend_time_coordinates
+    assess_coincident_chord_sustains = _eligibility.assess_coincident_chord_sustains
     assess_repeated_measure_markers = (
         _eligibility.assess_repeated_measure_markers
     )
@@ -98,7 +100,7 @@ if _lyric_phrases is None:
     _lyric_phrases_spec.loader.exec_module(_lyric_phrases)
 
 SPEC_REVISION = "52548b742f64c2a35052a141976ea1b7889f4b1a"
-VALIDATOR_VERSION = f"rules-42:feedpak-{SPEC_REVISION}"
+VALIDATOR_VERSION = f"rules-43:feedpak-{SPEC_REVISION}"
 SUPPORTED_MAJOR = 1
 SCHEMA_DIR = Path(__file__).resolve().parent / "schemas"
 MAX_TEXT_BYTES = 64 * 1024 * 1024
@@ -159,6 +161,7 @@ _RULE_TITLES = {
     "chart.zero-length-handshape": "Zero-length handshape",
     "chart.empty-phrases-key": "Empty optional phrase ladder",
     "chart.note-duplicates-chord": "Standalone note duplicates a chord",
+    "chart.coincident-chord-sustain": "Sustain stored beside its chord",
     "chart.bend-points-out-of-order": "Bend points out of order",
     "chart.negative-muted-fret": "Negative fret on a string mute",
     "chart.muted-fret-sentinel": "Imported muted-fret sentinel",
@@ -241,6 +244,7 @@ _SAFE_REPAIR_CANDIDATES = {
     "chart.empty-phrases-key",
     "chart.invalid-handshape-span",
     "chart.note-duplicates-chord",
+    "chart.coincident-chord-sustain",
     "chart.bend-points-out-of-order",
     "lyrics.out-of-order",
     "lyrics.too-few-line-breaks",
@@ -264,6 +268,10 @@ _SAFE_REPAIR_CANDIDATES = {
 # evidence for developers; this catalog answers the two questions a player is
 # more likely to have: "what might I notice?" and "why should I fix it?".
 _RULE_EXPERIENCE = {
+    "chart.coincident-chord-sustain": (
+        "A standalone sustain can overlap a note already contained in the chord, producing redundant gems or conflicting hold guidance.",
+        "The same string keeps its exact duration inside the chord. Other strings, chord timing and handshapes are preserved; ambiguous cases need review.",
+    ),
     "chart.duplicate-note": (
         "FeedBack may process or draw the same gem more than once at one position, even though the copies look like a single note.",
         "One intended note remains with the same timing and techniques, removing redundant chart data and preventing duplicate-note behavior.",
@@ -551,7 +559,14 @@ def rule_metadata(code: str, severity: str = "warning", category: str = "validat
     title = _RULE_TITLES.get(code)
     if title is None:
         title = suffix.replace("-", " ").strip().capitalize() or "Validation issue"
-    if code == "chart.note-duplicates-chord":
+    if code == "chart.coincident-chord-sustain":
+        repairability = "safe_candidate"
+        guidance = (
+            "Move the explicit sustain into its unique chord member only when both notes are plain, "
+            "have identical instructions and exact onset, and the chord member has no sustain field. "
+            "Explicit zero, different durations, techniques, additional data or competing attacks require review."
+        )
+    elif code == "chart.note-duplicates-chord":
         repairability = "safe_candidate"
         guidance = (
             "The standalone note exactly repeats a member of the chord. Keep the "
@@ -3483,6 +3498,8 @@ def _validate_arrangement_semantics(
     ).validate()
     if check_fretted:
         for code, assess, description in (
+            ("chart.coincident-chord-sustain", assess_coincident_chord_sustains,
+             "A sustained standalone note shares its exact onset, string and fret with a chord member. Preserve its duration in the chord only when ownership is unambiguous."),
             ("chart.muted-fret-sentinel", assess_muted_fret_sentinels,
              "Fret 127 is an imported mute sentinel, not a playable fret; only exact pitchless mutes with corroborated template uses can be normalized."),
             ("chart.bend-time-coordinates", assess_bend_time_coordinates,

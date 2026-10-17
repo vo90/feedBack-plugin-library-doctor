@@ -297,7 +297,7 @@ contributors, and anyone who wants to inspect the safety boundaries.
 
 ## Safe repairs
 
-The automatic-safe song-data catalog contains 28 rule-specific repair actions.
+The automatic-safe song-data catalog contains 30 rule-specific repair actions.
 The repair allowlist removes exact duplicate standalone notes, members inside
 one chord, complete chord events, anchors, handshapes, beat markers, section
 markers, and drum hits. It can also remove a standalone note that exactly
@@ -313,8 +313,22 @@ complete JSON properties and values match within the same event array or chord.
 For a note that repeats a chord member, the complete chord is preserved and the
 standalone copy is removed only when its time and every stored note property
 match one unambiguous chord member. Root events and each mastery-level event
-list remain separate. Events with different sustain, fret, velocity, technique,
-time span, or other data are never selected automatically.
+list remain separate. That exact-duplicate cleanup never selects events with
+different sustain, fret, velocity, technique, time span, or other data.
+
+The separate `chart.coincident-chord-sustain` repair consolidates a plain
+standalone sustain into its unique chord member at exactly the same onset,
+string and fret, then removes the redundant standalone entry. Only an absent
+chord-member `sus` field can be filled; an explicit zero or different duration
+requires review. A yellow-string hold of 0.442 seconds stays 0.442 seconds on
+that string. Other chord strings and handshapes keep their authored values.
+Competing attacks, incomplete chord shapes, different playing instructions,
+techniques or additional data on the target pair remain unchanged for review.
+All stored difficulty levels are checked, and an ambiguous copy blocks this
+repair for the arrangement. This consolidates existing instructions without
+inferring the chart author's musical intent. Rescan after updating: validator
+`rules-43` replaces cached results so the new finding and eligibility appear.
+
 For bend curves, the existing point timestamps are stable-sorted; every point,
 unknown future property, and the authored order between equal-time points is
 preserved. A curve that also contains an invalid point is blocked rather than

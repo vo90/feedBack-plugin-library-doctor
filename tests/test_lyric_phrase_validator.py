@@ -39,7 +39,7 @@ def test_oversized_valid_track_is_visible_as_an_automatic_scan_candidate(tmp_pat
     assessment = assert_repairability(report, "automatic")
     assert assessment["safe_count"] == 1
     assert assessment["unsafe_count"] == 0
-    assert report["validator_version"].startswith("rules-42:")
+    assert report["validator_version"].startswith("rules-43:")
 
 
 def test_healthy_authored_tracks_and_empty_track_do_not_offer_phrase_repair(tmp_path, validator):

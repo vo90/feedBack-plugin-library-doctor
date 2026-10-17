@@ -20,6 +20,26 @@ RepairDefinition = _actions.RepairDefinition
 
 SAFE_REPAIR_DEFINITIONS = (
     RepairDefinition(
+        rule_code="chart.coincident-chord-sustain",
+        action_kind="consolidate_coincident_chord_sustains",
+        source_kind="arrangement",
+        item_name="coincident sustain",
+        safety="safe_automatic",
+        title="Keep coincident sustains inside their chords",
+        description=(
+            "Move a plain standalone note's positive sustain into its unique same-time chord member "
+            "only when that member has no sustain field and all other playing instructions match. "
+            "Then remove the redundant standalone note. Explicit zero, conflicting durations, "
+            "techniques, additional data and competing attacks require review."
+        ),
+        player_result=(
+            "The same string keeps its exact sustain duration as part of the chord, with one attack. "
+            "Other chord strings and handshapes keep their authored values."
+        ),
+        user_value="The chart has one complete instruction for the sustained chord member, without losing its hold duration.",
+        change_kind="normalize",
+    ),
+    RepairDefinition(
         rule_code="chart.bend-time-coordinates",
         action_kind="normalize_bend_time_coordinates",
         source_kind="arrangement", item_name="bend point time",

@@ -162,6 +162,99 @@ def authored_note_paths(document):
                 yield prefix + ("chords", ci, "notes", ni), note, chord.get("t")
 
 
+def assess_coincident_chord_sustains(document):
+    """Consolidate only a unique plain sustain whose chord duration is absent.
+
+    Exact onsets are essential: a nearby attack is a separate musical event.
+    Explicit zero is authored information, not a missing duration. Techniques,
+    extension fields and competing attacks require review rather than guessing
+    ownership. As with the other fidelity repairs, one ambiguous chart copy
+    blocks this operation for the arrangement, including its difficulty ladder.
+    """
+    changes, affected, problem = [], 0, None
+
+    def finite(value):
+        return type(value) in (int, float) and math.isfinite(value)
+
+    def identity(note, onset):
+        if (isinstance(note, dict) and finite(onset) and onset >= 0
+                and type(note.get("s")) is int and 0 <= note["s"] < 8):
+            return onset, note["s"]
+        return None
+
+    try:
+        for prefix, container in _fidelity_containers(document):
+            notes, chords = container.get("notes", []), container.get("chords", [])
+            if not isinstance(notes, list) or not isinstance(chords, list):
+                raise ValueError("An authored note or chord list is malformed.")
+            attacks, members, chord_counts = {}, {}, {}
+            for ni, note in enumerate(notes):
+                key = identity(note, note.get("t") if isinstance(note, dict) else None)
+                if key is not None:
+                    attacks.setdefault(key, []).append((ni, note))
+            for ci, chord in enumerate(chords):
+                if not isinstance(chord, dict) or not isinstance(chord.get("notes", []), list):
+                    raise ValueError("An authored chord member list is malformed.")
+                if finite(chord.get("t")):
+                    chord_counts[chord["t"]] = chord_counts.get(chord["t"], 0) + 1
+                for mi, member in enumerate(chord.get("notes", [])):
+                    key = identity(member, chord.get("t"))
+                    if key is not None:
+                        members.setdefault(key, []).append((ci, mi, chord, member))
+            for key, standalone in attacks.items():
+                targets = members.get(key, [])
+                for ni, note in standalone:
+                    if (not finite(note.get("sus")) or note["sus"] <= 0
+                            or type(note.get("f")) is not int or not 0 <= note["f"] <= 24):
+                        continue
+                    matching = [target for target in targets if type(target[3].get("f")) is int
+                                and target[3]["f"] == note["f"]]
+                    # Fully identical entries remain the existing exact-duplicate
+                    # rule's responsibility; this rule never broadens its policy.
+                    if not matching or (len(standalone) == len(targets) == 1
+                            and complete_json_identity(note) == complete_json_identity(
+                                {**matching[0][3], "t": key[0]})):
+                        continue
+                    affected += 1
+                    if len(standalone) != 1 or len(targets) != 1 or chord_counts.get(key[0]) != 1:
+                        problem = "More than one attack or chord member uses this string at the same time."
+                        continue
+                    ci, mi, chord, member = matching[0]
+                    chord_members = chord["notes"]
+                    if (len(chord_members) < 2
+                            or any(identity(other, key[0]) is None or type(other.get("f")) is not int
+                                   or not 0 <= other["f"] <= 24 for other in chord_members)
+                            or len({other["s"] for other in chord_members}) != len(chord_members)):
+                        problem = "The coincident chord does not have a complete, valid shape with one note per string."
+                        continue
+                    if "sus" in member:
+                        problem = "The chord member already declares a sustain, including an explicit zero; its duration cannot be replaced automatically."
+                        continue
+                    if (set(note) - {"t", "s", "f", "sus", "fg"}
+                            or set(member) - {"s", "f", "fg"}
+                            or set(chord) - {"t", "id", "hd", "notes"}):
+                        problem = "A coincident note or chord has techniques or additional data whose meaning must be reviewed."
+                        continue
+                    if (type(chord.get("id")) is not int or chord["id"] < 0
+                            or ("hd" in chord and type(chord["hd"]) is not bool)
+                            or ("fg" in note and (type(note["fg"]) is not int or not 0 <= note["fg"] <= 4))
+                            or complete_json_identity({k: v for k, v in note.items() if k not in {"t", "sus"}})
+                            != complete_json_identity(member)):
+                        problem = "The coincident note and chord member do not have identical plain playing instructions."
+                        continue
+                    changes.append({"container_path": list(prefix), "note_index": ni,
+                                    "chord_index": ci, "member_index": mi, "sustain": note["sus"]})
+    except ValueError as exc:
+        problem = str(exc)
+    if not affected:
+        return {"status": "no_defect", "affected_count": 0, "changes": []}
+    if problem:
+        return {"status": "blocked", "affected_count": affected, "changes": [],
+                "blocker_code": "ambiguous_coincident_chord_sustain",
+                "message": problem + " Review the original chart; this arrangement's coincident sustains remain unchanged."}
+    return {"status": "eligible", "affected_count": affected, "changes": changes}
+
+
 def assess_bend_time_coordinates(document):
     """Shift only curves proven incompatible with relative time but inside onset/sustain.
 

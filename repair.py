@@ -44,6 +44,7 @@ assess_redundant_handshapes = _eligibility.assess_redundant_handshapes
 assess_repeated_measure_markers = _eligibility.assess_repeated_measure_markers
 assess_muted_fret_sentinels = _eligibility.assess_muted_fret_sentinels
 assess_bend_time_coordinates = _eligibility.assess_bend_time_coordinates
+assess_coincident_chord_sustains = _eligibility.assess_coincident_chord_sustains
 complete_json_identity = _eligibility.complete_json_identity
 effective_tones_source = _eligibility.effective_tones_source
 repairable_tempo_event = _eligibility.repairable_tempo_event
@@ -235,7 +236,17 @@ if _bend is None:
     sys.modules[_bend_name] = _bend
     _bend_spec.loader.exec_module(_bend)
 
-REPAIR_CATALOG_VERSION = "repairs-27"
+_coincident_name = "_library_doctor_coincident_sustain_repair"
+_coincident = sys.modules.get(_coincident_name)
+if _coincident is None:
+    _coincident_spec = importlib.util.spec_from_file_location(
+        _coincident_name, Path(__file__).resolve().with_name("coincident_sustain_repair.py")
+    )
+    _coincident = importlib.util.module_from_spec(_coincident_spec)
+    sys.modules[_coincident_name] = _coincident
+    _coincident_spec.loader.exec_module(_coincident)
+
+REPAIR_CATALOG_VERSION = "repairs-28"
 REPAIR_PLAN_SCHEMA = "library_doctor.repair_plan.v1"
 REVIEWED_PACKAGE_PLAN_SCHEMA = "library_doctor.reviewed_repair_plan.v1"
 REVIEWED_INSPECTION_SCHEMA = "library_doctor.reviewed_repair_inspection.v1"
@@ -304,6 +315,7 @@ _ALL_SAFE_RULE_ORDER = (
     "chart.duplicate-chord",
     "chart.duplicate-note",
     "chart.note-duplicates-chord",
+    "chart.coincident-chord-sustain",
     "chart.duplicate-anchor",
     "chart.duplicate-handshape",
     "chart.zero-length-handshape",
@@ -320,6 +332,7 @@ _ALL_SAFE_RULE_ORDER = (
 )
 
 _CONDITIONAL_STRUCTURAL_RULES = frozenset({
+    "chart.coincident-chord-sustain",
     "lyrics.too-few-line-breaks",
     "chart.muted-fret-sentinel",
     "chart.bend-time-coordinates",
@@ -5417,7 +5430,13 @@ def _plan_json_document(
 ) -> dict:
     """Plan one rule against an already parsed and structure-checked document."""
 
-    if definition.rule_code == _bend.RULE_CODE:
+    if definition.rule_code == _coincident.RULE_CODE:
+        operation = _coincident.plan_operation(
+            document, assess=assess_coincident_chord_sustains,
+            error_type=RepairPlanningError,
+        )
+        operations = [operation] if operation else []
+    elif definition.rule_code == _bend.RULE_CODE:
         operation = _bend.plan_operation(
             document, assess=assess_bend_time_coordinates,
             error_type=RepairPlanningError,
@@ -6423,6 +6442,14 @@ def _apply_operation(
             allowed_fields=frozenset(reviewed_definition.mutable_fields),
         )
         return
+    if operation.get("operation") == _coincident.OPERATION:
+        if rule_code != _coincident.RULE_CODE:
+            raise RepairPlanningError("invalid_plan", "The repair operation does not match its rule.")
+        _coincident.apply_operation(
+            document, operation, assess=assess_coincident_chord_sustains,
+            error_type=RepairPlanningError,
+        )
+        return
     if operation.get("operation") == _bend.OPERATION:
         if rule_code != _bend.RULE_CODE:
             raise RepairPlanningError("invalid_plan", "The repair operation does not match its rule.")
@@ -7230,7 +7257,11 @@ def _musical_position_count(
 ) -> int:
     positions: set[bytes] = set()
     for operation in operations:
-        if isinstance(operation, _bend.NormalizeBendTimes):
+        if isinstance(operation, _coincident.ConsolidateChordSustains):
+            for path, ni, _ci, _mi, _sustain in operation.changes:
+                note = _value_at_path(document, path + ("notes", ni))
+                positions.add(_canonical_json({"t": note["t"], "s": note["s"]}))
+        elif isinstance(operation, _bend.NormalizeBendTimes):
             for path, _before, _after in operation.changes:
                 positions.add(_canonical_json({"path": path[:-3]}))
         elif isinstance(operation, _muted.NormalizeMutedSentinels):
