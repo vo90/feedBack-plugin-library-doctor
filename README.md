@@ -1,6 +1,6 @@
 # Library Doctor
 
-> **Status: v0.46.0 Public Beta** — Keep the original download or another backup
+> **Status: v0.46.1 Public Beta** — Keep the original download or another backup
 > of any song you would be unhappy to lose.
 
 Library Doctor is a free, open-source plugin that checks your FeedBack song
@@ -13,8 +13,8 @@ The plugin creates recovery data first, checks the repaired song completely,
 and keeps **Undo** available when that repair supports it. If the plugin cannot
 make a trustworthy choice, it explains the problem and leaves the song alone.
 
-[Download v0.46.0 ZIP](https://github.com/vo90/feedBack-plugin-library-doctor/releases/download/v0.46.0/feedBack-plugin-library-doctor-0.46.0.zip)
-· [Release notes](https://github.com/vo90/feedBack-plugin-library-doctor/releases/tag/v0.46.0)
+[Download v0.46.1 ZIP](https://github.com/vo90/feedBack-plugin-library-doctor/releases/download/v0.46.1/feedBack-plugin-library-doctor-0.46.1.zip)
+· [Release notes](https://github.com/vo90/feedBack-plugin-library-doctor/releases/tag/v0.46.1)
 · [Installation](#installation)
 · [Your first scan](#your-first-scan)
 · [Help](#getting-help)
@@ -70,9 +70,9 @@ It deliberately does not:
 
 1. Close FeedBack.
 2. Open the
-   [v0.46.0 Public Beta release](https://github.com/vo90/feedBack-plugin-library-doctor/releases/tag/v0.46.0).
+   [v0.46.1 Public Beta release](https://github.com/vo90/feedBack-plugin-library-doctor/releases/tag/v0.46.1).
 3. Under **Assets**, download
-   <code>feedBack-plugin-library-doctor-0.46.0.zip</code>.
+   <code>feedBack-plugin-library-doctor-0.46.1.zip</code>.
 4. Extract the downloaded ZIP. Do not leave the plugin inside the ZIP file.
 5. Press **Win+R**, enter
    <code>%APPDATA%\feedback-desktop\plugins</code>, and press Enter. Create the
@@ -266,8 +266,12 @@ Library Doctor folder in the plugins directory; two copies use the same plugin
 ID and make it unclear which version FeedBack loaded.
 
 After updating, rescan the affected songs so new findings and current repair
-eligibility replace older saved results. Version 0.46.0 adds lyric phrase repair
-and stricter package-wide eligibility for terminal beat repairs.
+eligibility replace older saved results. Version 0.46.1 detects plain standalone
+sustains that duplicate a chord member at exactly the same time, string, and
+fret. Its repair moves the existing duration onto that member only when its
+sustain is absent, then removes the redundant standalone note. Explicit zero
+durations, conflicting data, techniques, and ambiguous matches remain for review;
+the repair does not guess which other chord notes should sustain.
 
 Replacing or deleting the plugin folder does not automatically delete scan
 history or retained recovery data. Resolve any visible Undo or recovery choices

@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+## 0.46.1 — Public beta (2026-10-17)
+
+- Detect a plain standalone sustain that duplicates a chord member at exactly
+  the same onset, string, and fret. When the member has no sustain field, move
+  the existing duration onto that member and remove only the redundant note.
+  Preserve the other chord members and every unrelated musical value.
+- Check the arrangement and all authored difficulty copies together. Explicit
+  zero durations, conflicting values, techniques, unknown data, and ambiguous
+  matches require review and remain unchanged. The repair does not infer
+  musical intent, suppress legitimate sustains, or add holds to other notes.
+- Include the repair in reviewed Safe Fix and batch workflows, with source
+  checks, complete candidate validation, retained backup, and exact Undo.
+  Rescan after updating to refresh findings and repair eligibility.
+
 ## 0.46.0 — Public beta (2026-10-13)
 
 - Add readable lyric phrase endings for tracks with excessive lyric blocks.
