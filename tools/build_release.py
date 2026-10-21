@@ -30,6 +30,7 @@ ROOT_FILES = (
     "muted_fret_repair.py",
     "bend_time_repair.py",
     "coincident_sustain_repair.py",
+    "handshape_reference_repair.py",
     "lyric_phrases.py",
     "lyric_repair.py",
     "terminal_beat_repair.py",

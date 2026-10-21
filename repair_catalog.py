@@ -20,6 +20,23 @@ RepairDefinition = _actions.RepairDefinition
 
 SAFE_REPAIR_DEFINITIONS = (
     RepairDefinition(
+        rule_code="chart.stale-handshape-reference",
+        action_kind="repair_stale_handshape_references",
+        source_kind="arrangement",
+        item_name="hand-shape reference",
+        safety="safe_automatic",
+        title="Correct stale hand-shape references",
+        description=(
+            "Replace a stale reference to the preceding chord only when a unique complete "
+            "chord at the exact onset and every attack in the interval prove the replacement. "
+            "Check each difficulty independently; skip arpeggios, partial shapes, overlapping "
+            "guides, unsupported data and other ambiguous cases."
+        ),
+        player_result="Hand-position guides follow the proven chord shape without changing any playable note or timing.",
+        user_value="Remove misleading extra hand-position lanes while keeping uncertain authoring choices unchanged.",
+        change_kind="normalize_values",
+    ),
+    RepairDefinition(
         rule_code="chart.coincident-chord-sustain",
         action_kind="consolidate_coincident_chord_sustains",
         source_kind="arrangement",

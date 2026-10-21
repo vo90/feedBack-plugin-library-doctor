@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Automatically correct hand-shape references proven to retain the preceding
+  chord incorrectly. Require complete plain chord evidence throughout the interval and
+  assess the root chart and each difficulty independently. Skip ambiguous
+  shapes and report them separately, so they do not block unrelated safe
+  corrections. Preserve notes, timing, techniques, templates and other assets;
+  validate the complete candidate and retain backup and exact Undo.
+
 ## 0.46.0 — Public beta (2026-10-13)
 
 - Add readable lyric phrase endings for tracks with excessive lyric blocks.

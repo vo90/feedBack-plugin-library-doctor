@@ -1827,3 +1827,276 @@ def assess_redundant_handshapes(document: dict, *, span_kind: str) -> dict:
         "message": message if unsafe_count else "",
         "matches": matches,
     }
+
+
+def assess_handshape_references(document: dict) -> dict:
+    """Find only plain, fully contradicted references left on the prior chord.
+
+    Proof is local to each authored container, never borrowed from the flat
+    chart or a neighbouring difficulty. An exact onset, full explicit chords
+    throughout the half-open span, and the unique preceding old chord must all
+    agree. Partial chords, arpeggios, overlap, additional semantics, and clipped
+    phrase continuations remain unchanged. Independent ambiguous occurrences
+    do not suppress proven changes. Structurally malformed input fails closed.
+    """
+    from bisect import bisect_left
+
+    changes, skipped = [], []
+    inspected_attacks = 0
+
+    def finite(value):
+        return type(value) in (int, float) and math.isfinite(value) and value >= 0
+
+    def skip(path, index, reason):
+        skipped.append({"container_path": path, "handshape_index": index,
+                        "reason_code": reason})
+
+    def result(*, malformed=False):
+        safe = [] if malformed else changes
+        return {"status": "eligible" if safe else "blocked" if skipped or malformed else "no_defect",
+                "eligible": bool(safe), "changes": safe, "safe_count": len(safe),
+                "ambiguous_count": len(skipped), "reported_count": len(safe) + len(skipped),
+                "affected_count": len(safe) + len(skipped), "skipped": skipped,
+                "blocker_code": "malformed_handshape_reference_context" if malformed else None,
+                "message": ("Malformed chart context prevents automatic hand-shape reference repair."
+                            if malformed else "Ambiguous hand-shape references remain unchanged."
+                            if skipped else "")}
+
+    def template_shape(template):
+        if not isinstance(template, dict) or set(template) - {
+            "name", "displayName", "frets", "fingers", "arp", "arpeggio"
+        }:
+            return None
+        if any(template.get(key, False) is not False for key in ("arp", "arpeggio")):
+            return None
+        for key in ("name", "displayName"):
+            if key in template:
+                name = template[key]
+                if not isinstance(name, str) or "arp" in name.lower():
+                    return None
+        frets = template.get("frets")
+        if (not isinstance(frets, list) or not 4 <= len(frets) <= 8
+                or any(type(f) is not int or not -1 <= f <= 24 for f in frets)):
+            return None
+        fingers = template.get("fingers")
+        if "fingers" in template and (
+            not isinstance(fingers, list) or len(fingers) != len(frets)
+            or any(type(f) is not int or not -1 <= f <= 4 for f in fingers)
+        ):
+            return None
+        shape = frozenset((s, f) for s, f in enumerate(frets) if f >= 0)
+        return shape if len(shape) >= 2 else None
+
+    try:
+        containers = list(_fidelity_containers(document))
+        templates = document.get("templates", [])
+        if not isinstance(templates, list):
+            raise ValueError("Malformed templates")
+        if all(container.get("handshapes", []) == [] for _path, container in containers):
+            return result()
+        template_shapes = [template_shape(t) for t in templates]
+        # An alternative template with identical frets can carry a different
+        # authored meaning, including metadata unsupported by this repair.
+        shape_counts = {}
+        for template in templates:
+            if isinstance(template, dict) and isinstance(template.get("frets"), list):
+                frets = template["frets"]
+                if all(isinstance(f, (int, float)) and math.isfinite(f) and f >= -1 for f in frets):
+                    key = frozenset((s, f) for s, f in enumerate(frets) if f >= 0)
+                    shape_counts[key] = shape_counts.get(key, 0) + 1
+
+        def plain_chord(chord, chord_id):
+            if (type(chord_id) is not int or not 0 <= chord_id < len(templates)
+                    or template_shapes[chord_id] is None
+                    or set(chord) - {"t", "id", "notes", "hd"}
+                    or type(chord.get("id")) is not int or chord["id"] != chord_id
+                    or ("hd" in chord and type(chord["hd"]) is not bool)):
+                return False
+            members = chord.get("notes")
+            if not isinstance(members, list) or len(members) != len(template_shapes[chord_id]):
+                return False
+            seen = set()
+            fingers = templates[chord_id].get("fingers")
+            for note in members:
+                if (not isinstance(note, dict) or set(note) - {"s", "f", "fg"}
+                        or type(note.get("s")) is not int or type(note.get("f")) is not int
+                        or (note["s"], note["f"]) not in template_shapes[chord_id]
+                        or note["s"] in seen):
+                    return False
+                seen.add(note["s"])
+                if "fg" in note and (type(note["fg"]) is not int
+                                     or not -1 <= note["fg"] <= 4
+                                     or fingers is None or note["fg"] != fingers[note["s"]]):
+                    return False
+            return True
+
+        # A preceding phrase can use another mastery level and keep a note
+        # ringing into this one. Union its holds only as veto evidence; never
+        # borrow its attacks or template references to justify a replacement.
+        incoming_holds, incoming_links = {}, {}
+        prior_hold_end, prior_link, prior_phrase_end = 0, False, 0
+        for pi, phrase in enumerate(document.get("phrases", [])):
+            start, end = phrase.get("start_time"), phrase.get("end_time")
+            if not finite(start) or not finite(end) or start >= end or start < prior_phrase_end:
+                raise ValueError("Malformed phrase bounds")
+            incoming_holds[pi], incoming_links[pi] = prior_hold_end, prior_link
+            prior_phrase_end = end
+            for level in phrase.get("levels", []):
+                notes, chords = level.get("notes", []), level.get("chords", [])
+                if not isinstance(notes, list) or not isinstance(chords, list):
+                    raise ValueError("Malformed preceding phrase attacks")
+                held_events = []
+                for note in notes:
+                    if not isinstance(note, dict):
+                        raise ValueError("Malformed preceding phrase note")
+                    held_events.append((note.get("t"), note))
+                for chord in chords:
+                    if not isinstance(chord, dict) or not isinstance(chord.get("notes", []), list):
+                        raise ValueError("Malformed preceding phrase chord")
+                    held_events.extend((chord.get("t"), note) for note in chord.get("notes", []))
+                for onset, note in held_events:
+                    if not isinstance(note, dict) or not finite(onset) or not start <= onset < end:
+                        raise ValueError("Malformed preceding phrase event")
+                    sustain = note.get("sus", 0)
+                    if not finite(sustain) or ("ln" in note and type(note["ln"]) is not bool):
+                        raise ValueError("Malformed preceding phrase hold")
+                    prior_hold_end = max(prior_hold_end, onset + sustain)
+                    prior_link = prior_link or note.get("ln") is True
+
+        for path, container in containers:
+            shapes = container.get("handshapes", [])
+            chords = container.get("chords", [])
+            notes = container.get("notes", [])
+            if not all(isinstance(items, list) for items in (shapes, chords, notes)):
+                raise ValueError("Malformed authored arrays")
+            if (any(not isinstance(c, dict) or not finite(c.get("t")) for c in chords)
+                    or any(not isinstance(n, dict) or not finite(n.get("t")) for n in notes)
+                    or any(not isinstance(h, dict) or not finite(h.get("start_time"))
+                           or not finite(h.get("end_time")) for h in shapes)):
+                raise ValueError("Malformed event timing")
+            bounds = None
+            if path:
+                phrase = document["phrases"][path[1]]
+                start, end = phrase.get("start_time"), phrase.get("end_time")
+                if (not finite(start) or not finite(end) or start >= end
+                        or ("difficulty" in container and (
+                            type(container["difficulty"]) is not int or container["difficulty"] < 0))):
+                    raise ValueError("Malformed difficulty context")
+                bounds = (start, end)
+            ordered = sorted(chords, key=lambda c: c["t"])
+            times = [c["t"] for c in ordered]
+            note_times = sorted(n["t"] for n in notes)
+            # A prior ringing note can make the apparent new full chord part
+            # of a larger authored shape. Include chord-member sustains too.
+            holds = []
+            linked_onsets = []
+            for event in notes:
+                if "ln" in event and type(event["ln"]) is not bool:
+                    raise ValueError("Malformed linked-note flag")
+                if event.get("ln") is True:
+                    linked_onsets.append(event["t"])
+                sustain = event.get("sus", 0)
+                if not finite(sustain):
+                    raise ValueError("Malformed sustain")
+                if sustain:
+                    holds.append((event["t"], event["t"] + sustain))
+            for event in ordered:
+                members = event.get("notes", [])
+                if not isinstance(members, list) or any(not isinstance(n, dict) for n in members):
+                    raise ValueError("Malformed chord members")
+                for member in members:
+                    if "ln" in member and type(member["ln"]) is not bool:
+                        raise ValueError("Malformed linked-chord flag")
+                    if member.get("ln") is True:
+                        linked_onsets.append(event["t"])
+                    sustain = member.get("sus", 0)
+                    if not finite(sustain):
+                        raise ValueError("Malformed chord sustain")
+                    if sustain:
+                        holds.append((event["t"], event["t"] + sustain))
+            holds.sort()
+            hold_times, hold_max_ends = [], []
+            for onset, hold_end in holds:
+                hold_times.append(onset)
+                hold_max_ends.append(max(hold_end, hold_max_ends[-1] if hold_max_ends else 0))
+            earliest_link = min(linked_onsets) if linked_onsets else None
+            onset_counts = {}
+            for t in times:
+                onset_counts[t] = onset_counts.get(t, 0) + 1
+            # Prefix maxima detect any earlier overlapping shape without an
+            # unbounded pairwise scan. A following start before this end also
+            # proves overlap; even an otherwise duplicate guide is skipped.
+            span_order = sorted(range(len(shapes)), key=lambda i: shapes[i]["start_time"])
+            overlap = set()
+            max_end = -1
+            for position, hi in enumerate(span_order):
+                h = shapes[hi]
+                if (max_end > h["start_time"] or (
+                    position + 1 < len(span_order)
+                    and shapes[span_order[position + 1]]["start_time"] < h["end_time"]
+                )):
+                    overlap.add(hi)
+                max_end = max(max_end, h["end_time"])
+            for hi, shape in enumerate(shapes):
+                start, end, old = shape["start_time"], shape["end_time"], shape.get("chord_id")
+                left, right = bisect_left(times, start), bisect_left(times, end)
+                inspected_attacks += max(0, right - left)
+                if inspected_attacks > 1_000_000:
+                    raise ValueError("Hand-shape proof work limit exceeded")
+                attacks = ordered[left:right]
+                # Mere absence of a full chord is not a proven reference
+                # conflict: it is common in authored arpeggios/continuations.
+                if not any(type(c.get("id")) is int and c["id"] != old for c in attacks):
+                    continue
+                reason = None
+                if (type(old) is not int or not 0 <= old < len(templates)
+                        or template_shapes[old] is None):
+                    reason = "unsupported_source_template"
+                elif (set(shape) - {"start_time", "end_time", "chord_id", "arp"}
+                      or shape.get("arp", False) is not False or start >= end):
+                    reason = "handshape_semantics_require_review"
+                elif bounds and not (bounds[0] <= start < end <= bounds[1]):
+                    reason = "phrase_continuation_requires_review"
+                elif hi in overlap:
+                    reason = "overlapping_handshapes"
+                elif not attacks or attacks[0]["t"] != start or onset_counts[start] != 1:
+                    reason = "no_unique_exact_onset"
+                target = attacks[0].get("id") if attacks else None
+                if reason is None and (type(target) is not int or not 0 <= target < len(templates)
+                                       or template_shapes[target] is None):
+                    reason = "unsupported_target_template"
+                if reason is None and (target == old or template_shapes[old] & template_shapes[target]):
+                    reason = "source_shape_not_wholly_contradicted"
+                if reason is None and shape_counts.get(template_shapes[target]) != 1:
+                    reason = "nonunique_target_template"
+                if reason is None and any(not plain_chord(c, target) or onset_counts[c["t"]] != 1
+                                          for c in attacks):
+                    reason = "partial_conflicting_or_technique_chord"
+                if reason is None and bisect_left(note_times, start) != bisect_left(note_times, end):
+                    reason = "standalone_attacks_in_span"
+                hold_position = bisect_left(hold_times, start)
+                if reason is None and hold_position and hold_max_ends[hold_position - 1] > start:
+                    reason = "prior_sustain_overlaps_span"
+                # A zero-length authored link can remain held until a later
+                # same-string attack. Do not guess that chain's ownership.
+                if reason is None and earliest_link is not None and earliest_link < start:
+                    reason = "prior_link_requires_review"
+                if reason is None and path and incoming_holds[path[1]] > start:
+                    reason = "incoming_phrase_sustain_requires_review"
+                if reason is None and path and incoming_links[path[1]]:
+                    reason = "incoming_phrase_link_requires_review"
+                if reason is None and (left == 0 or onset_counts[times[left - 1]] != 1
+                                       or not plain_chord(ordered[left - 1], old)):
+                    reason = "no_unique_previous_shape_evidence"
+                if reason:
+                    skip(path, hi, reason)
+                    continue
+                changes.append({"container_path": path, "handshape_index": hi,
+                                "original_chord_id": old, "target_chord_id": target})
+    except (ValueError, TypeError, KeyError, IndexError, OverflowError):
+        # Existing malformed-input findings describe the source. No earlier
+        # candidate may escape a later malformed authored container.
+        for change in changes:
+            skip(change["container_path"], change["handshape_index"], "malformed_chart_context")
+        return result(malformed=True)
+    return result()

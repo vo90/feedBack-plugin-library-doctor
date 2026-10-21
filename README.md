@@ -411,6 +411,18 @@ list. The chord and all playable notes remain unchanged. An unmatched handshape,
 an ambiguous chord match, an arpeggio marker, or future authoring data blocks the
 repair for that arrangement file instead of being guessed at.
 
+Stale hand-shape references have a separate automatic repair. A shape must
+retain the preceding chord's reference while an unambiguous, complete plain
+chord at the exact onset and the attacks throughout its interval prove a
+different replacement. Each stored difficulty is assessed independently;
+the repair never copies a harder difficulty's shape onto an easier one.
+Only the proven `chord_id` values change. Playable notes, timing, techniques,
+anchors, templates and other properties stay intact. Arpeggios, partial chords,
+overlapping guides, unsupported authoring data and unmatched phrase
+continuations are skipped and reported as needing review. A skipped shape
+does not prevent independent eligible shapes from being repaired. Preview,
+complete-candidate validation, source-change checks, backup and Undo apply.
+
 Reversed-duration handshapes use an even narrower form of the same safeguard.
 Library Doctor removes one only when its start is valid and non-negative, its
 end is strictly earlier, it contains no additional authoring data, its template

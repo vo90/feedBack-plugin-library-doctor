@@ -23,6 +23,7 @@ def test_backend_module_ownership_and_size_boundaries_are_explicit():
 
     assert contract["schema"] == "library_doctor.architecture_contract.v1"
     assert set(contract["modules"]) == {
+        "handshape_reference_repair.py",
         "coincident_sustain_repair.py",
         "lyric_phrases.py",
         "lyric_repair.py",
@@ -76,6 +77,7 @@ def test_extracted_backend_boundaries_remain_wired_through_stable_seams():
     assert "RepairDefinition = _actions.RepairDefinition" in repair
     assert 'with_name("measure_marker_repair.py")' in repair
     assert "_measure_marker.apply_operation" in repair
+    assert 'with_name("handshape_reference_repair.py")' in repair
     assert 'with_name("repair_catalog.py")' in repair
     assert "_REPAIR_DEFINITIONS = _catalog.SAFE_REPAIR_DEFINITIONS" in repair
     assert 'with_name("repair_workspace.py")' in repair

@@ -34,6 +34,7 @@ try:
         assess_muted_fret_sentinels,
         assess_bend_time_coordinates,
         assess_coincident_chord_sustains,
+        assess_handshape_references,
         assess_repeated_measure_markers,
         assess_redundant_handshapes,
         complete_json_identity,
@@ -60,6 +61,7 @@ except ModuleNotFoundError:  # Tests and some plugin hosts load files by path.
     assess_lyric_phrase_sources = _eligibility.assess_lyric_phrase_sources
     assess_bend_time_coordinates = _eligibility.assess_bend_time_coordinates
     assess_coincident_chord_sustains = _eligibility.assess_coincident_chord_sustains
+    assess_handshape_references = _eligibility.assess_handshape_references
     assess_repeated_measure_markers = (
         _eligibility.assess_repeated_measure_markers
     )
@@ -100,7 +102,7 @@ if _lyric_phrases is None:
     _lyric_phrases_spec.loader.exec_module(_lyric_phrases)
 
 SPEC_REVISION = "52548b742f64c2a35052a141976ea1b7889f4b1a"
-VALIDATOR_VERSION = f"rules-43:feedpak-{SPEC_REVISION}"
+VALIDATOR_VERSION = f"rules-44:feedpak-{SPEC_REVISION}"
 SUPPORTED_MAJOR = 1
 SCHEMA_DIR = Path(__file__).resolve().parent / "schemas"
 MAX_TEXT_BYTES = 64 * 1024 * 1024
@@ -153,6 +155,8 @@ _KEYBOARD_HINT_RE = re.compile(
 )
 
 _RULE_TITLES = {
+    "chart.stale-handshape-reference": "Hand shape references the preceding chord",
+    "chart.ambiguous-handshape-reference": "Hand-shape reference needs review",
     "chart.duplicate-note": "Identical duplicate note",
     "chart.duplicate-chord-note": "Identical duplicate chord note",
     "chart.duplicate-chord": "Identical duplicate chord",
@@ -232,6 +236,7 @@ _RULE_AREAS = {
 }
 
 _SAFE_REPAIR_CANDIDATES = {
+    "chart.stale-handshape-reference",
     "chart.negative-muted-fret",
     "chart.muted-fret-sentinel",
     "chart.bend-time-coordinates",
@@ -268,6 +273,14 @@ _SAFE_REPAIR_CANDIDATES = {
 # evidence for developers; this catalog answers the two questions a player is
 # more likely to have: "what might I notice?" and "why should I fix it?".
 _RULE_EXPERIENCE = {
+    "chart.stale-handshape-reference": (
+        "An outdated chord-shape reference can draw an extra hand-position lane beside the notes.",
+        "Correct the proven reference while preserving notes, timing, techniques and each difficulty. Ambiguous shapes remain unchanged.",
+    ),
+    "chart.ambiguous-handshape-reference": (
+        "Hand-position guidance may disagree with the visible chord, or describe a broader grip used by partial or picked notes.",
+        "Inspect the intended shape before changing it. Automatic repair leaves this case unchanged.",
+    ),
     "chart.coincident-chord-sustain": (
         "A standalone sustain can overlap a note already contained in the chord, producing redundant gems or conflicting hold guidance.",
         "The same string keeps its exact duration inside the chord. Other strings, chord timing and handshapes are preserved; ambiguous cases need review.",
@@ -559,7 +572,17 @@ def rule_metadata(code: str, severity: str = "warning", category: str = "validat
     title = _RULE_TITLES.get(code)
     if title is None:
         title = suffix.replace("-", " ").strip().capitalize() or "Validation issue"
-    if code == "chart.coincident-chord-sustain":
+    if code == "chart.stale-handshape-reference":
+        repairability = "safe_candidate"
+        guidance = (
+            "Correct only a proven stale reference to the preceding chord, using exact onsets "
+            "and complete plain chord evidence throughout the interval in the same difficulty. "
+            "Ambiguous references are reported separately and skipped."
+        )
+    elif code == "chart.ambiguous-handshape-reference":
+        repairability = "review_required"
+        guidance = "Review the intended hand shape; partial chords, arpeggios, phrase continuations and conflicting evidence are not changed automatically."
+    elif code == "chart.coincident-chord-sustain":
         repairability = "safe_candidate"
         guidance = (
             "Move the explicit sustain into its unique chord member only when both notes are plain, "
@@ -735,7 +758,7 @@ def rule_metadata(code: str, severity: str = "warning", category: str = "validat
     return {
         "title": title,
         "area": area,
-        "confidence": "high" if prefix != "review" else "medium",
+        "confidence": "medium" if prefix == "review" or code == "chart.ambiguous-handshape-reference" else "high",
         "repairability": repairability,
         "guidance": guidance,
         "player_impact": player_impact,
@@ -3497,6 +3520,26 @@ def _validate_arrangement_semantics(
         check_fretted=check_fretted,
     ).validate()
     if check_fretted:
+        handshape_assessment = assess_handshape_references(data)
+        if handshape_assessment["safe_count"]:
+            findings.add(
+                "warning", "chart.stale-handshape-reference",
+                "Hand-shape references retain the preceding chord even though complete chord evidence proves a different shape throughout the interval.",
+                location=relpath, arrangement_id=arrangement_id,
+                affected_count=handshape_assessment["safe_count"],
+            )
+            automatic, reason_code, message = _ordinary_json_eligibility(relpath)
+            _merge_structural_repair_eligibility(
+                repair_eligibility, "chart.stale-handshape-reference", automatic=automatic,
+                reason_code=reason_code, message=message,
+            )
+        if handshape_assessment["ambiguous_count"]:
+            findings.add(
+                "warning", "chart.ambiguous-handshape-reference",
+                "Hand-shape references differ from the chord evidence, but the intended replacement is ambiguous. These shapes are left unchanged.",
+                location=relpath, arrangement_id=arrangement_id,
+                affected_count=handshape_assessment["ambiguous_count"],
+            )
         for code, assess, description in (
             ("chart.coincident-chord-sustain", assess_coincident_chord_sustains,
              "A sustained standalone note shares its exact onset, string and fret with a chord member. Preserve its duration in the chord only when ownership is unambiguous."),

@@ -23,6 +23,7 @@ def test_release_zip_is_deterministic_allowlisted_and_installable(tmp_path):
         assert f"{build_release.ARCHIVE_ROOT}/plugin.json" in names
         assert f"{build_release.ARCHIVE_ROOT}/library_doctor_repair_policy.py" in names
         assert f"{build_release.ARCHIVE_ROOT}/repair_preparation.py" in names
+        assert f"{build_release.ARCHIVE_ROOT}/handshape_reference_repair.py" in names
         assert f"{build_release.ARCHIVE_ROOT}/lyric_phrases.py" in names
         assert f"{build_release.ARCHIVE_ROOT}/lyric_repair.py" in names
         assert f"{build_release.ARCHIVE_ROOT}/terminal_beat_inputs.py" in names

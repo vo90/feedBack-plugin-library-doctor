@@ -1,6 +1,10 @@
 {
   "schema": "library_doctor.repair_test_coverage.v1",
   "rules": {
+    "chart.stale-handshape-reference": [
+      "tests/test_handshape_reference_repair_service.py::test_plan_changes_only_proven_references_in_every_difficulty",
+      "tests/test_handshape_reference_repair_service.py::test_mixed_transaction_and_undo_preserve_notes_levels_and_media"
+    ],
     "chart.coincident-chord-sustain": [
       "tests/test_coincident_sustain_repair.py::test_consolidates_real_yellow_shape_in_root_and_difficulty_without_changing_other_strings",
       "tests/test_coincident_sustain_repair.py::test_transaction_backup_undo_and_fix_all_preserve_unrelated_bytes"

@@ -45,6 +45,7 @@ assess_repeated_measure_markers = _eligibility.assess_repeated_measure_markers
 assess_muted_fret_sentinels = _eligibility.assess_muted_fret_sentinels
 assess_bend_time_coordinates = _eligibility.assess_bend_time_coordinates
 assess_coincident_chord_sustains = _eligibility.assess_coincident_chord_sustains
+assess_handshape_references = _eligibility.assess_handshape_references
 complete_json_identity = _eligibility.complete_json_identity
 effective_tones_source = _eligibility.effective_tones_source
 repairable_tempo_event = _eligibility.repairable_tempo_event
@@ -246,7 +247,17 @@ if _coincident is None:
     sys.modules[_coincident_name] = _coincident
     _coincident_spec.loader.exec_module(_coincident)
 
-REPAIR_CATALOG_VERSION = "repairs-28"
+_handshape_name = "_library_doctor_handshape_reference_repair"
+_handshape = sys.modules.get(_handshape_name)
+if _handshape is None:
+    _handshape_spec = importlib.util.spec_from_file_location(
+        _handshape_name, Path(__file__).resolve().with_name("handshape_reference_repair.py")
+    )
+    _handshape = importlib.util.module_from_spec(_handshape_spec)
+    sys.modules[_handshape_name] = _handshape
+    _handshape_spec.loader.exec_module(_handshape)
+
+REPAIR_CATALOG_VERSION = "repairs-29"
 REPAIR_PLAN_SCHEMA = "library_doctor.repair_plan.v1"
 REVIEWED_PACKAGE_PLAN_SCHEMA = "library_doctor.reviewed_repair_plan.v1"
 REVIEWED_INSPECTION_SCHEMA = "library_doctor.reviewed_repair_inspection.v1"
@@ -320,6 +331,7 @@ _ALL_SAFE_RULE_ORDER = (
     "chart.duplicate-handshape",
     "chart.zero-length-handshape",
     "chart.invalid-handshape-span",
+    "chart.stale-handshape-reference",
     "lyrics.out-of-order",
     "lyrics.too-few-line-breaks",
     "timeline.repeated-measure-markers",
@@ -332,6 +344,7 @@ _ALL_SAFE_RULE_ORDER = (
 )
 
 _CONDITIONAL_STRUCTURAL_RULES = frozenset({
+    "chart.stale-handshape-reference",
     "chart.coincident-chord-sustain",
     "lyrics.too-few-line-breaks",
     "chart.muted-fret-sentinel",
@@ -5430,7 +5443,13 @@ def _plan_json_document(
 ) -> dict:
     """Plan one rule against an already parsed and structure-checked document."""
 
-    if definition.rule_code == _coincident.RULE_CODE:
+    if definition.rule_code == _handshape.RULE_CODE:
+        operation = _handshape.plan_operation(
+            document, assess=assess_handshape_references,
+            error_type=RepairPlanningError,
+        )
+        operations = [operation] if operation else []
+    elif definition.rule_code == _coincident.RULE_CODE:
         operation = _coincident.plan_operation(
             document, assess=assess_coincident_chord_sustains,
             error_type=RepairPlanningError,
@@ -6442,6 +6461,14 @@ def _apply_operation(
             allowed_fields=frozenset(reviewed_definition.mutable_fields),
         )
         return
+    if operation.get("operation") == _handshape.OPERATION:
+        if rule_code != _handshape.RULE_CODE:
+            raise RepairPlanningError("invalid_plan", "The repair operation does not match its rule.")
+        _handshape.apply_operation(
+            document, operation, assess=assess_handshape_references,
+            error_type=RepairPlanningError,
+        )
+        return
     if operation.get("operation") == _coincident.OPERATION:
         if rule_code != _coincident.RULE_CODE:
             raise RepairPlanningError("invalid_plan", "The repair operation does not match its rule.")
@@ -7257,7 +7284,11 @@ def _musical_position_count(
 ) -> int:
     positions: set[bytes] = set()
     for operation in operations:
-        if isinstance(operation, _coincident.ConsolidateChordSustains):
+        if isinstance(operation, _handshape.RepairHandshapeReferences):
+            for path, index, _before, _after in operation.changes:
+                shape = _value_at_path(document, path + ("handshapes", index))
+                positions.add(_canonical_json({"start": shape["start_time"], "end": shape["end_time"]}))
+        elif isinstance(operation, _coincident.ConsolidateChordSustains):
             for path, ni, _ci, _mi, _sustain in operation.changes:
                 note = _value_at_path(document, path + ("notes", ni))
                 positions.add(_canonical_json({"t": note["t"], "s": note["s"]}))

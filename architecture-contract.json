@@ -1,6 +1,11 @@
 {
   "schema": "library_doctor.architecture_contract.v1",
   "modules": {
+    "handshape_reference_repair.py": {
+      "maxLines": 120,
+      "responsibility": "Plan and verify source-bound hand-shape reference changes while preserving ambiguous shapes and all playable events.",
+      "forbiddenImports": ["repair", "scanner", "fastapi"]
+    },
     "coincident_sustain_repair.py": {
       "maxLines": 100,
       "responsibility": "Plan and verify transfer of plain coincident sustains into uniquely identified chord members.",
@@ -57,12 +62,12 @@
       "forbiddenImports": ["scanner", "validator", "repair", "fastapi"]
     },
     "repair.py": {
-      "maxLines": 7550,
+      "maxLines": 7600,
       "responsibility": "Plan, validate, commit, recover, and audit package mutations.",
       "forbiddenImports": ["fastapi", "scanner"]
     },
     "repair_catalog.py": {
-      "maxLines": 725,
+      "maxLines": 750,
       "responsibility": "Declare the closed safe and reviewed-media repair allowlists.",
       "forbiddenImports": ["repair", "scanner", "fastapi"]
     },
